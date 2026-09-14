@@ -1,0 +1,255 @@
+{{- if .Values.plugins.networkScan.enabled }}
+{{- $scanNs := include "testbench.scanNamespace" . }}
+{{- if and .Values.plugins.networkScan.worker.createNamespace (ne $scanNs .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $scanNs }}
+  labels: {pod-security.kubernetes.io/enforce: restricted, app.kubernetes.io/managed-by: {{ .Release.Service }}}
+---
+{{- end }}
+{{- end }}
+{{- if .Values.plugins.reboot.enabled }}
+{{- $rebootNs := include "testbench.rebootNamespace" . }}
+{{- $aiUrl := required "plugins.reboot.ai.url is required" .Values.plugins.reboot.ai.url }}
+{{- $aiModel := required "plugins.reboot.ai.model is required" .Values.plugins.reboot.ai.model }}
+{{- if and .Values.plugins.reboot.worker.createNamespace (ne $rebootNs .Release.Namespace) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $rebootNs }}
+  labels: {pod-security.kubernetes.io/enforce: restricted, app.kubernetes.io/managed-by: {{ .Release.Service }}}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "testbench.fullname" . }}-reboot-controller, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "testbench.fullname" . }}-reboot-worker, namespace: {{ $rebootNs }}}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: {{ include "testbench.fullname" . }}-reboot-controller, namespace: {{ $rebootNs }}}
+rules:
+  - {apiGroups: ["batch"], resources: ["jobs"], verbs: ["create", "get", "list", "watch", "delete"]}
+  - {apiGroups: ["batch"], resources: ["jobs/status"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["secrets"], verbs: ["create", "delete"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: {{ include "testbench.fullname" . }}-reboot-controller, namespace: {{ $rebootNs }}}
+subjects: [{kind: ServiceAccount, name: {{ include "testbench.fullname" . }}-reboot-controller, namespace: {{ .Release.Namespace }} }]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "testbench.fullname" . }}-reboot-controller}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "testbench.fullname" . }}-reboot, namespace: {{ .Release.Namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: testbench-reboot, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: {{ include "testbench.fullname" . }}-reboot, namespace: {{ .Release.Namespace }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: testbench-reboot, app.kubernetes.io/instance: {{ .Release.Name }}}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: testbench-reboot, app.kubernetes.io/instance: {{ .Release.Name }}}}
+    spec:
+      serviceAccountName: {{ include "testbench.fullname" . }}-reboot-controller
+      imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      containers:
+        - name: controller
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.reboot.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.reboot.image) }}
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: TB_TESTBENCH_URL, value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_REBOOT_WORKER_NAMESPACE, value: {{ $rebootNs | quote }}}
+            - {name: TB_REBOOT_WORKER_SERVICE_ACCOUNT, value: {{ printf "%s-reboot-worker" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_REBOOT_WORKER_IMAGE_PULL_SECRETS, value: {{ include "testbench.imagePullSecretNames" (dict "global" .Values.global.imagePullSecrets "local" .Values.plugins.reboot.worker.imagePullSecrets) | quote }}}
+            - {name: TB_REBOOT_PLUGIN_IMAGE, value: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.reboot.image) | quote }}}
+            - {name: TB_REBOOT_PLUGIN_IMAGE_PULL_POLICY, value: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.reboot.image) | quote }}}
+            - {name: TB_REBOOT_RESEARCH_IMAGE, value: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.reboot.researchImage) | quote }}}
+            - {name: TB_REBOOT_RESEARCH_IMAGE_PULL_POLICY, value: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.reboot.researchImage) | quote }}}
+            - {name: TB_REBOOT_METHOD, value: {{ .Values.plugins.reboot.method | quote }}}
+            - {name: TB_REBOOT_SSH_COMMAND, value: {{ .Values.plugins.reboot.sshCommand | quote }}}
+            - {name: TB_REBOOT_SSH_PORT, value: {{ .Values.plugins.reboot.sshPort | quote }}}
+            - {name: TB_REBOOT_PROMPT, value: {{ .Values.plugins.reboot.prompt | quote }}}
+            - {name: TB_REBOOT_CAPTURE_IMAGES, value: {{ .Values.plugins.reboot.captureImages | quote }}}
+            - {name: TB_REBOOT_AI_SECRET_NAME, value: {{ required "plugins.reboot.ai.existingSecret is required" .Values.plugins.reboot.ai.existingSecret | quote }}}
+            - {name: TB_REBOOT_AI_SECRET_KEY, value: {{ required "plugins.reboot.ai.apiKeySecretKey is required" .Values.plugins.reboot.ai.apiKeySecretKey | quote }}}
+            - {name: TB_REBOOT_AI_URL, value: {{ $aiUrl | quote }}}
+            - {name: TB_REBOOT_AI_MODEL, value: {{ $aiModel | quote }}}
+            - {name: TB_REBOOT_RECOVERY_TIMEOUT_SECONDS, value: {{ .Values.plugins.reboot.recoveryTimeoutSeconds | quote }}}
+            - {name: TB_REBOOT_MAX_CONCURRENT_PODS, value: {{ .Values.plugins.reboot.maxConcurrentPods | quote }}}
+            - {name: TB_REBOOT_TTL_SECONDS, value: {{ .Values.plugins.reboot.worker.ttlSecondsAfterFinished | quote }}}
+            - {name: TB_REBOOT_DEADLINE_SECONDS, value: {{ .Values.plugins.reboot.worker.activeDeadlineSeconds | quote }}}
+            - name: TB_PLUGIN_SHARED_SECRET
+              valueFrom: {secretKeyRef: {name: {{ required "plugins.sharedSecret.existingSecret is required" .Values.plugins.sharedSecret.existingSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
+          readinessProbe: {httpGet: {path: /plugin/v1/health, port: http}, periodSeconds: 10}
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, capabilities: {drop: ["ALL"]}}
+{{- end }}
+{{- if .Values.plugins.networkScan.enabled }}
+{{- $scanNs := include "testbench.scanNamespace" . }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "testbench.fullname" . }}-network-scan-controller, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "testbench.fullname" . }}-network-scan-worker, namespace: {{ $scanNs }}}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: {{ include "testbench.fullname" . }}-network-scan-controller, namespace: {{ $scanNs }}}
+rules:
+  - {apiGroups: ["batch"], resources: ["jobs"], verbs: ["create", "get", "list", "watch", "delete"]}
+  - {apiGroups: ["batch"], resources: ["jobs/status"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["secrets"], verbs: ["create", "delete"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: {{ include "testbench.fullname" . }}-network-scan-controller, namespace: {{ $scanNs }}}
+subjects: [{kind: ServiceAccount, name: {{ include "testbench.fullname" . }}-network-scan-controller, namespace: {{ .Release.Namespace }} }]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "testbench.fullname" . }}-network-scan-controller}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "testbench.fullname" . }}-network-scan, namespace: {{ .Release.Namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: testbench-network-scan, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: testbench-network-scan, namespace: {{ .Release.Namespace }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: testbench-network-scan, app.kubernetes.io/instance: {{ .Release.Name }}}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: testbench-network-scan, app.kubernetes.io/instance: {{ .Release.Name }}}}
+    spec:
+      serviceAccountName: {{ include "testbench.fullname" . }}-network-scan-controller
+      imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      containers:
+        - name: controller
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.networkScan.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.networkScan.image) }}
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: TB_TESTBENCH_URL, value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_SCAN_WORKER_NAMESPACE, value: {{ $scanNs | quote }}}
+            - {name: TB_SCAN_CONTROLLER_URL, value: {{ printf "http://%s-network-scan.%s.svc:8080" (include "testbench.fullname" .) .Release.Namespace | quote }}}
+            - {name: TB_SCAN_WORKER_SERVICE_ACCOUNT, value: {{ printf "%s-network-scan-worker" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_SCAN_WORKER_IMAGE_PULL_SECRETS, value: {{ include "testbench.imagePullSecretNames" (dict "global" .Values.global.imagePullSecrets "local" .Values.plugins.networkScan.worker.imagePullSecrets) | quote }}}
+            - {name: TB_SCAN_WORKER_IMAGE, value: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.networkScan.image) | quote }}}
+            - {name: TB_SCAN_WORKER_IMAGE_PULL_POLICY, value: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.networkScan.image) | quote }}}
+            - {name: TB_SCAN_TIMEOUT_SECONDS, value: {{ .Values.plugins.networkScan.timeoutSeconds | quote }}}
+            - {name: TB_SCAN_CONCURRENCY, value: {{ .Values.plugins.networkScan.concurrency | quote }}}
+            - {name: TB_SCAN_MAX_CONCURRENT_PODS, value: {{ .Values.plugins.networkScan.maxConcurrentPods | quote }}}
+            - {name: TB_SCAN_INTERVAL_MINUTES, value: {{ .Values.plugins.networkScan.intervalMinutes | quote }}}
+            - {name: TB_SCAN_TTL_SECONDS, value: {{ .Values.plugins.networkScan.worker.ttlSecondsAfterFinished | quote }}}
+            - {name: TB_SCAN_DEADLINE_SECONDS, value: {{ .Values.plugins.networkScan.worker.activeDeadlineSeconds | quote }}}
+            - name: TB_PLUGIN_SHARED_SECRET
+              valueFrom: {secretKeyRef: {name: {{ required "plugins.sharedSecret.existingSecret is required" .Values.plugins.sharedSecret.existingSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
+          readinessProbe: {httpGet: {path: /plugin/v1/health, port: http}, periodSeconds: 10}
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, capabilities: {drop: ["ALL"]}}
+{{- end }}
+{{- if .Values.plugins.deviceInfo.enabled }}
+{{- $infoNs := include "testbench.researchNamespace" . }}
+{{- $aiUrl := required "plugins.deviceInfo.ai.url is required" .Values.plugins.deviceInfo.ai.url }}
+{{- $aiModel := required "plugins.deviceInfo.ai.model is required" .Values.plugins.deviceInfo.ai.model }}
+{{- $aiRepeatModel := default $aiModel .Values.plugins.deviceInfo.ai.repeatModel }}
+{{- if and .Values.plugins.deviceInfo.research.createNamespace (ne $infoNs .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $infoNs }}
+  labels: {pod-security.kubernetes.io/enforce: restricted, app.kubernetes.io/managed-by: {{ .Release.Service }}}
+---
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "testbench.fullname" . }}-device-info-controller, namespace: {{ .Release.Namespace }}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: {{ include "testbench.fullname" . }}-device-info-research, namespace: {{ $infoNs }}}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: {{ include "testbench.fullname" . }}-device-info-controller, namespace: {{ $infoNs }}}
+rules:
+  - {apiGroups: ["batch"], resources: ["jobs"], verbs: ["create", "get", "list", "watch", "delete"]}
+  - {apiGroups: ["batch"], resources: ["jobs/status"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+  - {apiGroups: [""], resources: ["secrets"], verbs: ["create", "delete"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: {{ include "testbench.fullname" . }}-device-info-controller, namespace: {{ $infoNs }}}
+subjects: [{kind: ServiceAccount, name: {{ include "testbench.fullname" . }}-device-info-controller, namespace: {{ .Release.Namespace }} }]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "testbench.fullname" . }}-device-info-controller}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: {{ include "testbench.fullname" . }}-device-info, namespace: {{ .Release.Namespace }}}
+spec:
+  selector: {app.kubernetes.io/name: testbench-device-info, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: testbench-device-info, namespace: {{ .Release.Namespace }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: testbench-device-info, app.kubernetes.io/instance: {{ .Release.Name }}}}
+  template:
+    metadata: {labels: {app.kubernetes.io/name: testbench-device-info, app.kubernetes.io/instance: {{ .Release.Name }}}}
+    spec:
+      serviceAccountName: {{ include "testbench.fullname" . }}-device-info-controller
+      imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      containers:
+        - name: controller
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.deviceInfo.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.deviceInfo.image) }}
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: TB_TESTBENCH_URL, value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_INFO_WORKER_NAMESPACE, value: {{ $infoNs | quote }}}
+            - {name: TB_INFO_WORKER_SERVICE_ACCOUNT, value: {{ printf "%s-device-info-research" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_INFO_WORKER_IMAGE_PULL_SECRETS, value: {{ include "testbench.imagePullSecretNames" (dict "global" .Values.global.imagePullSecrets "local" .Values.plugins.deviceInfo.research.imagePullSecrets) | quote }}}
+            - {name: TB_INFO_RESEARCH_IMAGE, value: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.deviceInfo.researchImage) | quote }}}
+            - {name: TB_INFO_RESEARCH_IMAGE_PULL_POLICY, value: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.deviceInfo.researchImage) | quote }}}
+            - {name: TB_INFO_PROMPT, value: {{ .Values.plugins.deviceInfo.prompt | quote }}}
+            - {name: TB_INFO_HTTP_PORT, value: {{ .Values.plugins.deviceInfo.httpPort | quote }}}
+            - {name: TB_INFO_HTTPS_PORT, value: {{ .Values.plugins.deviceInfo.httpsPort | quote }}}
+            - {name: TB_INFO_CAPTURE_IMAGES, value: {{ .Values.plugins.deviceInfo.captureImages | quote }}}
+            - {name: TB_INFO_AI_SECRET_NAME, value: {{ required "plugins.deviceInfo.ai.existingSecret is required" .Values.plugins.deviceInfo.ai.existingSecret | quote }}}
+            - {name: TB_INFO_AI_SECRET_KEY, value: {{ required "plugins.deviceInfo.ai.apiKeySecretKey is required" .Values.plugins.deviceInfo.ai.apiKeySecretKey | quote }}}
+            - {name: TB_INFO_AI_URL, value: {{ $aiUrl | quote }}}
+            - {name: TB_INFO_AI_MODEL, value: {{ $aiModel | quote }}}
+            - {name: TB_INFO_AI_REPEAT_MODEL, value: {{ $aiRepeatModel | quote }}}
+            - {name: TB_INFO_MAX_CONCURRENT_PODS, value: {{ .Values.plugins.deviceInfo.maxConcurrentPods | quote }}}
+            - {name: TB_INFO_TTL_SECONDS, value: {{ .Values.plugins.deviceInfo.research.ttlSecondsAfterFinished | quote }}}
+            - {name: TB_INFO_DEADLINE_SECONDS, value: {{ .Values.plugins.deviceInfo.research.activeDeadlineSeconds | quote }}}
+            - name: TB_PLUGIN_SHARED_SECRET
+              valueFrom: {secretKeyRef: {name: {{ .Values.plugins.sharedSecret.existingSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
+          readinessProbe: {httpGet: {path: /plugin/v1/health, port: http}, periodSeconds: 10}
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, capabilities: {drop: ["ALL"]}}
+{{- end }}

@@ -1,0 +1,2057 @@
+:root {
+  color-scheme: dark;
+
+  /* Palette derived from logo-banner.png: black + burnt orange + bright orange */
+  --bg: #0b0b0d;
+  --surface: #141417;
+  --surface-2: #1b1b1f;
+  --surface-3: #232328;
+  --border: #2a2a30;
+  --border-soft: #212127;
+  --text: #f2f2f3;
+  --text-muted: #9a9aa5;
+  --accent: #f6931d;
+  --accent-soft: #ffb457;
+  --accent-2: #c74d23;
+  --accent-grad: linear-gradient(135deg, #c74d23 0%, #f6931d 100%);
+  --danger: #ef4444;
+  --success: #22c55e;
+  --warn: #eab308;
+
+  /* Accent tints, used for hovers / selected states / focus rings */
+  --accent-a08: rgba(246, 147, 29, 0.08);
+  /* Row hover: a warm accent wash. Kept at roughly half the selected-row
+     tint so a hovered row and a selected row stay easy to tell apart, and
+     so hovering a selected row (the theme stacks both layers) reads as a
+     third, stronger state. */
+  --row-hover: rgba(246, 147, 29, 0.085);
+  --accent-a16: rgba(246, 147, 29, 0.16);
+  --accent-a24: rgba(246, 147, 29, 0.24);
+  --accent-a45: rgba(246, 147, 29, 0.45);
+
+  /* Shape & motion */
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px -6px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 24px 60px -12px rgba(0, 0, 0, 0.75);
+  --ring: 0 0 0 3px var(--accent-a24);
+  --ease: cubic-bezier(0.2, 0, 0.15, 1);
+  --dur: 140ms;
+
+  /* Control sizing — one height for every button / input in the chrome */
+  --control-h: 32px;
+
+  /* Aliases used by newer components */
+  --panel: var(--surface);
+  --panel-2: var(--surface-2);
+  --text-dim: var(--text-muted);
+  --green: var(--success);
+  --red: var(--danger);
+  --yellow: var(--warn);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/*
+ * Full-viewport height, twice.
+ *
+ * Mobile browsers measure `vh` against the viewport with the URL bar *retracted*,
+ * so a `100vh` element is taller than the screen for as long as the bar is
+ * showing — the bottom of the app sits under it. `100dvh` tracks the bar as it
+ * comes and goes. The `vh` line stays first as the fallback for browsers without
+ * dvh; anything that understands the second declaration overrides with it.
+ */
+#app {
+  height: 100vh;
+  height: 100dvh;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: -0.015em;
+}
+
+/* Dates, IDs and counts line up when digits are the same width */
+.kv dd,
+.tested-table td,
+.user-row {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--accent-a24);
+}
+
+/* Slim, unobtrusive scrollbars that match the surfaces */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a42 transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #3a3a42;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--r-pill);
+}
+
+@media (hover: hover) {
+  *::-webkit-scrollbar-thumb:hover {
+    background: #4a4a54;
+    background-clip: padding-box;
+  }
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Keyboard users get a clear ring; mouse users never see it */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- Top navigation layout ---------- */
+
+.layout {
+  display: flex;
+  flex-direction: column;
+  /* See #app for why this is declared twice. */
+  height: 100vh;
+  height: 100dvh;
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 60px;
+  padding: 0 18px;
+  /* Clears the rounded corners and the notch in landscape. */
+  padding-left: max(18px, env(safe-area-inset-left));
+  padding-right: max(18px, env(safe-area-inset-right));
+  background: rgba(13, 13, 15, 0.82);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border-soft);
+  position: relative;
+  z-index: 30;
+  flex-shrink: 0;
+}
+
+/* gradient hairline matching the logo */
+.topnav::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-2) 18%, var(--accent) 50%, var(--accent-2) 82%, transparent);
+  opacity: 0.7;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  user-select: none;
+  padding: 4px 8px 4px 4px;
+  border-radius: var(--r-md);
+  transition: background var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .brand:hover {
+    background: var(--surface-2);
+  }
+}
+
+.brand-logo {
+  height: 34px;
+  width: 34px;
+  border-radius: 9px;
+  box-shadow: 0 0 0 1px var(--border), 0 2px 10px rgba(246, 147, 29, 0.14);
+}
+
+.brand-name {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  background: var(--accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  white-space: nowrap;
+}
+
+.nav {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill);
+}
+
+.nav a,
+.device-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: 6px 14px;
+  border-radius: var(--r-pill);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.device-menu { position: relative; display: flex; }
+.device-menu-trigger { border: 0; background: transparent; cursor: pointer; font-family: inherit; }
+.device-menu-trigger.active {
+  background: var(--accent-a16);
+  color: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-a24);
+}
+.device-menu-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 210;
+  display: grid;
+  min-width: 220px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-lg);
+}
+.device-menu-panel a { border-radius: var(--r-md); }
+
+@media (hover: hover) {
+  .nav a:hover,
+  .device-menu-trigger:hover {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+}
+
+.nav a.router-link-active {
+  background: var(--accent-a16);
+  color: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-a24);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.user-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.user-name {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.user-name strong {
+  color: var(--text);
+  font-weight: 550;
+}
+
+.content {
+  flex: 1;
+  padding: 16px;
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+  /* Keep grid pagination and other bottom controls clear of the fixed credit. */
+  padding-bottom: max(60px, calc(env(safe-area-inset-bottom) + 52px));
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Scrolling to the end of a long page shouldn't hand the gesture to the
+     browser and trigger pull-to-refresh. */
+  overscroll-behavior-y: contain;
+}
+
+/* ---------- Page / cards ---------- */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  padding: 16px;
+  box-shadow: var(--shadow-md);
+}
+
+/*
+ * A page whose content is a document rather than a self-scrolling grid.
+ *
+ * `.page` is `flex: 1; min-height: 0` because the pages it was built for hold
+ * a DataTable, which sizes itself to the panel and scrolls internally — the
+ * panel is always exactly one viewport tall. Content that simply grows (a long
+ * table, a settings form) does not fit that: the flex basis of 0 plus a zero
+ * minimum caps the panel at viewport height, and anything taller paints
+ * *outside* its own rounded border, overlapping whatever is below.
+ *
+ * This lets the panel grow to its content instead, and `.content` scrolls it.
+ * `flex-grow: 1` still fills the screen when the content is short, so a nearly
+ * empty page does not shrink to a stub.
+ */
+.page-flow {
+  flex: 1 0 auto;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 620;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ---------- Buttons ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--control-h);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  border-radius: var(--r-md);
+  padding: 0 13px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  line-height: 1;
+  color: var(--text);
+  white-space: nowrap;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .btn:hover:not(:disabled) {
+    background: var(--surface-3);
+    border-color: #3a3a42;
+  }
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn-primary {
+  background: var(--accent-grad);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 10px -2px rgba(246, 147, 29, 0.5);
+}
+
+@media (hover: hover) {
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+    background: var(--accent-grad);
+    border-color: transparent;
+  }
+}
+
+/* A toolbar button acting as a toggle that is currently on. Named to stay out
+   of the way of the `.btn:active` pseudo-class above. */
+.btn-on {
+  background: var(--surface-3);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+}
+
+@media (hover: hover) {
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: var(--danger);
+    color: #fecaca;
+  }
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---------- Form controls ---------- */
+
+input,
+select,
+textarea {
+  height: var(--control-h);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 0 10px;
+  font-size: 13px;
+  font-family: inherit;
+  background: var(--surface-2);
+  color: var(--text);
+  transition:
+    border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+textarea {
+  height: auto;
+  padding: 8px 10px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  height: auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #6d6d78;
+}
+
+@media (hover: hover) {
+  input:hover:not(:disabled),
+  select:hover:not(:disabled),
+  textarea:hover:not(:disabled) {
+    border-color: #3a3a42;
+  }
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Community-edition value checklist used by AG Grid column filters. */
+.value-checklist-filter {
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+  padding: 10px;
+}
+
+.value-checklist-filter > input[type='search'] { width: 100%; }
+
+.value-checklist-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.value-checklist-actions button {
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.value-checklist-options {
+  display: grid;
+  gap: 2px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.value-checklist-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  cursor: pointer;
+}
+
+.value-checklist-option input { flex: 0 0 auto; }
+
+label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ---------- Data table (AG Grid) ---------- */
+
+.data-table {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.data-table .table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+/*
+ * The quick filter is the only thing here that may shrink.
+ *
+ * Everything else — the selection pill, the view's bulk actions, the Columns
+ * button — is a label of fixed length, and flex would happily squeeze all of
+ * them to fit. `min-width: 0` is needed as well as the basis: an <input> has an
+ * intrinsic minimum width from its `size`, which stops it shrinking and pushes
+ * the compression onto its neighbours instead.
+ */
+.data-table .quick-filter {
+  flex: 0 1 260px;
+  width: auto;
+  min-width: 0;
+}
+
+.data-table .table-toolbar > *:not(.quick-filter) {
+  flex-shrink: 0;
+}
+
+.data-table .selection-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--control-h);
+  padding: 0 6px 0 11px;
+  border-radius: var(--r-pill);
+  background: var(--accent-a16);
+  box-shadow: inset 0 0 0 1px var(--accent-a24);
+  color: var(--accent-soft);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.data-table .selection-clear {
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 7px;
+  border-radius: var(--r-pill);
+  font-family: inherit;
+}
+
+@media (hover: hover) {
+  .data-table .selection-clear:hover {
+    opacity: 1;
+    background: var(--accent-a24);
+  }
+}
+
+.data-table .col-picker {
+  position: relative;
+  margin-left: auto;
+}
+
+.data-table .col-picker-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 50;
+  width: 250px;
+  max-height: 340px;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 8px;
+  box-shadow: var(--shadow-lg);
+  animation: pop-in 120ms var(--ease);
+}
+
+.data-table .col-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  padding-left: 6px;
+}
+
+.data-table .col-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text);
+  transition: background var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .data-table .col-picker-item:hover {
+    background: var(--surface-3);
+  }
+}
+
+.data-table .col-picker-item input {
+  accent-color: var(--accent);
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.data-table .ag-wrapper {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  /*
+   * The grid's own palette is set in DataTable.vue via the theming API's
+   * withParams(), which reads the :root tokens. It cannot be set here with
+   * `--ag-inherited-*`: the theme generates a rule that overwrites those on the
+   * grid's immediate parent, which is not this element. See the comment on
+   * `theme` in DataTable.vue.
+   */
+}
+
+/*
+ * Selection hit area.
+ *
+ * AG Grid sizes the checkbox's `<input>` to the 16px visual box, so clicks
+ * landing a few pixels off it silently do nothing. Two things widen that:
+ *
+ *  - In body cells the whole cell is clickable, handled in DataTable.vue via
+ *    the selection column's `onCellClicked`.
+ *  - Here, the transparent `<input>` is stretched past its 16px box so the
+ *    header's select-all is just as forgiving. The visual stays 16px; the cell
+ *    clips the overflow, so it never bleeds into a neighbouring column.
+ *
+ * Scoped to grid cells so filter menus keep their compact checkboxes.
+ */
+.data-table .ag-cell .ag-checkbox-input-wrapper input,
+.data-table .ag-header-cell .ag-checkbox-input-wrapper input {
+  position: absolute;
+  top: -13px;
+  bottom: -13px;
+  left: -18px;
+  right: -18px;
+  width: auto;
+  height: auto;
+  cursor: pointer;
+  margin: 0;
+}
+
+/* The whole selection cell reads as a button, and shift-clicking a range
+   must not smear a text selection across the grid. */
+.data-table .tb-select-cell,
+.data-table .tb-select-header {
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Hovering a row hints that its checkbox is live */
+.data-table .ag-cell .ag-checkbox-input-wrapper,
+.data-table .ag-header-cell .ag-checkbox-input-wrapper {
+  transition: box-shadow var(--dur) var(--ease);
+}
+
+.data-table .ag-row-hover .ag-checkbox-input-wrapper:not(.ag-checked) {
+  box-shadow: 0 0 0 3px var(--accent-a16);
+}
+
+/*
+ * Accent bar on the leading edge of a selected row. Anchored to the selection
+ * cell rather than `:first-of-type`, which would also match the first cell of
+ * the centre (unpinned) container and draw a second bar mid-row.
+ */
+.data-table .ag-row-selected .tb-select-cell {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* ---------- Grid cell widgets (rendered by DataTable) ---------- */
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  height: 100%;
+  padding: 0 2px;
+}
+
+.disabled-action-hint {
+  display: inline-flex;
+  flex-shrink: 0;
+  cursor: not-allowed;
+  border-radius: var(--r-sm);
+}
+
+.disabled-action-hint:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Icon buttons in the grid's actions column */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+@media (hover: hover) {
+  .icon-btn:hover:not(:disabled) {
+    background: var(--surface-3);
+    border-color: var(--border);
+    color: var(--text);
+  }
+}
+
+.icon-btn.save {
+  color: var(--accent);
+  background: var(--accent-a08);
+  border-color: var(--accent-a24);
+}
+
+@media (hover: hover) {
+  .icon-btn.save:hover:not(:disabled) {
+    background: var(--accent-a16);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
+@media (hover: hover) {
+  .icon-btn.danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.14);
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.icon-btn.scanning {
+  color: var(--yellow);
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .icon-btn.scanning:hover {
+    color: var(--yellow);
+    border-color: var(--yellow);
+    background: rgba(234, 179, 8, 0.12);
+  }
+}
+
+/* Per-row status badge (scan in progress / completed) */
+.row-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.row-badge.scanning {
+  color: var(--yellow);
+}
+
+.row-badge.ok {
+  color: var(--green);
+}
+
+.row-badge.off {
+  color: var(--text-muted);
+}
+
+.row-badge.error {
+  color: var(--red);
+}
+
+/* ---------- overdue ----------
+ *
+ * A device past its return date. The state is derived (checked out, has a due
+ * date, date has passed), so these classes come and go on their own as the
+ * date or the status changes — there is no "overdue" flag to keep in step.
+ *
+ * Three strengths, deliberately: a wash over the whole row so it is findable
+ * while scrolling, a stronger mark on the date that caused it, and the pill in
+ * the actions cell for the phone card list where there are no rows. */
+.ag-theme-quartz .ag-row.row-overdue,
+.ag-row.row-overdue {
+  background: rgba(239, 68, 68, 0.09);
+}
+
+.ag-row.row-overdue:hover {
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.cell-overdue {
+  color: var(--red);
+  font-weight: 600;
+}
+
+/* The card list has no rows to tint, so the card takes the mark itself. */
+.card.row-overdue {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+/* Toolbar toggle. Reads as a warning when it is filtering, and as an ordinary
+   button when it is only telling you the count. */
+.btn-overdue {
+  color: var(--red);
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.45);
+}
+
+.btn-overdue.active {
+  background: rgba(239, 68, 68, 0.16);
+  color: var(--red);
+}
+
+/* "Saved" flash: takes the Save button's place for a moment after Enter saves */
+.row-saved {
+  color: var(--green);
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.35);
+  cursor: default;
+  animation: row-saved-in var(--dur) var(--ease);
+}
+
+@keyframes row-saved-in {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Small status dot: green = online/active, red = offline/expired, gray = unknown */
+.status-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: #5c5c66;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+}
+
+.status-dot.online {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+}
+
+.status-dot.offline {
+  background: var(--red);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18);
+}
+
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: row-spin 0.8s linear infinite;
+}
+
+@keyframes row-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.btn-mini {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .btn-mini:hover:not(:disabled) {
+    background: var(--surface-3);
+    border-color: #3a3a42;
+  }
+}
+
+.btn-mini:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-mini.btn-primary {
+  background: var(--accent-grad);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-mini.btn-danger {
+  background: transparent;
+  border-color: transparent;
+  color: var(--danger);
+}
+
+@media (hover: hover) {
+  .btn-mini.btn-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: transparent;
+  }
+}
+
+.grid-link {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .grid-link:hover {
+    border-bottom-color: var(--accent-a45);
+  }
+}
+
+/*
+ * The input inside a suggesting cell editor. Global, not scoped: it belongs to
+ * SuggestInput's template, which SuggestCellEditor's scoped styles cannot reach.
+ *
+ * The class must not start with `ag-`. The theme styles `input[class^=ag-]` at
+ * (0,1,0), which beats the app's own `input` rule, and routes every colour
+ * through the --ag-inherited-* chain that is invalid in this DOM (see the theme
+ * note in DataTable.vue). An editor input is always focused, so it would take
+ * the :focus branch and paint an unreadable box with invisible text.
+ */
+.suggest-editor-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+
+/* Cells whose value is opened in a dialog rather than shown in the row:
+   notes, test data, misc data. Built by a cell renderer, so this must be a
+   global class — scoped styles never reach detached DOM. */
+.cell-view-btn {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .cell-view-btn:hover {
+    border-bottom-color: var(--accent-a45);
+  }
+}
+
+/* Touch targets: the button sits inside a 40px row, so the row height does the
+   work and only the horizontal reach needs widening. */
+@media (pointer: coarse) {
+  .cell-view-btn {
+    padding: 4px 2px;
+  }
+}
+
+.online-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.online-badge.online {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--green);
+}
+
+.online-badge.offline {
+  background: rgba(156, 163, 175, 0.15);
+  color: var(--text-muted);
+}
+
+.table-footer {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------- Toasts ---------- */
+
+.toast {
+  position: fixed;
+  bottom: calc(20px + env(safe-area-inset-bottom));
+  right: calc(20px + env(safe-area-inset-right));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  color: var(--text);
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  max-width: 400px;
+  font-size: 13px;
+  box-shadow: var(--shadow-lg);
+  z-index: 1000;
+  animation: toast-in 180ms var(--ease);
+}
+
+.toast-error {
+  border-left-color: var(--danger);
+  color: #fecaca;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* ---------- Login ---------- */
+
+.login-wrap {
+  /* See #app for why this is declared twice. */
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  padding-left: max(24px, env(safe-area-inset-left));
+  padding-right: max(24px, env(safe-area-inset-right));
+  background:
+    radial-gradient(760px 420px at 50% -8%, rgba(199, 77, 35, 0.22), transparent 68%),
+    radial-gradient(620px 360px at 50% 108%, rgba(246, 147, 29, 0.1), transparent 70%),
+    var(--bg);
+}
+
+.login-card {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  padding: 36px 32px 32px;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+  box-shadow: var(--shadow-lg);
+  animation: toast-in 240ms var(--ease);
+}
+
+/* gradient hairline across the top of the card */
+.login-card::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 22px;
+  right: 22px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+.login-logo {
+  width: 84px;
+  height: 84px;
+  border-radius: 20px;
+  margin-bottom: 16px;
+  box-shadow: 0 0 0 1px var(--border), 0 10px 34px -8px rgba(246, 147, 29, 0.35);
+}
+
+.login-card h1 {
+  font-size: 21px;
+  font-weight: 650;
+  margin: 0 0 4px;
+  background: var(--accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.login-attribution {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.login-attribution-prefix {
+  opacity: 0.72;
+}
+
+.login-attribution-brand {
+  background: var(--accent-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.login-card form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+
+.login-card form input {
+  height: 38px;
+}
+
+.login-card form .btn {
+  height: 38px;
+  margin-top: 4px;
+}
+
+.login-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 13px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 18px 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ---------- Tabs / detail ---------- */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 16px;
+}
+
+.tabs button {
+  border: none;
+  background: none;
+  padding: 9px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  transition:
+    color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .tabs button:hover {
+    color: var(--text);
+    background: var(--surface-2);
+  }
+}
+
+.tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Per-outcome test tally, rendered inside the Tested Devices grid. Same
+   reason as .support-pill: a cell renderer's DOM is out of scoped reach. */
+.outcome-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-right: 4px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+
+.outcome-badge.pass {
+  color: var(--green);
+}
+
+.outcome-badge.fail {
+  color: var(--red);
+}
+
+.outcome-badge.warn {
+  color: var(--yellow);
+}
+
+/* Vendor support level, rendered inside the Vendor Devices grid. Cell
+   renderers build detached DOM, so this cannot live in a scoped block. */
+.support-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.7;
+  background: var(--surface-3);
+  color: var(--text-muted);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+
+.support-pill.supported {
+  color: var(--green);
+  background: rgba(34, 197, 94, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.28);
+}
+
+.support-pill.partial {
+  color: var(--yellow);
+  background: rgba(234, 179, 8, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(234, 179, 8, 0.28);
+}
+
+.support-pill.unsupported {
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.28);
+}
+
+.support-pill.planned {
+  color: var(--accent-soft);
+  background: var(--accent-a08);
+  box-shadow: inset 0 0 0 1px var(--accent-a24);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 11px;
+  border-radius: var(--r-pill);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: 0 16px;
+  max-width: 760px;
+}
+
+.kv dt {
+  color: var(--text-muted);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.kv dd {
+  margin: 0;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-soft);
+  word-break: break-word;
+}
+
+.json-editor {
+  width: 100%;
+  min-height: 300px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.detail-panel {
+  margin-top: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  padding: 12px;
+  overflow: auto;
+  max-height: 400px;
+}
+
+.detail-panel pre {
+  margin: 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.section-label {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.code-block {
+  margin: 0;
+  padding: 12px;
+  min-height: 80px;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.user-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 10px 14px;
+  align-items: center;
+  max-width: 580px;
+}
+
+.form-grid label {
+  color: var(--text-muted);
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+/* ---------- Modal ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 100;
+  animation: toast-in 140ms var(--ease);
+}
+
+.modal-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 22px;
+  width: 100%;
+  max-width: 480px;
+  max-height: 100%;
+  overflow: auto;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-card h3 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 620;
+}
+
+.modal-actions {
+  margin-top: 20px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* A record being created has more fields than a confirmation has, and its
+   labels sit beside inputs of different heights. */
+.modal-card.modal-wide {
+  max-width: 620px;
+}
+
+.modal-card .form-grid {
+  max-width: none;
+  align-items: start;
+}
+
+.modal-card .form-grid > label {
+  padding-top: 7px;
+}
+
+/* tables used in detail/audit views */
+table {
+  color: var(--text);
+}
+
+th,
+td {
+  text-align: left;
+}
+
+.data-list {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.data-list th,
+.data-list td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.data-list th {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.data-list tbody tr {
+  transition: background var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .data-list tbody tr:hover {
+    background: var(--row-hover);
+  }
+}
+
+/* ==========================================================================
+   Mobile and touch
+   --------------------------------------------------------------------------
+   The width breakpoints here mirror the constants in src/breakpoints.ts. There
+   is no way to share one definition between CSS and TypeScript without a build
+   step, so each query below names the constant it mirrors; change one and
+   change the other.
+   ========================================================================== */
+
+/*
+ * Touch target sizing.
+ *
+ * Keyed off `pointer: coarse` rather than a width, because the question is what
+ * is doing the pointing, not how wide the window is: a touch-only tablet held
+ * in landscape is wide enough for the desktop layout and still needs targets a
+ * finger can hit, while a narrow window on a desktop does not.
+ *
+ * 44px is the accepted floor and is what --control-h becomes. The icon buttons
+ * are the exception: they live inside AG Grid rows, which are 40px, so they get
+ * 38px here and the full 44px in the card list, where no row constrains them.
+ */
+@media (pointer: coarse) {
+  :root {
+    --control-h: 44px;
+  }
+
+  .icon-btn {
+    width: 38px;
+    height: 38px;
+  }
+
+  .icon-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .btn-mini {
+    height: 38px;
+    padding: 0 14px;
+    font-size: 13px;
+  }
+
+  .tabs button {
+    padding: 13px 16px;
+  }
+
+  .col-picker-item {
+    padding: 10px 6px;
+  }
+
+  .selection-clear {
+    padding: 9px 11px;
+  }
+
+  /* The login form sets its own heights, which would otherwise win over
+     --control-h and stay at 38px on a phone. */
+  .login-card form input,
+  .login-card form .btn {
+    height: 44px;
+  }
+}
+
+/*
+ * Stop iOS Safari zooming on focus. It does that for any control whose computed
+ * font-size is under 16px, and it does not zoom back out afterwards — the user
+ * is left in a scaled-up page. Note this cannot be fixed with maximum-scale on
+ * the viewport tag: that would disable pinch zoom for everyone, which is a real
+ * accessibility loss for a cosmetic gain.
+ *
+ * Mirrors MOBILE in src/breakpoints.ts.
+ */
+@media (max-width: 899px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  /* More specific than the rule above, so it needs saying again. */
+  .json-editor {
+    font-size: 15px;
+  }
+}
+
+/*
+ * The mobile navigation shell.
+ *
+ * Above MOBILE the bar is unchanged: brand, nav pills, search box, user area.
+ * Below it the pills and user area move into the drawer and the search box
+ * behind a button, leaving the bar with the two toggles and the brand — which
+ * is the only arrangement that fits, since the desktop bar wants about 1,140px
+ * and a phone offers 375.
+ *
+ * Mirrors MOBILE in src/breakpoints.ts.
+ */
+.nav-toggle,
+.search-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: var(--r-md);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.nav-toggle svg,
+.search-toggle svg {
+  width: 21px;
+  height: 21px;
+}
+
+@media (hover: hover) {
+  .nav-toggle:hover,
+  .search-toggle:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+}
+
+@media (max-width: 899px) {
+  .nav-toggle,
+  .search-toggle {
+    display: inline-flex;
+  }
+
+  .topnav {
+    gap: 8px;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+
+  /* Both move into the drawer. */
+  .topnav .nav,
+  .topnav .user-area {
+    display: none;
+  }
+
+  .brand-logo {
+    height: 30px;
+    width: 30px;
+  }
+
+  /* The page card's border and radius only make sense with room around it;
+     on a phone it is close to the whole screen. */
+  .content {
+    padding: 10px;
+    padding-left: max(10px, env(safe-area-inset-left));
+    padding-right: max(10px, env(safe-area-inset-right));
+    padding-bottom: max(60px, calc(env(safe-area-inset-bottom) + 52px));
+  }
+
+  .page {
+    padding: 12px;
+  }
+}
+
+/*
+ * Data table chrome on a narrow screen.
+ *
+ * Two things here are flex rows that were only ever asked to lay out at desk
+ * widths, and both compress their labels rather than reflow when they run out
+ * of room. Mirrors MOBILE in src/breakpoints.ts.
+ */
+@media (max-width: 899px) {
+  /* Quick filter takes the first row on its own; the selection pill, bulk
+     actions and Columns wrap onto the next instead of being squeezed. */
+  .data-table .table-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .data-table .quick-filter {
+    flex: 1 1 100%;
+  }
+
+  .data-table .col-picker {
+    margin-left: 0;
+  }
+
+  /*
+   * AG Grid's paging panel is a fixed-height, non-wrapping flex row
+   * (`height: max(row-height, 22px)`, `justify-content: flex-end`). Below this
+   * width the page-size picker, the "1 to 100 of 137" summary and the page
+   * buttons cannot all fit, and the summary is what gives. Letting it wrap and
+   * grow costs a little grid height and keeps every label readable.
+   *
+   * Three classes deep for a reason. The theming API installs its CSS as one
+   * nested block, `.ag-theme-N { .ag-paging-panel { … } }`, which resolves to
+   * the same (0,2,0) specificity as `.data-table .ag-paging-panel` — and its
+   * <style> is injected into <head> when the grid initialises, after this
+   * sheet, so an equal-specificity rule would lose the tie. The existing
+   * AG Grid overrides above use three classes for the same reason.
+   */
+  .data-table .ag-wrapper .ag-paging-panel {
+    height: auto;
+    min-height: 44px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    column-gap: 14px;
+    row-gap: 2px;
+    padding: 7px 10px;
+  }
+}
+
+/*
+ * Card list chrome.
+ *
+ * The grid is not unmounted in card mode, it is moved out of sight: it remains
+ * the filter / sort / pagination engine behind the cards, and getState() has to
+ * keep returning a real grid state so a view saved on a phone can be opened on
+ * a desktop. `position: fixed` off to the left rather than `display: none` — a
+ * zero-size grid makes AG Grid complain and skip layout, and it needs a real
+ * box to initialise cleanly.
+ */
+.data-table .ag-wrapper.ag-offscreen {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 320px;
+  height: 240px;
+  flex: none;
+  border: none;
+  pointer-events: none;
+}
+
+.data-table .card-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.data-table .card-sort select {
+  max-width: 46vw;
+}
+
+.data-table .card-paging {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.data-table .card-paging-label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.data-table .card-paging-label small {
+  display: block;
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/*
+ * Detail pages and forms on a narrow screen.
+ *
+ * Mirrors STACK in src/breakpoints.ts.
+ */
+@media (max-width: 639px) {
+  /*
+   * Two fixed columns become one.
+   *
+   * `.kv` gives its labels 190px and `.form-grid` 150px, which on a 375px
+   * screen leaves about 145px for the value — enough to shred a timestamp, an
+   * IP or a line of JSON. Stacked, the label becomes a small caption above its
+   * value and the value gets the full width.
+   */
+  .kv {
+    grid-template-columns: 1fr;
+    gap: 0;
+    max-width: none;
+  }
+
+  .kv dt {
+    border-bottom: none;
+    padding: 9px 0 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .kv dd {
+    padding: 1px 0 9px;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+    gap: 2px;
+    max-width: none;
+    align-items: stretch;
+  }
+
+  .form-grid > label,
+  .modal-card .form-grid > label {
+    padding-top: 10px;
+  }
+
+  /* A 300px minimum leaves nowhere for the field once the keyboard is up. */
+  .json-editor {
+    min-height: 160px;
+  }
+}
+
+/*
+ * Tab strips scroll rather than wrap.
+ *
+ * Three tabs fit today, but wrapping a fourth onto a second row would break the
+ * bottom border the active tab sits on. Mirrors MOBILE in src/breakpoints.ts.
+ */
+@media (max-width: 899px) {
+  .tabs {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tabs button {
+    flex-shrink: 0;
+    scroll-snap-align: start;
+  }
+
+  /*
+   * Wide tables scroll inside their own box instead of pushing the page
+   * sideways. The wrapper is applied in the templates; this styles it.
+   */
+  .table-scroll {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+.table-scroll {
+  max-width: 100%;
+}
+
+/*
+ * Modals become bottom sheets.
+ *
+ * FormModal is the only way to write anything on a phone — create and edit both
+ * go through it — so it is worth more than a width change. The card is pinned
+ * to the bottom of the screen, its title and its action bar are sticky, and
+ * only the fields between them scroll. That keeps Save reachable with the
+ * keyboard up, which a centred card with the buttons at the end of the content
+ * does not.
+ *
+ * `90dvh`, not `90vh`: the keyboard changes the viewport, and vh does not.
+ *
+ * Mirrors STACK in src/breakpoints.ts.
+ */
+@keyframes sheet-up {
+  from {
+    transform: translateY(14px);
+    opacity: 0.6;
+  }
+}
+
+@media (max-width: 639px) {
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal-card,
+  .modal-card.modal-wide {
+    max-width: none;
+    width: 100%;
+    max-height: 90dvh;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    border-bottom: none;
+    /* The sheet's own scroll, not the page's. */
+    overflow: hidden;
+    animation: sheet-up 200ms var(--ease);
+  }
+
+  .modal-card .modal-title {
+    margin: 0;
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--border-soft);
+    flex-shrink: 0;
+  }
+
+  .modal-card .modal-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 14px 18px 4px;
+  }
+
+  .modal-card .modal-actions {
+    margin: 0;
+    padding: 12px 18px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border-soft);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  /* Two equal targets rather than two small ones in the corner. */
+  .modal-card .modal-actions .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+}
+
+/*
+ * The remaining dropdowns get the same treatment as the global search did in
+ * the navigation shell: anchored panels with hard widths have nowhere to sit on
+ * a 375px screen. Mirrors MOBILE in src/breakpoints.ts.
+ */
+@media (max-width: 899px) {
+  /*
+   * The field picker. Anchored right at a fixed 250px, it hangs off the edge
+   * once the toolbar wraps; as a sheet it also gets room for 44px rows.
+   */
+  .data-table .col-picker-panel {
+    position: fixed;
+    inset: auto 0 0 0;
+    width: auto;
+    max-height: 70dvh;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding: 10px 12px;
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    animation: sheet-up 180ms var(--ease);
+    z-index: 200;
+  }
+
+  .data-table .col-picker-item {
+    min-height: 44px;
+    font-size: 14.5px;
+  }
+}
+
+/* Full-width along the bottom, clear of the home indicator. */
+@media (max-width: 639px) {
+  .toast {
+    left: 10px;
+    right: 10px;
+    left: max(10px, env(safe-area-inset-left));
+    right: max(10px, env(safe-area-inset-right));
+    max-width: none;
+  }
+}
+
+/* Any panel that scrolls keeps its gesture to itself, so reaching the end of a
+   list does not start scrolling the page behind it — or, at the top of one,
+   trigger the browser's pull-to-refresh. */
+.detail-panel,
+.col-picker-panel,
+.table-scroll {
+  overscroll-behavior: contain;
+}

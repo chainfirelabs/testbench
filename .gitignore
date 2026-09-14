@@ -1,0 +1,17 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Editor scratch files (vim swap, backups)
+*.sw[a-p]
+*~
+
+# Locally built TestBench CLI
+/testbench

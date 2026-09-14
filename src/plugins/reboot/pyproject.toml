@@ -1,0 +1,13 @@
+[project]
+name = "testbench-reboot-plugin"
+version = "1.0.0"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.111", "uvicorn>=0.30", "httpx>=0.27", "kubernetes>=30", "paramiko>=3.5"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["reboot_plugin*"]

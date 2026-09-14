@@ -1,0 +1,11 @@
+TestBench is installed. Frontend service: {{ include "testbench.fullname" . }}-frontend:{{ .Values.frontend.service.port }}
+Database: externally managed; schema setup uses the configured application login
+{{- if .Values.mcp.enabled }}
+MCP server: http://{{ include "testbench.fullname" . }}-mcp:{{ .Values.mcp.service.port }}{{ .Values.mcp.mountPath }} (cluster-internal)
+{{- end }}
+{{- if .Values.plugins.networkScan.enabled }}
+Network scan plugin: enabled (one short-lived worker Job per run)
+{{- end }}
+{{- if .Values.plugins.deviceInfo.enabled }}
+Device info plugin: enabled using {{ .Values.plugins.deviceInfo.ai.url }}
+{{- end }}

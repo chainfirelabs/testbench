@@ -1,0 +1,27 @@
+{
+  "name": "testbench-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "check:breakpoints": "node scripts/check-breakpoints.mjs",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "ag-grid-community": "^36.1.0",
+    "ag-grid-vue3": "^36.1.0",
+    "pinia": "^2.2.0",
+    "vue": "^3.5.32",
+    "vue-router": "^4.4.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "typescript": "^5.8.3",
+    "vite": "^8.2.2",
+    "vue-tsc": "^2.0.0"
+  }
+}

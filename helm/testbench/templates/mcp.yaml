@@ -1,0 +1,93 @@
+{{- if .Values.mcp.enabled }}
+{{- $secretName := printf "%s-mcp-internal" (include "testbench.fullname" .) }}
+{{- $token := printf "tb_internal_%s" (randAlphaNum 64) }}
+{{- with (lookup "v1" "Secret" .Release.Namespace $secretName) }}
+  {{- if hasKey .data "token" }}
+    {{- $token = index .data "token" | b64dec }}
+  {{- end }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  token: {{ $token | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "testbench.fullname" . }}-mcp
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: testbench, app.kubernetes.io/component: mcp, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports:
+    - name: http
+      port: {{ .Values.mcp.service.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "testbench.fullname" . }}-mcp
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.mcp.replicaCount }}
+  selector: {matchLabels: {app.kubernetes.io/name: testbench, app.kubernetes.io/component: mcp, app.kubernetes.io/instance: {{ .Release.Name }}}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: testbench, app.kubernetes.io/component: mcp, app.kubernetes.io/instance: {{ .Release.Name }}}
+    spec:
+      serviceAccountName: {{ include "testbench.fullname" . }}-mcp
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.mcp.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.mcp.image) }}
+          ports: [{name: http, containerPort: {{ .Values.mcp.service.port }}}]
+          env:
+            # Keep MCP-to-API traffic on the release's backend ClusterIP
+            # Service. This is intentionally not configurable as an external URL.
+            - name: TB_MCP_API_BASE
+              value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}
+            - name: TB_MCP_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: token
+            {{- with .Values.mcp.authToken.existingSecret }}
+            - name: TB_MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ required "mcp.authToken.key is required when mcp.authToken.existingSecret is set" $.Values.mcp.authToken.key }}
+            {{- end }}
+            - {name: TB_MCP_TRANSPORT, value: streamable-http}
+            - {name: TB_MCP_HOST, value: 0.0.0.0}
+            - {name: TB_MCP_PORT, value: {{ .Values.mcp.service.port | quote }}}
+            - {name: TB_MCP_MOUNT_PATH, value: {{ .Values.mcp.mountPath | quote }}}
+            - {name: TB_MCP_DEFAULT_LIMIT, value: {{ .Values.mcp.defaultLimit | quote }}}
+            - {name: TB_MCP_MAX_LIMIT, value: {{ .Values.mcp.maxLimit | quote }}}
+            - {name: TB_MCP_MAX_RESPONSE_BYTES, value: {{ .Values.mcp.maxResponseBytes | quote }}}
+          startupProbe:
+            exec: {command: [python, /app/healthcheck.py]}
+            periodSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            exec: {command: [python, /app/healthcheck.py]}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources: {{- toYaml .Values.mcp.resources | nindent 12 }}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+{{- end }}

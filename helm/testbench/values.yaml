@@ -1,0 +1,435 @@
+# Default values and configuration reference for TestBench.
+# Secrets are referenced by name, never created.
+# REQUIRED before installation: database.host, database.credentials.existingSecret,
+# applicationSecret.existingSecret, config.frontendUrl, and config.corsOrigins.
+# Empty placeholders for those settings are intentionally invalid until supplied.
+# Commented examples document optional settings without enabling them.
+# Helm merges maps but replaces lists: when overriding a list, supply its full contents.
+# Flux HelmRelease: place these settings under spec.values. Chart source selection
+# and reconcileStrategy belong under spec.chart.spec, not in these values.
+# Only documented chart settings are wired to templates; arbitrary extraEnv,
+# nodeSelector, tolerations, and fullnameOverride keys are not supported.
+
+global:
+  # Default registry host (optional port/path), without https://.
+  # Images inherit this registry unless their registry property is specified.
+  # Set empty to use local or fully qualified repositories as written.
+  imageRegistry: ghcr.io
+  # Default for every chart-managed image, including plugin worker Jobs.
+  # Set Always when reusing mutable tags; immutable release tags can use IfNotPresent.
+  imagePullPolicy: IfNotPresent
+  # Existing docker-registry Secrets attached to every chart Pod. Their names
+  # are also passed to dynamically created plugin worker Jobs.
+  # Each Secret must exist in every namespace where those Pods run.
+  imagePullSecrets: []
+  # imagePullSecrets:
+  #   - name: registry-credentials
+
+frontend:
+  # Number of stateless nginx/UI Pods.
+  replicaCount: 2
+  image:
+    # Frontend image repository and tag. A nonempty digest overrides the tag.
+    # Optional override: omit to inherit global.imageRegistry.
+    # registry: registry.example.com:5000 # Overrides the global registry.
+    # registry: "" # Alternative: use repository exactly as written.
+    repository: chainfirelabs/testbench/frontend
+    tag: "1.8.8"
+    digest: "" # Example: sha256:...
+    pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
+  service:
+    type: ClusterIP # ClusterIP, NodePort, or LoadBalancer.
+    port: 80 # Port exposed inside the cluster.
+    nodePort: null # Omit/null for automatic allocation; only used for NodePort/LoadBalancer.
+    # nodePort: 30080 # Must be in your cluster's configured NodePort range.
+  # Scheduler requests and container limits for each frontend Pod.
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {memory: 128Mi}
+
+backend:
+  # Number of API Pods. Database schema setup runs in a separate Helm hook Job.
+  replicaCount: 2
+  image:
+    # Backend/database-schema image. A nonempty digest overrides the tag.
+    # Optional override: omit to inherit global.imageRegistry.
+    # registry: registry.example.com:5000 # Overrides the global registry.
+    # registry: "" # Alternative: use repository exactly as written.
+    repository: chainfirelabs/testbench/backend
+    tag: "1.8.8"
+    digest: ""
+    pullPolicy: ""
+  # Scheduler requests and container limits for each backend Pod.
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+mcp:
+  # Deploy the read-only MCP server as an internal ClusterIP service.
+  enabled: false
+  replicaCount: 1
+  image:
+    # Optional override: omit to inherit global.imageRegistry.
+    # registry: registry.example.com:5000 # Overrides the global registry.
+    # registry: "" # Alternative: use repository exactly as written.
+    repository: chainfirelabs/testbench/mcp
+    tag: "1.8.8"
+    digest: ""
+    pullPolicy: ""
+  service:
+    # MCP is intentionally cluster-internal. Add an Ingress or gateway outside
+    # this chart if clients need to reach it from another network.
+    port: 8003
+  # Helm generates and preserves an internal credential shared only by the MCP
+  # and backend Pods. It maps to a fixed readonly service identity, so initial
+  # installation does not depend on first creating a user-owned API key.
+  # Optional bearer token required from callers of the MCP endpoint. Leaving
+  # existingSecret empty leaves the cluster-internal endpoint unauthenticated.
+  authToken:
+    existingSecret: ""
+    key: auth-token
+  mountPath: /mcp
+  defaultLimit: 50
+  maxLimit: 500
+  maxResponseBytes: 131072
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+database:
+  # External PostgreSQL address. The chart does not deploy or bootstrap
+  # PostgreSQL; the database and application login must already exist.
+  host: "" # REQUIRED: e.g. postgres.database.svc.cluster.local
+  port: 5432
+  name: testbench
+  # libpq sslmode: disable, allow, prefer, require, verify-ca, or verify-full.
+  sslmode: require
+  # Wait for the externally managed database before schema setup. A timeout
+  # still fails clearly if it does not exist or cannot be reached.
+  waitTimeoutSeconds: 120
+  waitIntervalSeconds: 5
+  credentials:
+    # Existing release-namespace Secret containing the PostgreSQL login.
+    existingSecret: "" # REQUIRED: e.g. testbench-database
+    usernameKey: username
+    passwordKey: password
+
+applicationSecret:
+  # Existing release-namespace Secret exposed to the backend with envFrom.
+  # Store TB_JWT_SECRET and optional OAuth credentials in it.
+  existingSecret: "" # REQUIRED: e.g. testbench-secrets
+
+config:
+  # Catalog settings belong under schema below; config.entityFields is not used.
+  # Public browser URL used for redirects and generated links.
+  frontendUrl: "" # REQUIRED: e.g. https://testbench.example.com
+  # Comma-separated browser origins accepted by CORS middleware.
+  corsOrigins: "" # REQUIRED: e.g. https://testbench.example.com
+  # IANA timezone used for checkout dates and scheduled work.
+  timezone: UTC
+  # Minutes between overdue-checkout sweeps.
+  checkoutSweepMinutes: 60
+  # Days before a due date that warning notifications begin.
+  checkoutWarnDays: 3
+
+# Schema configuration for Devices, Software, and Tests. Required application
+# identity and relationship fields are added automatically and cannot be
+# removed here or in the GUI. See docs/device-schema.md.
+#
+# A fresh chart install bootstraps Devices from the external ConfigMap once,
+# then transfers them to the database and admin GUI. Set reconciliation to
+# authoritative when that document should remain the source of truth instead.
+schema:
+  software:
+    # Name is protected and automatic. The list below includes all optional built-ins.
+    optionalFields: [version, vendor_device_count, version_count, misc_data]
+    # Additional field entry (same options for software and tests):
+    # additionalFields:
+    #   - key: lab
+    #     label: Lab
+    #     type: select # text, textarea, number, boolean, date, select, json
+    #     description: Lab responsible for this record
+    #     options: [East, West] # Choices for select fields.
+    #     required: false
+    #     indexed: false
+    #     unique_value: false # Implies indexed; different spelling from device unique.
+    #     role: null # Optional semantic role; usually omitted for software/tests.
+    additionalFields: []
+  tests:
+    # Device, Software, and Outcome are protected and automatic.
+    # All optional built-ins: software_version, tag, run_at, notes, misc_data,
+    # created_at, created_by_username.
+    optionalFields: [software_version, tag, run_at, notes, misc_data, created_at, created_by_username]
+    # Additional field entry (same options for software and tests):
+    # additionalFields:
+    #   - key: lab
+    #     label: Lab
+    #     type: select # text, textarea, number, boolean, date, select, json
+    #     description: Lab responsible for this record
+    #     options: [East, West] # Choices for select fields.
+    #     required: false
+    #     indexed: false
+    #     unique_value: false # Implies indexed; different spelling from device unique.
+    #     role: null # Optional semantic role; usually omitted for software/tests.
+    additionalFields: []
+  devices:
+    # database  — the admin GUI owns everything; no document is mounted.
+    # configMap — mount a DeviceSchema document and reconcile it on start.
+    # database is the safe default for installs and upgrades that do not supply
+    # an external ConfigMap. Select configMap explicitly to bootstrap from one.
+    source: database
+
+    # How much of the configuration the document owns. Only read when
+    # source is configMap.
+    #
+    # bootstrap     — import the document once, into an installation that has no
+    #                 GUI-owned configuration yet. The database and admin GUI own
+    #                 it from then on, and later edits to the document do not
+    #                 silently change the live schema. Default and recommended.
+    # merge         — add what the document introduces and never delete
+    #                 GUI-created configuration. A disagreement is reported as a
+    #                 conflict rather than resolved by guessing which side wins.
+    #                 Useful for rolling a new standard field out to existing
+    #                 installations.
+    # authoritative — the document is the source of truth and is reconciled on
+    #                 every start. YAML-owned objects are read-only in the GUI,
+    #                 and an object dropped from the document is disabled rather
+    #                 than deleted unless the document sets `spec.prune: true`.
+    reconciliation: bootstrap
+
+    # Existing ConfigMap holding the bootstrap document. The chart never creates
+    # this ConfigMap; apply it before installing or upgrading TestBench.
+    existingConfigMap: "" # REQUIRED when source is configMap
+    # The key inside that ConfigMap, and the filename it is mounted as.
+    key: device-schema.yaml
+    # Whether a device type may take a global field back off itself. Off by
+    # default so "global" keeps meaning global; the admin GUI labels it an
+    # advanced override where it is enabled.
+    allowGlobalExclusions: false
+    # Refuse writes carrying field keys the catalog does not define. Off by
+    # default: a value whose field was removed from a layout is still real data,
+    # and preserving it is the point of a configurable schema.
+    rejectUnknownFields: false
+
+ingress:
+  # Render an Ingress pointing to the frontend Service.
+  enabled: false
+  # IngressClass name such as nginx or traefik; empty uses cluster default.
+  className: ""
+  # Arbitrary annotations passed to the Ingress controller.
+  annotations: {}
+  # annotations:
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+  # hosts:
+  #   - host: testbench.example.com
+  #     paths:
+  #       - path: /
+  #         pathType: Prefix # Prefix, Exact, or ImplementationSpecific.
+  hosts: []
+  # tls:
+  #   - secretName: testbench-tls
+  #     hosts: [testbench.example.com]
+  tls: []
+
+plugins:
+  sharedSecret:
+    # Existing release-namespace Secret authenticating backend/plugin traffic.
+    # Required whenever any plugin is enabled.
+    existingSecret: "" # REQUIRED when plugins are enabled: e.g. testbench-plugins
+    # Key containing the shared value.
+    key: shared-secret
+
+  networkScan:
+    # Add row-level Scan and collection-level Scan all actions.
+    enabled: false
+    # Maximum scan worker Pods allowed at once. This limit is independent of
+    # other plugins, so the default permits five scans plus five Info workers.
+    maxConcurrentPods: 5
+    image:
+      # The controller and one-shot worker use the same image.
+      # Optional override: omit to inherit global.imageRegistry.
+      # registry: registry.example.com:5000 # Overrides the global registry.
+      # registry: "" # Alternative: use repository exactly as written.
+      repository: chainfirelabs/testbench/network-scan
+      tag: "1.8.8"
+      digest: "" # Optional immutable digest; overrides tag.
+      pullPolicy: ""
+    # Per-port TCP connection timeout.
+    timeoutSeconds: 2
+    # Maximum devices probed concurrently by one worker Job.
+    concurrency: 10
+    # Scheduled Scan-all interval; zero disables scheduled scans.
+    intervalMinutes: 15
+    worker:
+      # Empty runs worker Pods in the TestBench release namespace.
+      namespace: ""
+      # Create an explicitly configured namespace. Keep false when using the
+      # release namespace.
+      createNamespace: false
+      # Seconds completed Jobs remain before Kubernetes removes them.
+      ttlSecondsAfterFinished: 300
+      # Hard runtime limit for one scan Job.
+      activeDeadlineSeconds: 1800
+      # Additional registry Secret names already present in the worker
+      # namespace. global.imagePullSecrets are included automatically.
+      imagePullSecrets: []
+      # imagePullSecrets: [browser-registry] # Names only; unlike global entries.
+    # Reserved for future NetworkPolicy rendering; currently has no effect.
+    allowedEgressCidrs: []
+
+  deviceInfo:
+    # Add the Info action for eligible online devices.
+    enabled: false
+    # Maximum device-information research Pods allowed at once. Additional
+    # requests are rejected until an active run finishes or is stopped.
+    maxConcurrentPods: 5
+    # Global web-interface ports. Type, rule, and device plugin configuration
+    # can override either independently.
+    httpPort: 80
+    httpsPort: 443
+    image:
+      # Long-running controller that creates and watches research Jobs.
+      # Optional override: omit to inherit global.imageRegistry.
+      # registry: registry.example.com:5000 # Overrides the global registry.
+      # registry: "" # Alternative: use repository exactly as written.
+      repository: chainfirelabs/testbench/device-info
+      tag: "1.8.8"
+      digest: ""
+      pullPolicy: ""
+    researchImage:
+      # Browser-capable OMP image launched once per request. It must provide
+      # Python 3, `/usr/local/bin/entrypoint.sh`, and ACP v1 through `omp acp`.
+      # The controller mounts its ACP adapter into this image at run time, so a
+      # separate TestBench-specific research image is not required.
+      # Optional override: omit to inherit global.imageRegistry.
+      # registry: registry.example.com:5000 # Overrides the global registry.
+      # registry: "" # Alternative: use repository exactly as written.
+      repository: oh-my-pi
+      tag: latest
+      digest: ""
+      pullPolicy: ""
+    # Prompt substitutions are performed by the device-info controller:
+    # - `{device_url}`: value of the first populated field whose semantic role
+    #   is `scan_address_lan`, otherwise `scan_address_wan`. If the stored value
+    #   has no scheme, the controller prefixes `http://`.
+    # - `{device_json}`: JSON snapshot containing the device id, standard API
+    #   fields, flattened custom fields, `_scan_addresses`, and `_plugin_roles`.
+    #   Credential roles/values are deliberately removed from this JSON.
+    # The per-device username/password are appended as a separate authentication
+    # instruction, as are the required result schema and any previously saved
+    # successful discovery recipe. Those additions cannot be disabled here.
+    # No other `{...}` placeholders are currently supported; unknown text is
+    # left unchanged. Use JSON/YAML quoting if the prompt contains `:` or `#`.
+    prompt: "Use the browser tool to browse {device_url} and identify hardware, firmware, and MAC. Device inventory: {device_json}"
+    # Permit screenshots or other browser image captures. Keep false for
+    # text-only models; the agent will be instructed to use DOM/page text only.
+    # This is an agent instruction, not a browser-tool sandbox: an external
+    # browser implementation that injects images automatically may ignore it.
+    captureImages: false
+    ai:
+      # Any OpenAI-compatible endpoint can be used, including a LiteLLM proxy.
+      # `url` is the API base URL as reachable from the research Pod.
+      # `model` is used when the device has no saved successful recipe and can
+      # be the stronger discovery model. `repeatModel` is used when a saved
+      # recipe exists; empty makes it fall back to `model`. The two may match.
+      url: "" # REQUIRED when enabled: e.g. https://ai.example.com/v1
+      model: "" # REQUIRED when enabled: model/deployment identifier
+      repeatModel: ""
+      # Name of an existing Secret in `research.namespace`, not the release
+      # namespace, and the key within it containing the endpoint bearer token.
+      # It is exposed as OPENAI_API_KEY; the current OMP image also receives
+      # the same value under its LiteLLM compatibility alias.
+      existingSecret: "" # REQUIRED when enabled: e.g. testbench-ai
+      apiKeySecretKey: OPENAI_API_KEY
+    research:
+      # Empty runs research Pods in the TestBench release namespace.
+      namespace: ""
+      # Create an explicitly configured namespace. Keep false when using the
+      # release namespace.
+      createNamespace: false
+      # Seconds completed research Jobs remain.
+      ttlSecondsAfterFinished: 900
+      # Hard runtime limit for one research Job and its ACP prompt turn.
+      activeDeadlineSeconds: 1800
+      # Additional registry Secret names in the research namespace;
+      # global.imagePullSecrets are included automatically.
+      imagePullSecrets: []
+      # imagePullSecrets: [browser-registry] # Names only; unlike global entries.
+    # Reserved for future NetworkPolicy rendering; currently has no effect.
+    allowedEgressCidrs: []
+
+  reboot:
+    # Add the power/reboot action for eligible online devices.
+    enabled: false
+    # Maximum reboot worker Pods allowed at once, independent of other plugins.
+    maxConcurrentPods: 5
+    image:
+      # Controller and Paramiko SSH reboot worker image.
+      # Optional override: omit to inherit global.imageRegistry.
+      # registry: registry.example.com:5000 # Overrides the global registry.
+      # registry: "" # Alternative: use repository exactly as written.
+      repository: chainfirelabs/testbench/reboot
+      tag: "1.8.8"
+      digest: ""
+      pullPolicy: ""
+    researchImage:
+      # OMP browser agent used for devices configured for AI reboot. It must provide
+      # Python 3, `/usr/local/bin/entrypoint.sh`, and ACP v1 through `omp acp`;
+      # the reboot controller mounts its ACP adapter into each AI Job.
+      # Optional override: omit to inherit global.imageRegistry.
+      # registry: registry.example.com:5000 # Overrides the global registry.
+      # registry: "" # Alternative: use repository exactly as written.
+      repository: oh-my-pi
+      tag: latest
+      digest: ""
+      pullPolicy: ""
+    # Global reboot defaults; device-type plugin configuration can override these.
+    # Method is "ssh" or "ai" (browser discovery). Vendor matching is no longer used.
+    method: ai
+    # SSH commands must be nonempty and run without interactive prompts.
+    sshCommand: "reboot"
+    # Type, rule, and device plugin configuration can override this port.
+    sshPort: 22
+    # The reboot browser prompt supports the same two substitutions as Info:
+    # - `{device_url}`: scan_address_lan, falling back to scan_address_wan, with
+    #   `http://` added when the configured address has no URL scheme.
+    # - `{device_json}`: device/API/custom data plus noncredential semantic roles.
+    #   It never contains the username or password.
+    # Credentials are appended separately, followed by a mandatory instruction
+    # to reboot, wait, verify online state, and emit the result contract. No
+    # other placeholders are supported. This prompt is unused for SSH reboot.
+    prompt: "Use the browser tool to sign in to {device_url}, find its reboot control, reboot it, and verify it returns online. Device inventory: {device_json}"
+    # Permit screenshots or other browser image captures. Keep false for
+    # text-only models; the agent will be instructed to use DOM/page text only.
+    # This is an agent instruction, not a browser-tool sandbox: an external
+    # browser implementation that injects images automatically may ignore it.
+    captureImages: false
+    ai:
+      # Any OpenAI-compatible endpoint can be used, including a LiteLLM proxy.
+      # URL must be reachable from the worker namespace; model is the exact
+      # endpoint model/deployment identifier.
+      url: "" # REQUIRED when enabled: e.g. https://ai.example.com/v1
+      model: "" # REQUIRED when enabled: model/deployment identifier
+      # Existing Secret in `worker.namespace` and the key containing its token.
+      # It is exposed as OPENAI_API_KEY; the current OMP image also receives
+      # the same value under its LiteLLM compatibility alias.
+      existingSecret: "" # REQUIRED when enabled: e.g. testbench-ai
+      apiKeySecretKey: OPENAI_API_KEY
+    # Maximum seconds to wait for the device to return online.
+    recoveryTimeoutSeconds: 600
+    worker:
+      # Empty runs worker Pods in the TestBench release namespace.
+      namespace: ""
+      # Create an explicitly configured namespace. Keep false when using the
+      # release namespace.
+      createNamespace: false
+      # Seconds completed Jobs remain.
+      ttlSecondsAfterFinished: 600
+      # Hard runtime limit for one reboot Job.
+      activeDeadlineSeconds: 1800
+      # Additional registry Secret names already present in the worker
+      # namespace. global.imagePullSecrets are included automatically.
+      imagePullSecrets: []
+      # imagePullSecrets: [browser-registry] # Names only; unlike global entries.
+    # Reserved for future NetworkPolicy rendering; currently has no effect.
+    allowedEgressCidrs: []

@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "testbench.fullname" . }}
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+data:
+  TB_FRONTEND_URL: {{ required "config.frontendUrl is required" .Values.config.frontendUrl | quote }}
+  TB_CORS_ORIGINS: {{ required "config.corsOrigins is required" .Values.config.corsOrigins | quote }}
+  TB_TIMEZONE: {{ .Values.config.timezone | quote }}
+  TB_CHECKOUT_SWEEP_MINUTES: {{ .Values.config.checkoutSweepMinutes | quote }}
+  TB_CHECKOUT_WARN_DAYS: {{ .Values.config.checkoutWarnDays | quote }}
+  TB_SCAN_INTERVAL_MINUTES: "0"
+  {{- $softwareAdditional := list }}
+  {{- range .Values.schema.software.additionalFields }}
+    {{- $field := deepCopy . }}
+    {{- if hasKey $field "type" }}{{- $_ := set $field "field_type" $field.type }}{{- $_ := unset $field "type" }}{{- end }}
+    {{- $softwareAdditional = append $softwareAdditional $field }}
+  {{- end }}
+  {{- $testAdditional := list }}
+  {{- range .Values.schema.tests.additionalFields }}
+    {{- $field := deepCopy . }}
+    {{- if hasKey $field "type" }}{{- $_ := set $field "field_type" $field.type }}{{- $_ := unset $field "type" }}{{- end }}
+    {{- $testAdditional = append $testAdditional $field }}
+  {{- end }}
+  {{- $entityFields := dict
+      "software" (dict "optional_fields" .Values.schema.software.optionalFields "custom_fields" $softwareAdditional)
+      "tests" (dict "optional_fields" .Values.schema.tests.optionalFields "custom_fields" $testAdditional) }}
+  TB_ENTITY_FIELDS_JSON: {{ $entityFields | toJson | quote }}
+  {{- $plugins := list }}
+  {{- if .Values.plugins.networkScan.enabled }}{{ $plugins = append $plugins (printf "network-scan=http://%s-network-scan:8080" (include "testbench.fullname" .)) }}{{ end }}
+  {{- if .Values.plugins.deviceInfo.enabled }}{{ $plugins = append $plugins (printf "device-info-agent=http://%s-device-info:8080" (include "testbench.fullname" .)) }}{{ end }}
+  {{- if .Values.plugins.reboot.enabled }}{{ $plugins = append $plugins (printf "device-reboot=http://%s-reboot:8080" (include "testbench.fullname" .)) }}{{ end }}
+  TB_PLUGINS: {{ join "," $plugins | quote }}
+  {{- if eq .Values.schema.devices.source "configMap" }}
+  TB_DEVICE_SCHEMA_PATH: {{ printf "/etc/testbench/device-schema/%s" .Values.schema.devices.key | quote }}
+  TB_DEVICE_SCHEMA_RECONCILIATION: {{ .Values.schema.devices.reconciliation | quote }}
+  {{- end }}
+  TB_DEVICE_SCHEMA_ALLOW_GLOBAL_EXCLUSIONS: {{ .Values.schema.devices.allowGlobalExclusions | quote }}
+  TB_DEVICE_SCHEMA_REJECT_UNKNOWN_FIELDS: {{ .Values.schema.devices.rejectUnknownFields | quote }}

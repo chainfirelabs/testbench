@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "testbench.fullname" . }}-database-schema-{{ .Release.Revision }}
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 300
+  # Connection retrying is handled explicitly by the init container. Do not
+  # restart the entire schema Job after its bounded wait has expired.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: testbench, app.kubernetes.io/component: database-schema}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      initContainers:
+        - name: wait-for-database
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.backend.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.backend.image) }}
+          command: ["/usr/bin/python3", "-c"]
+          args:
+            - |
+              import os
+              import time
+
+              import psycopg2
+
+              timeout = int(os.environ["TB_DB_WAIT_TIMEOUT_SECONDS"])
+              interval = int(os.environ["TB_DB_WAIT_INTERVAL_SECONDS"])
+              deadline = time.monotonic() + timeout
+              attempt = 0
+              connection = {
+                  "host": os.environ["TB_DB_HOST"],
+                  "port": int(os.environ["TB_DB_PORT"]),
+                  "dbname": os.environ["TB_DB_NAME"],
+                  "user": os.environ["TB_DB_USER"],
+                  "password": os.environ["TB_DB_PASSWORD"],
+                  "sslmode": os.environ["TB_DB_SSLMODE"],
+                  "connect_timeout": min(max(interval, 1), 10),
+              }
+
+              while True:
+                  attempt += 1
+                  try:
+                      with psycopg2.connect(**connection):
+                          pass
+                      print("Database is reachable; continuing with schema setup", flush=True)
+                      break
+                  except psycopg2.OperationalError as error:
+                      remaining = deadline - time.monotonic()
+                      message = str(error).strip().splitlines()[0]
+                      if remaining <= 0:
+                          raise SystemExit(
+                              f"Database was not reachable within {timeout}s after "
+                              f"{attempt} attempts: {message}"
+                          )
+                      delay = min(interval, remaining)
+                      print(
+                          f"Database unavailable (attempt {attempt}): {message}; "
+                          f"retrying in {delay:.0f}s",
+                          flush=True,
+                      )
+                      time.sleep(delay)
+          env:
+            {{- include "testbench.databaseEnv" . | nindent 12 }}
+            - name: TB_DB_WAIT_TIMEOUT_SECONDS
+              value: {{ .Values.database.waitTimeoutSeconds | quote }}
+            - name: TB_DB_WAIT_INTERVAL_SECONDS
+              value: {{ .Values.database.waitIntervalSeconds | quote }}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+      containers:
+        - name: database-schema
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.backend.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.backend.image) }}
+          command: ["/usr/bin/python3", "-m", "alembic", "upgrade", "head"]
+          env:
+            {{- include "testbench.databaseEnv" . | nindent 12 }}

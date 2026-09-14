@@ -1,0 +1,6 @@
+# Example only: actual internal endpoints belong in private CI/CD variables.
+[registry."docker.io"]
+  mirrors = ["registry.example.com/docker"]
+
+[registry."gcr.io"]
+  mirrors = ["registry.example.com/gcr"]

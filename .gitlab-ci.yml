@@ -1,0 +1,36 @@
+stages: [publish]
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?$/ && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - when: never
+
+publish-images:
+  stage: publish
+  image: docker:29.2.1-cli
+  services:
+    - name: docker:29.2.1-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: '1'
+    DOCKER_CERT_PATH: /certs/client
+  resource_group: publish-images
+  before_script:
+    - |
+      docker_wait_seconds=60
+      docker_wait_interval=2
+      docker_wait_elapsed=0
+      until docker info >/dev/null 2>&1; do
+        if [ "$docker_wait_elapsed" -ge "$docker_wait_seconds" ]; then
+          echo "Docker did not become ready within ${docker_wait_seconds}s." >&2
+          docker info
+          exit 1
+        fi
+        sleep "$docker_wait_interval"
+        docker_wait_elapsed=$((docker_wait_elapsed + docker_wait_interval))
+      done
+  script:
+    - sh scripts/ci/publish-images.sh

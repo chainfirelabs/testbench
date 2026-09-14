@@ -1,0 +1,540 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "applicationSecret",
+    "config",
+    "database",
+    "schema",
+    "mcp",
+    "plugins"
+  ],
+  "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "imageRegistry": {
+          "type": "string"
+        },
+        "imagePullPolicy": {
+          "$ref": "#/$defs/imagePullPolicy"
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "required": [
+        "host",
+        "port",
+        "name",
+        "sslmode",
+        "credentials"
+      ],
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sslmode": {
+          "type": "string",
+          "enum": [
+            "disable",
+            "allow",
+            "prefer",
+            "require",
+            "verify-ca",
+            "verify-full"
+          ]
+        },
+        "waitTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "waitIntervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "credentials": {
+          "type": "object",
+          "required": [
+            "existingSecret",
+            "usernameKey",
+            "passwordKey"
+          ],
+          "properties": {
+            "existingSecret": {
+              "type": "string",
+              "minLength": 1
+            },
+            "usernameKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "passwordKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "applicationSecret": {
+      "type": "object",
+      "required": [
+        "existingSecret"
+      ],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": [
+        "frontendUrl",
+        "corsOrigins"
+      ],
+      "properties": {
+        "frontendUrl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corsOrigins": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "authToken": {
+          "type": "object",
+          "properties": {
+            "existingSecret": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            }
+          }
+        },
+        "mountPath": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "defaultLimit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxResponseBytes": {
+          "type": "integer",
+          "minimum": 1024
+        },
+        "image": {
+          "$ref": "#/$defs/image"
+        }
+      }
+    },
+    "plugins": {
+      "type": "object",
+      "properties": {
+        "sharedSecret": {
+          "type": "object",
+          "properties": {
+            "existingSecret": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            }
+          }
+        },
+        "networkScan": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "maxConcurrentPods": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "image": {
+              "$ref": "#/$defs/image"
+            }
+          }
+        },
+        "deviceInfo": {
+          "type": "object",
+          "properties": {
+            "httpPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "httpsPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "maxConcurrentPods": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "captureImages": {
+              "type": "boolean"
+            },
+            "ai": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "repeatModel": {
+                  "type": "string"
+                },
+                "existingSecret": {
+                  "type": "string"
+                },
+                "apiKeySecretKey": {
+                  "type": "string"
+                }
+              }
+            },
+            "image": {
+              "$ref": "#/$defs/image"
+            },
+            "researchImage": {
+              "$ref": "#/$defs/image"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "ai": {
+                    "required": [
+                      "url",
+                      "model",
+                      "existingSecret",
+                      "apiKeySecretKey"
+                    ],
+                    "properties": {
+                      "url": {
+                        "minLength": 1
+                      },
+                      "model": {
+                        "minLength": 1
+                      },
+                      "existingSecret": {
+                        "minLength": 1
+                      },
+                      "apiKeySecretKey": {
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "reboot": {
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "ssh",
+                "ai"
+              ]
+            },
+            "sshCommand": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S"
+            },
+            "sshPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "maxConcurrentPods": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "captureImages": {
+              "type": "boolean"
+            },
+            "ai": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                },
+                "existingSecret": {
+                  "type": "string"
+                },
+                "apiKeySecretKey": {
+                  "type": "string"
+                }
+              }
+            },
+            "image": {
+              "$ref": "#/$defs/image"
+            },
+            "researchImage": {
+              "$ref": "#/$defs/image"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "ai": {
+                    "required": [
+                      "url",
+                      "model",
+                      "existingSecret",
+                      "apiKeySecretKey"
+                    ],
+                    "properties": {
+                      "url": {
+                        "minLength": 1
+                      },
+                      "model": {
+                        "minLength": 1
+                      },
+                      "existingSecret": {
+                        "minLength": 1
+                      },
+                      "apiKeySecretKey": {
+                        "minLength": 1
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "schema": {
+      "type": "object",
+      "required": [
+        "software",
+        "tests",
+        "devices"
+      ],
+      "properties": {
+        "software": {
+          "type": "object",
+          "required": [
+            "optionalFields",
+            "additionalFields"
+          ],
+          "properties": {
+            "optionalFields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "additionalFields": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "tests": {
+          "type": "object",
+          "required": [
+            "optionalFields",
+            "additionalFields"
+          ],
+          "properties": {
+            "optionalFields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "additionalFields": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "devices": {
+          "type": "object",
+          "required": [
+            "source",
+            "reconciliation",
+            "key"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "enum": [
+                "database",
+                "configMap"
+              ]
+            },
+            "reconciliation": {
+              "type": "string",
+              "enum": [
+                "bootstrap",
+                "merge",
+                "authoritative"
+              ]
+            },
+            "existingConfigMap": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            },
+            "allowGlobalExclusions": {
+              "type": "boolean"
+            },
+            "rejectUnknownFields": {
+              "type": "boolean"
+            }
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"source": {"const": "configMap"}}},
+              "then": {
+                "required": ["existingConfigMap"],
+                "properties": {"existingConfigMap": {"minLength": 1}}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "$ref": "#/$defs/image"
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "$ref": "#/$defs/image"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "registry": {
+          "type": "string",
+          "description": "Overrides global.imageRegistry when present. Empty uses repository as written."
+        },
+        "pullPolicy": {
+          "anyOf": [
+            {"$ref": "#/$defs/imagePullPolicy"},
+            {"const": ""}
+          ]
+        }
+      }
+    },
+    "imagePullPolicy": {
+      "type": "string",
+      "enum": ["Always", "IfNotPresent", "Never"]
+    }
+  }
+}

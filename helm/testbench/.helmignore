@@ -1,0 +1,26 @@
+# Patterns to leave out of a packaged chart. Matched like .gitignore, against
+# the chart directory.
+
+# Packaged charts are written next to the source they were built from, so
+# without this every `helm package` sweeps the previous release's tarball into
+# the new one — a chart shipping a copy of its own predecessor, and roughly
+# doubling in size each time.
+*.tgz
+
+# Version control and build leftovers.
+.git/
+.gitignore
+.DS_Store
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+
+# Editors and tooling.
+.idea/
+.vscode/
+.project
+
+# Local chart-render tests.
+tests/

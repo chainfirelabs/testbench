@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testbench-client"
+version = "0.1.0"
+description = "Python client for the TestBench API — fleet inventory, device checkout, and test results."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["httpx>=0.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/example/testbench"
+
+[tool.setuptools.packages.find]
+include = ["testbench_client*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

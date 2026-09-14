@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: testbench-device-schema
+  namespace: testbench
+data:
+  device-schema.yaml: |
+    apiVersion: testbench.chainfirelabs.com/v1
+    kind: DeviceSchema
+    metadata:
+      name: testbench
+    spec:
+      fields:
+        - {key: location, label: Location, type: text, indexed: true}
+        - {key: imei, label: IMEI, type: text, indexed: true}
+        - {key: carrier, label: Carrier, type: text}
+        - {key: phone_number, label: Phone Number, type: text}
+        - {key: cpu_count, label: CPU Count, type: number}
+        - {key: shelf_location, label: Shelf Location, type: text}
+        - {key: rack_location, label: Rack Location, type: text}
+        - {key: serial_number, label: Serial Number, type: text, indexed: true}
+        - {key: make, label: Make, type: text, role: device_vendor}
+        - {key: model, label: Model, type: text}
+        - {key: firmware_version, label: Firmware Version, type: text, role: discovery_firmware}
+        - {key: hardware_version, label: Hardware Version, type: text, role: discovery_hardware}
+        - {key: architecture, label: Architecture, type: select, options: [x86_64, x86, mipsbe, mipsel, arm, arm64, aarch64, ppc]}
+        - {key: wan_ip, label: WAN IP, type: text, role: scan_address_wan}
+        - {key: lan_ip, label: LAN IP, type: text, role: scan_address_lan}
+        - {key: wan_mac, label: WAN MAC, type: text, indexed: true, role: discovery_wan_mac}
+        - {key: lan_mac, label: LAN MAC, type: text, indexed: true, role: discovery_lan_mac}
+        - {key: username, label: Username, type: text, role: device_username}
+        - {key: password, label: Password, type: password, sensitive: true, role: device_password}
+      globalFields:
+        - {key: location, position: 10}
+        - {key: make, position: 20}
+        - {key: model, position: 30}
+        - {key: serial_number, position: 40}
+        - {key: firmware_version, position: 50}
+        - {key: hardware_version, position: 60}
+        - {key: architecture, position: 70}
+        - {key: username, position: 80}
+        - {key: password, position: 90, listVisible: false}
+        - {key: wan_mac, position: 100}
+        - {key: lan_mac, position: 110}
+      deviceTypes:
+        - key: router
+          label: Routers
+          position: 10
+          fields:
+            - {key: wan_ip, position: 120}
+            - {key: lan_ip, position: 130}
+        - key: mobile
+          label: Mobile Phones
+          position: 20
+          fields:
+            - {key: imei, position: 120}
+            - {key: carrier, position: 130}
+            - {key: phone_number, position: 140}
+        - key: server
+          label: Servers
+          position: 30
+          fields:
+            - {key: lan_ip, position: 120}
+            - {key: rack_location, position: 130}
+            - {key: cpu_count, position: 140}
