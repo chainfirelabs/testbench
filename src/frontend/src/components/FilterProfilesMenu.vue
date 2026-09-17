@@ -53,6 +53,16 @@ watch(platform, () => {
   load()
 })
 
+// Detail pages reuse the same component instance while navigating between
+// records. Their scoped entity changes even though the platform does not.
+watch(() => props.entity, async () => {
+  loaded = false
+  profiles.value = []
+  await load()
+  const d = defaultProfile()
+  if (d) applyProfile(d)
+})
+
 function defaultProfile() {
   return profiles.value.find((p: any) => p.is_default) || null
 }

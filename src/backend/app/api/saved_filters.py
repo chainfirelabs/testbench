@@ -41,7 +41,10 @@ def create_saved_filter(
     if not is_filter_entity(body.entity):
         raise HTTPException(
             status_code=400,
-            detail=f"entity must be one of {FILTER_ENTITIES}, or devices:<device type key>",
+            detail=(
+                f"entity must be one of {FILTER_ENTITIES}, devices:<device type key>, "
+                "vendor_devices:<software UUID>, or tested_devices:<software UUID>"
+            ),
         )
     if body.platform not in FILTER_PLATFORMS:
         raise HTTPException(status_code=400, detail=f"platform must be one of {FILTER_PLATFORMS}")

@@ -5,7 +5,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
-from ..models import Device, Test, Software, User, VendorDevice
+from ..models import (
+    Device, Test, Software, SoftwareComponent, User, VendorDevice,
+    VendorDeviceFieldOverride,
+)
 from ..models.vendor_device import build_match_key
 from ..schemas import (
     BulkIds,
@@ -14,6 +17,8 @@ from ..schemas import (
     ImportResult,
     Page,
     SoftwareCreate,
+    SoftwareBundleComponentIn,
+    SoftwareBundleComponentOut,
     SoftwareOut,
     SoftwareVersionCreate,
     SoftwareTestedDeviceOut,
@@ -35,7 +40,7 @@ router = APIRouter(prefix="/software", tags=["software"])
 # single cell as a JSON array — the same way misc_data already travels — and
 # the CSV reader decodes it back on import.
 EXPORT_COLUMNS = [
-    "id", "name", "version", "misc_data", "vendor_devices", "created_at", "updated_at",
+    "id", "name", "version", "misc_data", "bundle_components", "vendor_devices", "created_at", "updated_at",
 ]
 EDITABLE_FIELDS = ["name", "version", "misc_data"]
 
@@ -43,7 +48,7 @@ EDITABLE_FIELDS = ["name", "version", "misc_data"]
 # timestamps belong to the instance that produced the file, and carrying them
 # into another one is how a restore ends up with rows nothing can match.
 VENDOR_DEVICE_FIELDS = [
-    "vendor", "make", "model", "firmware_version", "hardware_version",
+    "make", "model", "firmware_version", "hardware_version",
     "architecture", "support_status", "source", "notes", "misc_data",
 ]
 # Server-owned or derived columns; an export re-imported as-is carries them.
@@ -54,11 +59,8 @@ IMPORT_IGNORED = {
     "version_count", "is_latest",
     # Not a software field at all: pulled out of the row and applied to the
     # vendor_devices table after the software row itself is settled.
-    "vendor_devices",
+    "vendor_devices", "bundle_components", "bundle_parent_count",
 }
-
-# The columns an import template offers, required first.
-TEMPLATE_COLUMNS = ["name", "version"]
 
 _VERSION_RE = re.compile(r"^[vV]?(\d+(?:\.\d+)*)(?:[-+](.*))?$")
 
@@ -116,7 +118,6 @@ def _copy_vendor_devices(db: Session, source: Software, target: Software, actor_
     for vd in source.vendor_devices:
         db.add(VendorDevice(
             software_id=target.id,
-            vendor=vd.vendor,
             make=vd.make,
             model=vd.model,
             firmware_version=vd.firmware_version,
@@ -136,12 +137,73 @@ def _copy_vendor_devices(db: Session, source: Software, target: Software, actor_
     return copied
 
 
+def _copy_vendor_device_schema(db: Session, source: Software, target: Software) -> int:
+    overrides = list(db.scalars(select(VendorDeviceFieldOverride).where(
+        VendorDeviceFieldOverride.software_id == source.id,
+    )).all())
+    for item in overrides:
+        db.add(VendorDeviceFieldOverride(
+            software_id=target.id, field_id=item.field_id, visible=item.visible,
+            required=item.required, position=item.position,
+        ))
+    return len(overrides)
+
+
 def _version_taken(name: str, version: str) -> str:
     return (
         f"'{name}' already has a version '{version}'"
         if version
         else f"An unversioned '{name}' already exists"
     )
+
+
+def _replace_bundle_components(
+    db: Session, bundle: Software, components: list[SoftwareBundleComponentIn],
+) -> None:
+    """Replace one version's suite-scoped components without creating Software rows."""
+    existing = list(db.scalars(select(SoftwareComponent).where(
+        SoftwareComponent.software_id == bundle.id,
+    )).all())
+    by_id = {item.id: item for item in existing}
+    by_identity = {(item.name.casefold(), item.version): item for item in existing}
+    retained: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    for index, component in enumerate(components):
+        name = (component.name or "").strip()
+        version = (component.version or "").strip()
+        if not name:
+            raise ValueError("bundle component needs a name")
+        identity = (name.casefold(), version)
+        if identity in seen:
+            raise ValueError(f"duplicate bundle component: {name} {version}".strip())
+        seen.add(identity)
+        row = by_id.get(component.id or "") or by_identity.get(identity)
+        if row is None:
+            row = SoftwareComponent(software_id=bundle.id, name=name, version=version)
+            db.add(row)
+            db.flush()
+        row.name, row.version = name, version
+        row.required = component.required
+        row.position = component.position if "position" in component.model_fields_set else index
+        retained.add(row.id)
+    for row in existing:
+        if row.id not in retained:
+            db.delete(row)
+
+
+def _bundle_components(db: Session, software_ids: set[str]) -> dict[str, list[SoftwareBundleComponentOut]]:
+    if not software_ids:
+        return {}
+    members = list(db.scalars(select(SoftwareComponent).where(
+        SoftwareComponent.software_id.in_(software_ids),
+    )).all())
+    result: dict[str, list[SoftwareBundleComponentOut]] = {}
+    for component in sorted(members, key=lambda item: (item.position, item.id)):
+        result.setdefault(component.software_id, []).append(SoftwareBundleComponentOut(
+            id=component.id, name=component.name, version=component.version,
+            required=component.required, position=component.position,
+        ))
+    return result
 
 
 def _annotate(db: Session, software: list[Software]) -> list[SoftwareOut]:
@@ -152,6 +214,11 @@ def _annotate(db: Session, software: list[Software]) -> list[SoftwareOut]:
     rather than per row.
     """
     out = [SoftwareOut.model_validate(t) for t in software]
+    ids = {t.id for t in software}
+    components = _bundle_components(db, ids)
+    for source, item in zip(software, out):
+        item.bundle_components = components.get(source.id, [])
+        item.bundle_parent_count = 0
     keys = {t.name.lower() for t in software}
     if not keys:
         return out
@@ -302,14 +369,17 @@ def export_software(
     user: User = Depends(get_current_user),
 ):
     items = db.scalars(_query_software(db, search, latest_only).order_by(Software.name, Software.created_at)).all()
+    items = list(items)
     rows = []
     fields = get_entity_fields(db, "software")
+    annotated = {item.id: item for item in _annotate(db, items)}
     vendor_total = 0
     for t in items:
         vendor_devices = _vendor_device_rows(t)
         vendor_total += len(vendor_devices)
         rows.append({
-            **project_fields(_software_dict(t), fields, "misc_data"),
+            **project_fields(annotated[t.id].model_dump(mode="json"), fields, "misc_data"),
+            "bundle_components": [item.model_dump(mode="json") for item in annotated[t.id].bundle_components],
             "vendor_devices": vendor_devices,
         })
     log_action(
@@ -317,7 +387,7 @@ def export_software(
         {"format": format, "count": len(rows), "vendor_devices": vendor_total}, request,
     )
     db.commit()
-    return export_response(rows, [field.key for field in fields] + ["vendor_devices"], format, "software")
+    return export_response(rows, [field.key for field in fields] + ["bundle_components", "vendor_devices"], format, "software")
 
 
 @router.get("/template")
@@ -355,38 +425,40 @@ def get_tested_devices(software_id: str, db: Session = Depends(get_db), user: Us
     software = _get_software(db, software_id)
     if software is None:
         raise HTTPException(status_code=404, detail="Software not found")
-    rows = db.execute(
-        select(
-            Test.device_id,
-            func.count(Test.id),
-            func.max(Test.run_at),
-            Test.outcome,
-        )
-        .where(Test.software_id == software.id)
-        .group_by(Test.device_id, Test.outcome)
-    ).all()
-    by_device: dict[str, dict] = {}
-    for device_id, count, last_at, outcome in rows:
-        entry = by_device.setdefault(device_id, {"count": 0, "last": None, "outcomes": {}})
-        entry["count"] += count
-        if last_at and (entry["last"] is None or last_at > entry["last"]):
-            entry["last"] = last_at
-        entry["outcomes"][outcome] = entry["outcomes"].get(outcome, 0) + count
+    components = _bundle_components(db, {software.id}).get(software.id, [])
+    component_by_id = {item.id: item for item in components}
+    tests = list(db.scalars(select(Test).where(Test.software_id == software.id)).all())
+    # Tests always belong to the suite. component_id optionally places one
+    # beneath a suite-scoped component; it never points at standalone software.
+    by_device: dict[tuple[str | None, str], dict] = {}
+    for test in tests:
+        component = component_by_id.get(test.component_id)
+        key = (component.id if component else None, test.device_id)
+        entry = by_device.setdefault(key, {
+            "count": 0, "last": None, "outcomes": {}, "component": component,
+        })
+        entry["count"] += 1
+        if test.run_at and (entry["last"] is None or test.run_at > entry["last"]):
+            entry["last"] = test.run_at
+        entry["outcomes"][test.outcome] = entry["outcomes"].get(test.outcome, 0) + 1
     devices = list(
-        db.scalars(select(Device).where(Device.id.in_(by_device))).all()
+        db.scalars(select(Device).where(Device.id.in_({key[1] for key in by_device}))).all()
     ) if by_device else []
-    devices.sort(key=lambda d: d.unique_id)
+    device_by_id = {device.id: device for device in devices}
     cache: dict = {}
+    ordered = sorted(by_device.items(), key=lambda pair: (
+        pair[1]["component"].position if pair[1]["component"] else -1,
+        device_by_id[pair[0][1]].unique_id,
+    ))
     return SoftwareTestedDevicesOut(
         software_id=software.id,
         devices=[
             SoftwareTestedDeviceOut(
-                device=device_out(db, d, cache),
-                test_count=by_device[d.id]["count"],
-                last_test_at=by_device[d.id]["last"],
-                outcomes=by_device[d.id]["outcomes"],
+                device=device_out(db, device_by_id[device_id], cache),
+                test_count=entry["count"], last_test_at=entry["last"],
+                outcomes=entry["outcomes"], component=entry["component"],
             )
-            for d in devices
+            for (_component_id, device_id), entry in ordered
         ],
     )
 
@@ -433,6 +505,12 @@ def create_version(
     db.flush()  # the copies below need the new row's id
 
     copied = _copy_vendor_devices(db, source, software, user.id) if body.copy_vendor_devices else 0
+    schema_overrides_copied = _copy_vendor_device_schema(db, source, software)
+    source_components = _bundle_components(db, {source.id}).get(source.id, [])
+    if source_components:
+        _replace_bundle_components(db, software, [SoftwareBundleComponentIn(
+            name=item.name, version=item.version, required=item.required, position=item.position,
+        ) for item in source_components])
 
     log_action(
         db, user, "software.version.create", "software", software.id,
@@ -442,6 +520,7 @@ def create_version(
             "from_version": source.version,
             "from_software_id": source.id,
             "vendor_devices_copied": copied,
+            "vendor_device_schema_overrides_copied": schema_overrides_copied,
         },
         request,
     )
@@ -472,11 +551,19 @@ def create_software(
             ),
         )
     try:
-        data = validate_custom_values(db, "software", body.model_dump(), "misc_data")
+        data = validate_custom_values(
+            db, "software", body.model_dump(exclude={"bundle_components"}), "misc_data",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     software = Software(**data)
     db.add(software)
+    db.flush()
+    if body.bundle_components is not None:
+        try:
+            _replace_bundle_components(db, software, body.bundle_components)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     log_action(db, user, "software.create", "software", software.id, body.model_dump(mode="json"), request)
     db.commit()
     db.refresh(software)
@@ -496,7 +583,8 @@ def update_software(
         raise HTTPException(status_code=404, detail="Software not found")
     try:
         updates = validate_custom_values(
-            db, "software", body.model_dump(exclude_unset=True), "misc_data", partial=True
+            db, "software", body.model_dump(exclude_unset=True, exclude={"bundle_components"}),
+            "misc_data", partial=True
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -536,6 +624,12 @@ def update_software(
             continue
         sibling.name = new_name
         sibling.updated_at = utcnow()
+
+    if body.bundle_components is not None:
+        try:
+            _replace_bundle_components(db, software, body.bundle_components)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     detail = {"diff": field_diff(old, {f: getattr(software, f) for f in EDITABLE_FIELDS})}
     if renaming and len(siblings) > 1:
@@ -590,7 +684,8 @@ def bulk_software(
     for i, row in enumerate(body.upserts):
         try:
             with row_scope(db):
-                data = SoftwareCreate(**{k: v for k, v in row.items() if k != "id"}).model_dump()
+                parsed = SoftwareCreate(**{k: v for k, v in row.items() if k != "id"})
+                data = parsed.model_dump(exclude={"bundle_components"})
                 data = validate_custom_values(db, "software", data, "misc_data")
                 software = db.get(Software, row.get("id")) if row.get("id") else None
                 if software is None:
@@ -610,6 +705,9 @@ def bulk_software(
                         setattr(software, field, value)
                     software.updated_at = utcnow()
                     outcome = "updated"
+                if parsed.bundle_components is not None:
+                    db.flush()
+                    _replace_bundle_components(db, software, parsed.bundle_components)
         except Exception as exc:  # noqa: BLE001
             errors.append({"row": i, "error": row_error(exc)})
             continue
@@ -641,6 +739,7 @@ async def import_software(
     is_csv = filename.lower().endswith(".csv")
     result = ImportResult(created=0, updated=0, errors=[])
     vendor_applied = 0
+    pending_bundles: list[tuple[int, Software, list[SoftwareBundleComponentIn]]] = []
     for i, row in enumerate(rows):
         try:
             with row_scope(db):
@@ -650,9 +749,13 @@ async def import_software(
                     configured = {field.key for field in get_entity_fields(db, "software")}
                     known = configured | {"misc_data", "vendor_devices"} | IMPORT_IGNORED
                     row = merge_extra_columns(row, known, "misc_data")
-                data = SoftwareCreate(
-                    **strip_nulls({k: v for k, v in row.items() if k not in IMPORT_IGNORED})
-                ).model_dump()
+                parsed_software = SoftwareCreate(
+                    **strip_nulls({
+                        k: v for k, v in row.items()
+                        if k not in IMPORT_IGNORED or k == "bundle_components"
+                    })
+                )
+                data = parsed_software.model_dump(exclude={"bundle_components"})
                 data = validate_custom_values(db, "software", data, "misc_data")
                 software = db.get(Software, row["id"]) if row.get("id") else None
                 if software is None:
@@ -684,6 +787,7 @@ async def import_software(
                     db.add(software)
                     if previous is not None:
                         db.flush()  # the copies need the new row's id
+                        _copy_vendor_device_schema(db, previous, software)
                         # Skipped when the file states the list itself: inheriting
                         # the previous version's rows *and* applying the file's
                         # would leave the union of two lists, which is neither.
@@ -696,13 +800,26 @@ async def import_software(
                     vendor_applied += _apply_vendor_devices(
                         db, software, vendor_devices, user.id
                     )
+                if row.get("bundle_components") is not None:
+                    # Applied after the software row exists because components
+                    # are owned by that specific suite/version.
+                    pending_bundles.append((i, software, parsed_software.bundle_components or []))
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": i, "error": row_error(exc)})
             continue
         result.created += outcome == "created"
         result.updated += outcome == "updated"
+    bundles_applied = 0
+    for row_index, software, components in pending_bundles:
+        try:
+            with row_scope(db):
+                _replace_bundle_components(db, software, components)
+                bundles_applied += len(components)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append({"row": row_index, "error": row_error(exc)})
     log_action(db, user, "software.import", "software", None,
                {"file": file.filename, "created": result.created, "updated": result.updated,
-                "vendor_devices": vendor_applied, "errors": result.errors}, request)
+                "vendor_devices": vendor_applied, "bundle_components": bundles_applied,
+                "errors": result.errors}, request)
     db.commit()
     return result

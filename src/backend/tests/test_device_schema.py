@@ -264,6 +264,22 @@ class PluginPolicyTests(unittest.TestCase):
             role = "readonly"
         self.assertIn("write permission", _action_blocker(None, self.ACTION, self.device(), self.FIELDS, User()))
 
+    def test_an_admin_only_action_rejects_a_tester(self):
+        class Tester:
+            role = "tester"
+        action = {**self.ACTION, "required_user_role": "admin"}
+        self.assertIn("admin permission", _action_blocker(
+            None, action, self.device(), self.FIELDS, Tester(),
+        ))
+
+    def test_an_admin_only_action_accepts_an_admin(self):
+        class Admin:
+            role = "admin"
+        action = {**self.ACTION, "required_user_role": "admin"}
+        self.assertIsNone(_action_blocker(
+            None, action, self.device(), self.FIELDS, Admin(),
+        ))
+
     def test_required_any_roles_is_read_as_a_group(self):
         self.assertEqual(_role_groups({"required_any_roles": ["a", "b"]}), [["a", "b"]])
         self.assertEqual(

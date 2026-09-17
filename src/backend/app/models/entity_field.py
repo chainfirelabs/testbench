@@ -31,3 +31,5 @@ class EntityField(TimestampMixin, Base):
     role: Mapped[str | None] = mapped_column(String(50))
     indexed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     unique_value: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    configuration_source: Mapped[str] = mapped_column(String(10), nullable=False, default="system")
+    source_revision: Mapped[str | None] = mapped_column(String(100))

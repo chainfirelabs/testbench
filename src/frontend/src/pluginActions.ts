@@ -16,6 +16,7 @@ export interface PluginAction {
   /** Each group is satisfied by any one of its roles (WAN address or LAN address). */
   required_role_groups?: string[][]
   required_any_roles?: string[]
+  required_user_role?: 'admin' | 'tester' | 'readonly'
   allow_global_assignment?: boolean
   /** The device types this plugin is enabled for. Empty means nobody. */
   device_types?: string[]

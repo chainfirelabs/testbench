@@ -21,6 +21,7 @@ from .api import (
     vendor_devices,
     entity_fields,
     plugins,
+    ai_providers,
 )
 from .config import settings
 from .core.security import hash_password
@@ -133,6 +134,7 @@ app.include_router(users.router, prefix=API_PREFIX)
 app.include_router(entity_fields.router, prefix=API_PREFIX)
 app.include_router(plugins.router, prefix=API_PREFIX)
 app.include_router(plugins.host_router, prefix=API_PREFIX)
+app.include_router(ai_providers.router, prefix=API_PREFIX)
 
 
 @app.get("/api/v1/health")

@@ -13,7 +13,8 @@ enabled) `shared-secret`:
 kubectl create namespace testbench --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl --namespace testbench create secret generic testbench-application \
-  --from-literal=TB_JWT_SECRET='replace-with-a-long-random-value'
+  --from-literal=TB_JWT_SECRET='replace-with-a-long-random-value' \
+  --from-literal=TB_CREDENTIAL_ENCRYPTION_KEY='replace-with-another-long-random-value'
 ```
 
 Device automation passwords are stored as plaintext in PostgreSQL; protect
@@ -53,6 +54,39 @@ database service that is still starting. A missing database, invalid login, or
 unreachable service still fails after the bounded timeout; the chart never
 creates the database or application login.
 
+### Private Authentik CA
+
+When the Authentik OIDC issuer uses a certificate signed by a private CA,
+create a ConfigMap in the release namespace and configure the backend to trust
+it:
+
+```bash
+kubectl --namespace testbench create configmap authentik-ca \
+  --from-file=ca.crt=authentik-ca.crt
+```
+
+```yaml
+authentik:
+  tls:
+    existingConfigMap: authentik-ca
+    key: ca.crt
+```
+
+The certificate hostname must still match the Authentik issuer URL. Restart
+the backend after replacing CA data so its cached OIDC discovery is refreshed.
+
+### AI provider ownership
+
+When an enabled Device Info or Reboot plugin has both `ai.url` and `ai.model`
+set, those values and the optional `ai.repeatModel` are authoritative: the web
+UI displays them read-only and uses the configured Kubernetes API-key Secret.
+Leave both URL and model empty to let administrators create encrypted provider
+profiles under **AI Providers**, discover available models, select plugin
+defaults, and override profile/model choices by device type, ordered rule, or
+individual device. GUI API keys require `TB_CREDENTIAL_ENCRYPTION_KEY` in the
+application Secret; changing that key without re-entering stored credentials
+makes them undecryptable.
+
 ### Private container registry
 
 Application images use non-root distroless runtimes. The frontend container
@@ -76,7 +110,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.8.8`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.9.0`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -233,6 +267,13 @@ web-interface ports (defaults `80` and `443`). The corresponding plugin
 configuration keys are `http_port` and `https_port`, with the same type, rule,
 and device override precedence. The agent tries HTTPS followed by HTTP.
 
+The same precedence applies to `discovery_roles` and `prompt_addendum`.
+Administrators can request hardware, firmware, LAN MAC, and/or WAN MAC by
+device type, first matching rule, or individual device. The resolved role list
+is enforced by the worker and backend, and existing MAC values remain
+protected. A prompt addendum supplements the global prompt without replacing
+the protected security and structured-result instructions.
+
 ## Plugin prompt variables
 
 `plugins.deviceInfo.prompt` and `plugins.reboot.prompt` support exactly two
@@ -262,6 +303,13 @@ Therefore the configured prompt describes the task but does not need to include
 credentials, result JSON formatting, retry steps, or recipe reuse. For Reboot,
 the prompt is used only when the resolved method is `ai`; the `ssh` method uses
 the Paramiko worker directly.
+
+The Devices page offers the admin-only **Query all** action
+alongside the per-device Info action. It selects every online device that is eligible under the same plugin,
+field-role, and credential policy as an individual run. One research Job is
+created per eligible device, while the controller queues excess work so the
+combined total of bulk and individual Jobs never exceeds
+`plugins.deviceInfo.maxConcurrentPods`.
 
 ### Device-info ACP worker
 

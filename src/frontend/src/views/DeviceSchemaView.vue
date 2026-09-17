@@ -47,6 +47,7 @@ const TABS = [
   { id: 'plugins', label: 'Plugins' },
   { id: 'software', label: 'Software' },
   { id: 'tests', label: 'Tests' },
+  { id: 'vendor_devices', label: 'Vendor Devices' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -158,7 +159,7 @@ const creatingEntityField = ref(false)
 const entityLayoutDirty = ref(false)
 const entityDragId = ref('')
 
-const activeEntity = computed(() => tab.value === 'software' || tab.value === 'tests' ? tab.value : null)
+const activeEntity = computed(() => ['software', 'tests', 'vendor_devices'].includes(tab.value) ? tab.value as 'software' | 'tests' | 'vendor_devices' : null)
 const entityOptionsText = computed({
   get: () => (editingEntityField.value?.options || []).join('\n'),
   set: (value: string) => {
@@ -896,6 +897,7 @@ interface PluginRow {
   installed: boolean
   enabled: boolean
   configuration_defaults?: Record<string, any>
+  ai_configuration?: Record<string, any>
   configuration: Record<string, any>
   configuration_source?: string | null
   missing_roles: string[]
@@ -909,18 +911,51 @@ interface PluginRule {
   value: string
   case_sensitive?: boolean
   configuration: {
-    method?: 'ssh' | 'ai' | null
+    method?: 'ssh' | 'ai' | 'browser' | 'auto' | null
     ssh_command?: string | null
     ssh_port?: number | null
     http_port?: number | null
     https_port?: number | null
+    ai_profile_id?: string | null
+    ai_model?: string | null
+    ai_repeat_model?: string | null
+    discovery_roles?: string[] | null
+    prompt_addendum?: string | null
+    ssh_commands?: { command: string; yields: string[] }[] | null
+    ssh_connect_timeout?: number | null
+    ssh_command_timeout?: number | null
+    ssh_host_key_policy?: 'accept-new' | 'strict' | null
   }
 }
 
 const pluginRows = ref<PluginRow[]>([])
+const aiProfiles = ref<any[]>([])
+const aiModels = (profileId?: string | null) => aiProfiles.value.find((item) => item.id === profileId)?.models || []
 const pluginRuleFields = ref<{ key: string; label: string }[]>([])
 const configDrafts = ref<Record<string, string>>({})
 const pluginRules = (row: PluginRow): PluginRule[] => row.configuration._rules || (row.configuration._rules = [])
+const DISCOVERY_ROLE_OPTIONS = [
+  { value: 'discovery_hardware', label: 'Hardware version' },
+  { value: 'discovery_firmware', label: 'Firmware version' },
+  { value: 'discovery_lan_mac', label: 'LAN MAC' },
+  { value: 'discovery_wan_mac', label: 'WAN MAC' },
+]
+
+function toggleDiscoveryOverride(configuration: Record<string, any>, enabled: boolean) {
+  configuration.discovery_roles = enabled
+    ? DISCOVERY_ROLE_OPTIONS.map((item) => item.value)
+    : null
+}
+
+function addInfoSshCommand(configuration: Record<string, any>) {
+  if (!Array.isArray(configuration.ssh_commands)) configuration.ssh_commands = []
+  configuration.ssh_commands.push({ command: '', yields: DISCOVERY_ROLE_OPTIONS.map((item) => item.value) })
+}
+
+function toggleInfoSshCommands(configuration: Record<string, any>, enabled: boolean) {
+  configuration.ssh_commands = enabled ? [] : null
+  if (enabled) addInfoSshCommand(configuration)
+}
 
 function addPluginRule(row: PluginRow) {
   pluginRules(row).push({
@@ -928,7 +963,9 @@ function addPluginRule(row: PluginRow) {
     field_key: pluginRuleFields.value.find((field) => field.key === 'make')?.key || pluginRuleFields.value[0]?.key || '',
     operator: 'equals', value: '', configuration: row.plugin_id === 'device-reboot'
       ? { method: 'ssh', ssh_command: null, ssh_port: null }
-      : { http_port: null, https_port: null },
+      : { method: null, http_port: null, https_port: null, ssh_port: null, ssh_commands: null,
+          ssh_connect_timeout: null, ssh_command_timeout: null, ssh_host_key_policy: null,
+          discovery_roles: null, prompt_addendum: null },
   })
 }
 
@@ -948,9 +985,13 @@ async function loadPlugins() {
     pluginRows.value = []
     return
   }
-  const result = await api<{ plugins: PluginRow[]; rule_fields: { key: string; label: string }[] }>(
-    `/device-schema/types/${encodeURIComponent(activeTypeId.value)}/plugins`,
-  )
+  const [result, profiles] = await Promise.all([
+    api<{ plugins: PluginRow[]; rule_fields: { key: string; label: string }[] }>(
+      `/device-schema/types/${encodeURIComponent(activeTypeId.value)}/plugins`,
+    ),
+    api<any[]>('/ai/providers'),
+  ])
+  aiProfiles.value = profiles.filter((item) => item.enabled)
   pluginRuleFields.value = result.rule_fields || []
   pluginRows.value = result.plugins.map(row => row.plugin_id === 'device-reboot'
     ? { ...row, configuration: { ...row.configuration, method: row.configuration.method ?? null } }
@@ -1062,6 +1103,7 @@ async function applyImport() {
   try {
     const result: AdditiveImportResult = await uploadFile('/device-schema/import', importFile.value)
     cancelImport()
+    invalidateEntityFields()
     await refreshAll()
     flash(result.total ? `${result.total} schema addition${result.total === 1 ? '' : 's'} imported` : 'Nothing new to import')
   } catch (e: any) {
@@ -1077,6 +1119,7 @@ const importLabels: Record<string, string> = {
   global_assignments: 'Global layout fields',
   type_assignments: 'Device-type layout fields',
   plugins: 'Plugin assignments',
+  vendor_device_fields: 'Vendor-device fields',
 }
 
 watch(tab, (value) => {
@@ -1086,7 +1129,7 @@ watch(tab, (value) => {
     if (!activeTypeId.value) activeTypeId.value = deviceTypes.value[0]?.id || ''
     void loadPlugins()
   }
-  if (value === 'software' || value === 'tests') void loadEntitySchema()
+  if (['software', 'tests', 'vendor_devices'].includes(value)) void loadEntitySchema()
 })
 
 watch(activeTypeId, () => {
@@ -1330,7 +1373,9 @@ onMounted(async () => {
           <button class="linkish" @click="tab = 'layouts'">Device Layouts</button>. Disabling a field
           takes it off every layout without deleting what devices already store.
         </p>
-        <button class="btn btn-primary" @click="newField()">+ New field</button>
+        <div class="scope-actions">
+          <button class="btn btn-primary" @click="newField()">+ New field</button>
+        </div>
       </div>
       <table class="data-list">
         <thead>
@@ -1371,7 +1416,7 @@ onMounted(async () => {
 
     <!-- Software and tests have one layout each. Relationship and application
          fields stay visible here but only their presentation can be edited. -->
-    <section v-else-if="tab === 'software' || tab === 'tests'">
+    <section v-else-if="tab === 'software' || tab === 'tests' || tab === 'vendor_devices'">
       <div class="section-head">
         <p class="muted">
           Protected fields preserve application identity and relationships. Additional fields are stored in JSON and may be added or removed.
@@ -1410,7 +1455,9 @@ onMounted(async () => {
             <option v-for="item in deviceTypes" :key="item.id" :value="item.id">{{ item.label }}</option>
           </select>
         </label>
-        <button class="btn btn-primary" :disabled="busy || !activeTypeId" @click="savePlugins">Save changes</button>
+        <div class="scope-actions">
+          <button class="btn btn-primary" :disabled="busy || !activeTypeId" @click="savePlugins">Save changes</button>
+        </div>
       </div>
       <p class="muted">
         Nothing is available to a device type until it is enabled here, and the API repeats the check
@@ -1439,6 +1486,18 @@ onMounted(async () => {
           </li>
         </ul>
         <div v-if="row.enabled && row.plugin_id === 'device-reboot'" class="config">
+          <template v-if="row.ai_configuration?.locked">
+            <label>AI endpoint<input :value="row.ai_configuration.url" disabled /></label>
+            <label>AI model<input :value="row.ai_configuration.model" disabled /></label>
+            <label>AI repeat model<input :value="row.ai_configuration.repeat_model || row.ai_configuration.model" disabled /></label>
+            <small class="muted">Managed by Helm; AI overrides are disabled.</small>
+          </template>
+          <template v-else>
+            <label>AI provider override<select v-model="row.configuration.ai_profile_id" :disabled="yamlOwned(row.configuration_source)"><option :value="null">Inherit global</option><option v-for="p in aiProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+            <label>AI model override<input v-model="row.configuration.ai_model" :list="`ai-models-${row.plugin_id}`" placeholder="Inherit global" :disabled="yamlOwned(row.configuration_source)" /></label>
+            <label>AI repeat model override<input v-model="row.configuration.ai_repeat_model" :list="`ai-models-${row.plugin_id}`" placeholder="Inherit model" :disabled="yamlOwned(row.configuration_source)" /></label>
+            <datalist :id="`ai-models-${row.plugin_id}`"><option v-for="model in aiModels(row.configuration.ai_profile_id)" :key="model" :value="model" /></datalist>
+          </template>
           <label>Reboot method
             <select v-model="row.configuration.method" :disabled="yamlOwned(row.configuration_source)">
               <option :value="null">Inherit global ({{ row.configuration_defaults?.method || 'ai' }})</option>
@@ -1486,6 +1545,12 @@ onMounted(async () => {
             <input type="number" min="1" max="65535" :value="rule.configuration.ssh_port ?? ''"
               @input="rule.configuration.ssh_port = inputPort($event)"
               placeholder="SSH port (inherit)" :disabled="yamlOwned(row.configuration_source)" />
+            <template v-if="!row.ai_configuration?.locked">
+              <select v-model="rule.configuration.ai_profile_id" :disabled="yamlOwned(row.configuration_source)"><option :value="null">AI provider: inherit</option><option v-for="p in aiProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select>
+              <input v-model="rule.configuration.ai_model" :list="`ai-models-${row.plugin_id}-${index}`" placeholder="AI model (inherit)" :disabled="yamlOwned(row.configuration_source)" />
+              <input v-model="rule.configuration.ai_repeat_model" :list="`ai-models-${row.plugin_id}-${index}`" placeholder="AI repeat model (inherit)" :disabled="yamlOwned(row.configuration_source)" />
+              <datalist :id="`ai-models-${row.plugin_id}-${index}`"><option v-for="model in aiModels(rule.configuration.ai_profile_id)" :key="model" :value="model" /></datalist>
+            </template>
             <label class="check"><input type="checkbox" v-model="rule.case_sensitive" :disabled="yamlOwned(row.configuration_source)" />Case-sensitive</label>
             <div class="rule-actions">
               <button type="button" class="btn" :disabled="index === 0 || yamlOwned(row.configuration_source)" @click="movePluginRule(row, index, -1)">↑</button>
@@ -1495,6 +1560,24 @@ onMounted(async () => {
           </div>
         </div>
         <div v-else-if="row.enabled && row.plugin_id === 'device-info-agent'" class="config">
+          <label>Collection method
+            <select v-model="row.configuration.method" :disabled="yamlOwned(row.configuration_source)">
+              <option :value="null">Inherit (browser)</option><option value="browser">Browser</option>
+              <option value="ssh">SSH only</option><option value="auto">Auto (SSH, then browser)</option>
+            </select>
+          </label>
+          <template v-if="row.ai_configuration?.locked">
+            <label>AI endpoint<input :value="row.ai_configuration.url" disabled /></label>
+            <label>AI model<input :value="row.ai_configuration.model" disabled /></label>
+            <label>AI repeat model<input :value="row.ai_configuration.repeat_model || row.ai_configuration.model" disabled /></label>
+            <small class="muted">Managed by Helm; AI overrides are disabled.</small>
+          </template>
+          <template v-else>
+            <label>AI provider override<select v-model="row.configuration.ai_profile_id" :disabled="yamlOwned(row.configuration_source)"><option :value="null">Inherit global</option><option v-for="p in aiProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+            <label>AI model override<input v-model="row.configuration.ai_model" :list="`ai-models-${row.plugin_id}`" placeholder="Inherit global" :disabled="yamlOwned(row.configuration_source)" /></label>
+            <label>AI repeat model override<input v-model="row.configuration.ai_repeat_model" :list="`ai-models-${row.plugin_id}`" placeholder="Inherit model" :disabled="yamlOwned(row.configuration_source)" /></label>
+            <datalist :id="`ai-models-${row.plugin_id}`"><option v-for="model in aiModels(row.configuration.ai_profile_id)" :key="model" :value="model" /></datalist>
+          </template>
           <label>HTTP port override
             <input type="number" min="1" max="65535" :value="row.configuration.http_port ?? ''"
               @input="row.configuration.http_port = inputPort($event)"
@@ -1507,7 +1590,49 @@ onMounted(async () => {
               :placeholder="String(row.configuration_defaults?.https_port || 443)"
               :disabled="yamlOwned(row.configuration_source)" />
           </label>
-          <small class="muted">Leave empty to inherit global ports. Device-specific overrides take priority.</small>
+          <label>SSH port override
+            <input type="number" min="1" max="65535" :value="row.configuration.ssh_port ?? ''"
+              @input="row.configuration.ssh_port = inputPort($event)" placeholder="22"
+              :disabled="yamlOwned(row.configuration_source)" />
+          </label>
+          <label>SSH host keys
+            <select v-model="row.configuration.ssh_host_key_policy" :disabled="yamlOwned(row.configuration_source)">
+              <option :value="null">Inherit (accept new)</option><option value="accept-new">Accept new</option><option value="strict">Strict</option>
+            </select>
+          </label>
+          <label>SSH connect timeout (seconds)<input v-model.number="row.configuration.ssh_connect_timeout" type="number" min="1" max="300" placeholder="15" :disabled="yamlOwned(row.configuration_source)" /></label>
+          <label>SSH command timeout (seconds)<input v-model.number="row.configuration.ssh_command_timeout" type="number" min="1" max="300" placeholder="30" :disabled="yamlOwned(row.configuration_source)" /></label>
+          <fieldset class="config-fieldset info-command-editor">
+            <legend>Ordered SSH commands</legend>
+            <label class="check"><input type="checkbox" :checked="Array.isArray(row.configuration.ssh_commands)"
+              @change="toggleInfoSshCommands(row.configuration, ($event.target as HTMLInputElement).checked)"
+              :disabled="yamlOwned(row.configuration_source)" /> Override inherited commands</label>
+            <div v-for="(command, commandIndex) in (row.configuration.ssh_commands || [])" :key="commandIndex" class="info-command-row">
+              <input class="command-input" v-model="command.command" placeholder="show version" :disabled="yamlOwned(row.configuration_source)" />
+              <div class="command-yields">
+                <label v-for="item in DISCOVERY_ROLE_OPTIONS" :key="item.value" class="check"><input v-model="command.yields" type="checkbox" :value="item.value" :disabled="yamlOwned(row.configuration_source)" />{{ item.label }}</label>
+              </div>
+              <button type="button" class="btn btn-danger" @click="row.configuration.ssh_commands.splice(commandIndex, 1)" :disabled="yamlOwned(row.configuration_source)">Remove</button>
+            </div>
+            <button v-if="Array.isArray(row.configuration.ssh_commands)" type="button" class="btn" @click="addInfoSshCommand(row.configuration)" :disabled="yamlOwned(row.configuration_source)">+ Add command</button>
+          </fieldset>
+          <fieldset class="config-fieldset">
+            <legend>Information to gather</legend>
+            <label class="check"><input type="checkbox"
+              :checked="Array.isArray(row.configuration.discovery_roles)"
+              :disabled="yamlOwned(row.configuration_source)"
+              @change="toggleDiscoveryOverride(row.configuration, ($event.target as HTMLInputElement).checked)" /> Override global fields</label>
+            <label v-for="item in DISCOVERY_ROLE_OPTIONS" :key="item.value" class="check">
+              <input v-model="row.configuration.discovery_roles" type="checkbox" :value="item.value"
+                :disabled="!Array.isArray(row.configuration.discovery_roles) || yamlOwned(row.configuration_source)" /> {{ item.label }}
+            </label>
+          </fieldset>
+          <label>Prompt guidance
+            <textarea :value="row.configuration.prompt_addendum || ''" maxlength="8000"
+              @input="row.configuration.prompt_addendum = ($event.target as HTMLTextAreaElement).value || null"
+              placeholder="Inherit global guidance" :disabled="yamlOwned(row.configuration_source)"></textarea>
+          </label>
+          <small class="muted">Leave settings empty to inherit. Device-specific overrides take priority.</small>
           <div class="rule-head">
             <strong>Ordered device rules</strong>
             <button type="button" class="btn" :disabled="yamlOwned(row.configuration_source)" @click="addPluginRule(row)">+ Add rule</button>
@@ -1524,12 +1649,45 @@ onMounted(async () => {
               <option value="starts_with">starts with</option>
             </select>
             <input v-model="rule.value" placeholder="Value" :disabled="yamlOwned(row.configuration_source)" />
+            <select v-model="rule.configuration.method" :disabled="yamlOwned(row.configuration_source)"><option :value="null">Method: inherit</option><option value="browser">Browser</option><option value="ssh">SSH only</option><option value="auto">Auto</option></select>
             <input type="number" min="1" max="65535" :value="rule.configuration.http_port ?? ''"
               @input="rule.configuration.http_port = inputPort($event)" placeholder="HTTP port (inherit)"
               :disabled="yamlOwned(row.configuration_source)" />
             <input type="number" min="1" max="65535" :value="rule.configuration.https_port ?? ''"
               @input="rule.configuration.https_port = inputPort($event)" placeholder="HTTPS port (inherit)"
               :disabled="yamlOwned(row.configuration_source)" />
+            <input type="number" min="1" max="65535" :value="rule.configuration.ssh_port ?? ''" @input="rule.configuration.ssh_port = inputPort($event)" placeholder="SSH port (inherit)" :disabled="yamlOwned(row.configuration_source)" />
+            <fieldset class="config-fieldset compact info-command-editor"><legend>SSH commands</legend>
+              <label class="check"><input type="checkbox" :checked="Array.isArray(rule.configuration.ssh_commands)" @change="toggleInfoSshCommands(rule.configuration, ($event.target as HTMLInputElement).checked)" :disabled="yamlOwned(row.configuration_source)" />Override</label>
+              <div v-for="(command, commandIndex) in (rule.configuration.ssh_commands || [])" :key="commandIndex" class="info-command-row">
+                <input class="command-input" v-model="command.command" placeholder="show version" :disabled="yamlOwned(row.configuration_source)" />
+                <div class="command-yields">
+                  <label v-for="item in DISCOVERY_ROLE_OPTIONS" :key="item.value" class="check"><input v-model="command.yields" type="checkbox" :value="item.value" :disabled="yamlOwned(row.configuration_source)" />{{ item.label }}</label>
+                </div>
+                <button type="button" class="btn btn-danger" @click="rule.configuration.ssh_commands!.splice(commandIndex, 1)" :disabled="yamlOwned(row.configuration_source)">Remove</button>
+              </div>
+              <button v-if="Array.isArray(rule.configuration.ssh_commands)" type="button" class="btn" @click="addInfoSshCommand(rule.configuration)" :disabled="yamlOwned(row.configuration_source)">+ Add command</button>
+            </fieldset>
+            <fieldset class="config-fieldset compact">
+              <legend>Discovery fields</legend>
+              <label class="check"><input type="checkbox"
+                :checked="Array.isArray(rule.configuration.discovery_roles)"
+                :disabled="yamlOwned(row.configuration_source)"
+                @change="toggleDiscoveryOverride(rule.configuration, ($event.target as HTMLInputElement).checked)" /> Override</label>
+              <label v-for="item in DISCOVERY_ROLE_OPTIONS" :key="item.value" class="check">
+                <input v-model="rule.configuration.discovery_roles" type="checkbox" :value="item.value"
+                  :disabled="!Array.isArray(rule.configuration.discovery_roles) || yamlOwned(row.configuration_source)" /> {{ item.label }}
+              </label>
+            </fieldset>
+            <textarea :value="rule.configuration.prompt_addendum || ''" maxlength="8000"
+              @input="rule.configuration.prompt_addendum = ($event.target as HTMLTextAreaElement).value || null"
+              placeholder="Prompt guidance (inherit when empty)" :disabled="yamlOwned(row.configuration_source)"></textarea>
+            <template v-if="!row.ai_configuration?.locked">
+              <select v-model="rule.configuration.ai_profile_id" :disabled="yamlOwned(row.configuration_source)"><option :value="null">AI provider: inherit</option><option v-for="p in aiProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select>
+              <input v-model="rule.configuration.ai_model" :list="`ai-models-${row.plugin_id}-${index}`" placeholder="AI model (inherit)" :disabled="yamlOwned(row.configuration_source)" />
+              <input v-model="rule.configuration.ai_repeat_model" :list="`ai-models-${row.plugin_id}-${index}`" placeholder="AI repeat model (inherit)" :disabled="yamlOwned(row.configuration_source)" />
+              <datalist :id="`ai-models-${row.plugin_id}-${index}`"><option v-for="model in aiModels(rule.configuration.ai_profile_id)" :key="model" :value="model" /></datalist>
+            </template>
             <label class="check"><input type="checkbox" v-model="rule.case_sensitive" :disabled="yamlOwned(row.configuration_source)" />Case-sensitive</label>
             <div class="rule-actions">
               <button type="button" class="btn" :disabled="index === 0 || yamlOwned(row.configuration_source)" @click="movePluginRule(row, index, -1)">↑</button>
@@ -1956,8 +2114,15 @@ tr.disabled td { opacity: 0.55; }
 .plugin-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .action-list { margin: 6px 0; padding-left: 20px; }
 .check { display: flex; align-items: center; gap: 7px; }
-.config { display: grid; gap: 5px; margin-top: 8px; }
+.config { display: grid; gap: 10px; margin-top: 10px; }
+.config > label:not(.check) { display: grid; gap: 5px; }
 .config textarea { min-height: 80px; }
+.config-fieldset { min-width: 0; display: grid; gap: 12px; margin: 4px 0; padding: 14px; border: 1px solid var(--border-soft); border-radius: var(--r-md); }
+.config-fieldset legend { padding: 0 6px; font-weight: 600; }
+.info-command-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--border-soft); border-radius: var(--r-md); background: var(--surface-2); }
+.info-command-row .command-input { grid-column: 1 / -1; width: 100%; }
+.command-yields { display: flex; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.info-command-row > .btn { justify-self: end; min-width: 88px; }
 .rule-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; }
 .plugin-rule { display: grid; grid-template-columns: 28px minmax(120px, 1fr) 110px minmax(130px, 1fr) minmax(150px, 1fr); gap: 7px; align-items: center; padding: 10px; border: 1px solid var(--border-soft); border-radius: var(--r-md); }
 .rule-order { font-weight: 700; text-align: center; }
@@ -1982,5 +2147,7 @@ tr.disabled td { opacity: 0.55; }
   }
   .scope-rail button { border-color: var(--border); }
   .scope-actions { margin-left: 0; }
+  .info-command-row { grid-template-columns: minmax(0, 1fr); }
+  .info-command-row > .btn { justify-self: start; }
 }
 </style>

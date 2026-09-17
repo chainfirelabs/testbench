@@ -88,6 +88,7 @@ const navLinks = computed<NavLink[]>(() => {
   if (auth.isAdmin) {
     links.push({ to: '/audit', label: 'Audit Log' })
     links.push({ to: '/users', label: 'Users' })
+    links.push({ to: '/settings/ai', label: 'AI Providers' })
     links.push({ to: '/settings/schema', label: 'Schema' })
   }
   return links

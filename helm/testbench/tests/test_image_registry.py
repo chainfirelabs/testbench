@@ -54,6 +54,24 @@ class ImageRegistryTests(unittest.TestCase):
         self.assertIn('name: testbench-device-schema', result.stdout)
         self.assertNotIn('kind: DeviceSchema', result.stdout)
 
+    def test_authentik_ca_is_mounted_in_the_backend(self):
+        values = copy.deepcopy(BASE)
+        values['authentik'] = {'tls': {'existingConfigMap': 'authentik-ca', 'key': 'root.pem'}}
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('name: SSL_CERT_FILE', result.stdout)
+        self.assertIn('value: /etc/testbench/authentik-ca/root.pem', result.stdout)
+        self.assertIn('name: authentik-ca', result.stdout)
+        self.assertIn('name: authentik-ca\n            items:', result.stdout)
+        self.assertIn('key: root.pem', result.stdout)
+
+    def test_authentik_ca_requires_a_key(self):
+        values = copy.deepcopy(BASE)
+        values['authentik'] = {'tls': {'existingConfigMap': 'authentik-ca', 'key': ''}}
+        result = render(values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('/authentik/tls/key', result.stderr)
+
     def test_reboot_image_capture_defaults_off_and_can_be_enabled(self):
         values = copy.deepcopy(BASE)
         result = render(values)
@@ -64,6 +82,21 @@ class ImageRegistryTests(unittest.TestCase):
         result = render(values)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('name: TB_REBOOT_CAPTURE_IMAGES, value: "true"', result.stdout)
+
+    def test_gui_managed_ai_does_not_require_helm_endpoint_or_secret(self):
+        values = copy.deepcopy(BASE)
+        for plugin in ('deviceInfo', 'reboot'):
+            values['plugins'][plugin]['ai'] = {'url': '', 'model': '', 'existingSecret': ''}
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('name: TB_REBOOT_AI_REPEAT_MODEL, value: ""', result.stdout)
+
+    def test_partial_helm_ai_configuration_is_rejected(self):
+        values = copy.deepcopy(BASE)
+        values['plugins']['reboot']['ai']['model'] = ''
+        result = render(values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('must either both be set', result.stderr)
 
     def test_device_info_image_capture_defaults_off_and_can_be_enabled(self):
         values = copy.deepcopy(BASE)

@@ -1,5 +1,17 @@
 # Release notes
 
+## 1.9.0
+
+- Administrators can manage AI provider endpoints, encrypted credentials, and
+  discovered/manual models in the GUI. Device Info and AI Reboot support
+  discovery and repeat-model selection globally and at device-type, ordered-rule,
+  and individual-device scope. Helm URL/model settings remain authoritative and
+  appear read-only in the UI.
+- Authentik deployments can mount a private CA certificate through the Helm
+  chart for OIDC connections using internally signed TLS certificates.
+- Disabled or unavailable Network Scan plugins can no longer be invoked from a
+  device detail page or through the legacy direct scan endpoint.
+
 ## 1.8.8
 
 - TestBench source, packages, Helm metadata, and container images are now

@@ -17,7 +17,6 @@ VENDOR_SUPPORT_LABELS = {
 # The fields that identify a vendor device. Two imported rows agreeing on all
 # of these are the same claim, so they collapse onto one row.
 IDENTITY_FIELDS = (
-    "vendor",
     "make",
     "model",
     "firmware_version",
@@ -56,7 +55,6 @@ class VendorDevice(TimestampMixin, Base):
         ForeignKey("software.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    vendor: Mapped[str | None] = mapped_column(String(255), index=True)
     make: Mapped[str | None] = mapped_column(String(255))
     model: Mapped[str | None] = mapped_column(String(255))
     firmware_version: Mapped[str | None] = mapped_column(String(100))

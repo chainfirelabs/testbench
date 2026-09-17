@@ -381,6 +381,10 @@ async def list_devices_tested_with(
     items = [
         {
             **device_brief(row["device"]),
+            "component": (
+                f"{row['component']['name']} {row['component'].get('version') or ''}".strip()
+                if row.get("component") else None
+            ),
             "tests": row["test_count"],
             "last_test": (row.get("last_test_at") or "").split("T")[0] or None,
             "outcomes": row.get("outcomes", {}),
@@ -420,8 +424,20 @@ async def list_vendor_supported_devices(
         f"/software/{quote(record['id'], safe='')}/vendor-devices",
         params={"search": search, "page_size": limit},
     )
+    schema = await api().get(
+        f"/software/{quote(record['id'], safe='')}/vendor-devices/schema",
+    )
+    sensitive = {field["key"] for field in schema if field.get("sensitive")}
+    items = []
+    for vendor_device in page["items"]:
+        safe = dict(vendor_device)
+        safe["misc_data"] = {
+            key: value for key, value in (safe.get("misc_data") or {}).items()
+            if key not in sensitive
+        }
+        items.append(vendor_device_brief(safe))
     return envelope(
-        [vendor_device_brief(v) for v in page["items"]],
+        items,
         page["total"],
         software=describe_software(record),
         sense="vendor compatibility claims — not evidence, and not necessarily hardware we own",

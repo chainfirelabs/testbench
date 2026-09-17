@@ -28,7 +28,6 @@ router = APIRouter(prefix="/suggestions", tags=["suggestions"])
 # collections, so they match the paths the rest of the API uses.
 SUGGESTABLE = {
     "vendor-devices": {
-        "vendor": VendorDevice.vendor,
         "make": VendorDevice.make,
         "model": VendorDevice.model,
         "firmware_version": VendorDevice.firmware_version,

@@ -39,6 +39,9 @@ class Test(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     software_id: Mapped[str] = mapped_column(ForeignKey("software.id", ondelete="CASCADE"), nullable=False, index=True)
+    component_id: Mapped[str | None] = mapped_column(
+        ForeignKey("software_components.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     device_id: Mapped[str] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
     _data: Mapped[dict] = mapped_column("data", MutableDict.as_mutable(JSONB), default=dict)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
@@ -86,11 +89,16 @@ class Test(TimestampMixin, Base):
         if extra_values: self._data[EXTRA_VALUES_KEY] = extra_values
 
     software: Mapped["Software"] = relationship("Software", lazy="selectin")
+    component: Mapped["SoftwareComponent | None"] = relationship("SoftwareComponent", lazy="selectin")
     device: Mapped["Device"] = relationship("Device", back_populates="tests", lazy="selectin")
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by], lazy="selectin")
 
     @property
     def software_name(self): return self.software.name if self.software else None
+    @property
+    def component_name(self): return self.component.name if self.component else None
+    @property
+    def component_version(self): return self.component.version if self.component else None
     @property
     def device_unique_id(self): return self.device.unique_id if self.device else None
     @property
@@ -103,4 +111,5 @@ class Test(TimestampMixin, Base):
 
 from .device import Device  # noqa: E402
 from .software import Software  # noqa: E402
+from .software_component import SoftwareComponent  # noqa: E402
 from .user import User  # noqa: E402

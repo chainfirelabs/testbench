@@ -29,3 +29,22 @@ def test_device_info_port_configuration(configuration):
 def test_invalid_device_info_port_configuration(configuration):
     with pytest.raises(ValueError):
         validate_plugin_configuration('device-info-agent', configuration)
+
+
+def test_device_info_discovery_roles_and_prompt_addendum():
+    validate_plugin_configuration('device-info-agent', {
+        'discovery_roles': ['discovery_hardware', 'discovery_firmware'],
+        'prompt_addendum': 'Firmware is under Administration > Status.',
+    })
+
+
+@pytest.mark.parametrize('configuration', [
+    {'discovery_roles': []},
+    {'discovery_roles': ['unknown']},
+    {'discovery_roles': ['discovery_firmware', 'discovery_firmware']},
+    {'prompt_addendum': ''},
+    {'prompt_addendum': 12},
+])
+def test_invalid_device_info_discovery_configuration(configuration):
+    with pytest.raises(ValueError):
+        validate_plugin_configuration('device-info-agent', configuration)

@@ -808,6 +808,9 @@ def _action_blocker(
     fields the plugin needs), then data (are they filled in), then state.
     A person reading the tooltip should be told the thing they can fix.
     """
+    required_user_role = action.get("required_user_role")
+    if required_user_role and (user is None or user.role != required_user_role):
+        return f"{required_user_role} permission is required"
     if user is not None and user.role not in ("admin", "tester"):
         return "write permission is required"
     roles = role_map(field for field in fields if field.visible)
@@ -923,6 +926,11 @@ def validate_plugin_invocation(
     action = next((item for item in manifest.get("actions", []) if item.get("id") == action_id), None)
     if action is None:
         raise PluginPolicyError("Plugin action not found", status_code=404)
+    required_user_role = action.get("required_user_role")
+    if required_user_role and (user is None or user.role != required_user_role):
+        raise PluginPolicyError(
+            f"{required_user_role} permission is required", status_code=403,
+        )
     if user is not None and user.role not in ("admin", "tester"):
         raise PluginPolicyError("Insufficient role for write access", status_code=403)
 

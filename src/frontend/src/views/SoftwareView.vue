@@ -3,6 +3,7 @@ import { computed, onMounted, ref, toRaw } from 'vue'
 import DataTable from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
+import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
@@ -37,6 +38,9 @@ function openDetail(title: string, value: any) {
 // Rows with unsaved changes: row id -> set of changed fields
 const dirty = ref<Map<string, Set<string>>>(new Map())
 const selected = ref<any[]>([])
+const bulkEditing = ref(false)
+const savingBulkEdit = ref(false)
+const bulkEditValues = ref<Record<string, any>>({})
 
 const EDITABLE_FIELDS = new Set(['version', 'misc_data'])
 
@@ -123,10 +127,58 @@ const baseColumns = [
   },
 ]
 
-const columns = computed(() => softwareFields.value.filter((field) => field.list_visible).map((field) => {
-  const builtIn = baseColumns.find((column: any) => column.field === field.key)
-  return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
-}))
+const componentsColumn = {
+  field: 'bundle_components',
+  headerName: 'Components',
+  editable: false,
+  minWidth: 190,
+  cellDataType: false,
+  valueGetter: (p: any) => (p.data?.bundle_components || [])
+    .map((item: any) => `${item.name}${item.version ? ` ${item.version}` : ''}`)
+    .join(', '),
+  cellRenderer: (p: any) => {
+    const components = p.data?.bundle_components || []
+    if (!components.length) {
+      const empty = document.createElement('span')
+      empty.className = 'muted'
+      empty.textContent = 'None'
+      return empty
+    }
+
+    const select = document.createElement('select')
+    select.className = 'component-list'
+    select.title = components
+      .map((item: any) => `${item.name}${item.version ? ` ${item.version}` : ''}`)
+      .join('\n')
+    select.setAttribute('aria-label', `Components for ${p.data.name}`)
+    const summary = document.createElement('option')
+    summary.textContent = `${components.length} component${components.length === 1 ? '' : 's'}`
+    summary.value = ''
+    select.appendChild(summary)
+    for (const component of components) {
+      const option = document.createElement('option')
+      option.textContent = `${component.name}${component.version ? ` — ${component.version}` : ''}`
+      option.value = component.id
+      select.appendChild(option)
+    }
+    // This is a compact list, not an editor. Always return to the count after
+    // somebody inspects an item so the cell cannot imply a selected component.
+    select.onchange = () => { select.selectedIndex = 0 }
+    select.onclick = (event) => event.stopPropagation()
+    return select
+  },
+}
+
+const columns = computed(() => {
+  const configured = softwareFields.value.filter((field) => field.list_visible).map((field) => {
+    const builtIn = baseColumns.find((column: any) => column.field === field.key)
+    return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+  })
+  const versionIndex = configured.findIndex((column: any) => column.field === 'version')
+  const nameIndex = configured.findIndex((column: any) => column.field === 'name')
+  configured.splice(Math.max(versionIndex, nameIndex) + 1, 0, componentsColumn)
+  return configured
+})
 
 function showToast(msg: string, isError = false) {
   toast.value = msg
@@ -187,11 +239,23 @@ function onCellEdit(row: any, field: string, value: any) {
 const showNew = ref(false)
 const creating = ref(false)
 const newSoftware = ref<Record<string, any>>({})
+const newBundleComponents = ref<any[]>([])
 // Versions of the matched software, for the "inherit from" picker.
 const matchVersions = ref<any[]>([])
 
 // Sentinel for "create the version with an empty vendor device list".
 const NO_INHERIT = '__none__'
+
+function bundlePayload(items: any[]): any[] {
+  return items.map((item, position) => {
+    const name = String(item.name || '').trim()
+    if (!name) throw new Error(`Bundle component ${position + 1} needs a software name`)
+    return {
+      id: item.id, name, version: String(item.version || '').trim(),
+      required: item.required !== false, position,
+    }
+  })
+}
 
 /** Software names match case-insensitively, so this is how the server matches too. */
 const nameKey = (v: any) => String(v ?? '').trim().toLowerCase()
@@ -280,6 +344,7 @@ const newSoftwareTitle = computed(() =>
 
 function openNew() {
   newSoftware.value = { name: '', version: '', inherit_from: '', misc_data: '{}' }
+  newBundleComponents.value = []
   matchVersions.value = []
   showNew.value = true
 }
@@ -329,6 +394,7 @@ async function createSoftware(values: Record<string, any>) {
       return
     }
     delete merged.inherit_from
+    merged.bundle_components = bundlePayload(newBundleComponents.value)
     const created = await api<any>('/software', { method: 'POST', body: JSON.stringify(merged) })
     // Newest first, so the row you just made is where you are looking.
     rows.value.unshift(created)
@@ -348,6 +414,7 @@ async function createSoftware(values: Record<string, any>) {
 const editTarget = ref<any>(null)
 const savingEdit = ref(false)
 const editValues = ref<Record<string, any>>({})
+const editBundleComponents = ref<any[]>([])
 
 const BASE_EDIT_SOFTWARE_FIELDS: FormField[] = [
   {
@@ -382,6 +449,10 @@ function openEdit(row: any) {
     const value = dataValue(row, field, 'misc_data')
     return [item.key, item.type === 'json' ? JSON.stringify(value || {}, null, 2) : value ?? '']
   }))
+  editBundleComponents.value = (row.bundle_components || []).map((item: any, position: number) => ({
+    id: item.id, name: item.name, version: item.version || '',
+    required: item.required !== false, position,
+  }))
   editTarget.value = row
 }
 
@@ -390,11 +461,13 @@ async function saveEdit(values: Record<string, any>) {
   if (!row) return
   savingEdit.value = true
   try {
+    const payload = mergeCustomValues(
+      { misc_data: row.misc_data || {}, ...values }, softwareFields.value, 'misc_data',
+    )
+    payload.bundle_components = bundlePayload(editBundleComponents.value)
     const updated = await api<any>(`/software/${row.id}`, {
       method: 'PATCH',
-      body: JSON.stringify(mergeCustomValues(
-        { misc_data: row.misc_data || {}, ...values }, softwareFields.value, 'misc_data',
-      )),
+      body: JSON.stringify(payload),
     })
     Object.assign(row, updated)
     // The dialog wrote every field, so nothing is left pending on the row.
@@ -456,6 +529,59 @@ async function deleteSelected() {
     showToast(`Deleted ${ids.length} software record${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
+  }
+}
+
+const BULK_SOFTWARE_FIELDS = computed<FormField[]>(() => softwareFields.value
+  .filter((field) => field.visible && field.writable && field.key !== 'name')
+  .map((field) => {
+    const builtIn = BASE_EDIT_SOFTWARE_FIELDS.find((item) => item.key === field.key)
+    const form = builtIn ? { ...builtIn, label: field.label } : customFormField(field)
+    form.required = false
+    return form
+  }))
+
+function sharedSoftwareValue(fieldKey: string, type?: FormField['type']): any {
+  const field = softwareFields.value.find((candidate) => candidate.key === fieldKey)!
+  const values = selected.value.map((row) => dataValue(row, field, 'misc_data'))
+  const encoded = values.map((value) => JSON.stringify(value ?? null))
+  const shared = encoded.every((value) => value === encoded[0]) ? values[0] : undefined
+  return type === 'json' ? JSON.stringify(shared || {}, null, 2) : shared ?? ''
+}
+
+function openBulkEdit() {
+  bulkEditValues.value = Object.fromEntries(BULK_SOFTWARE_FIELDS.value.map((field) => [
+    field.key, sharedSoftwareValue(field.key, field.type),
+  ]))
+  bulkEditing.value = true
+}
+
+async function saveBulkEdit(values: Record<string, any>) {
+  savingBulkEdit.value = true
+  let updated = 0
+  const errors: string[] = []
+  for (const row of selected.value) {
+    try {
+      await api(`/software/${row.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(mergeCustomValues(
+          { misc_data: row.misc_data || {}, ...values }, softwareFields.value, 'misc_data',
+        )),
+      })
+      dirty.value.delete(row.id)
+      updated++
+    } catch (e: any) {
+      errors.push(`${row.name}${row.version ? ` ${row.version}` : ''}: ${e.message}`)
+    }
+  }
+  await load()
+  savingBulkEdit.value = false
+  if (errors.length) {
+    showToast(`Updated ${updated}; ${errors.length} failed — ${errors.slice(0, 3).join('; ')}`, true)
+  } else {
+    bulkEditing.value = false
+    selected.value = []
+    showToast(`Updated ${updated} selected software record${updated === 1 ? '' : 's'}`)
   }
 }
 
@@ -562,6 +688,14 @@ onMounted(() => Promise.all([load(), loadFields()]))
       <template #selection-actions>
         <button
           v-if="auth.canWrite && selected.length"
+          class="btn"
+          title="Edit common values on the selected software"
+          @click="openBulkEdit"
+        >
+          Edit
+        </button>
+        <button
+          v-if="auth.canWrite && selected.length"
           class="btn btn-danger"
           title="Delete the selected software"
           @click="deleteSelected"
@@ -571,6 +705,17 @@ onMounted(() => Promise.all([load(), loadFields()]))
       </template>
     </DataTable>
     <FormModal
+      v-if="bulkEditing"
+      :title="`Edit ${selected.length} selected software records`"
+      :fields="BULK_SOFTWARE_FIELDS"
+      :values="bulkEditValues"
+      :busy="savingBulkEdit"
+      selective
+      submit-label="Apply changes"
+      @submit="saveBulkEdit"
+      @cancel="bulkEditing = false"
+    />
+    <FormModal
       v-if="editTarget"
       :title="`Edit Software — ${editTarget.name}`"
       :fields="EDIT_SOFTWARE_FIELDS"
@@ -579,7 +724,9 @@ onMounted(() => Promise.all([load(), loadFields()]))
       submit-label="Save changes"
       @submit="saveEdit"
       @cancel="editTarget = null"
-    />
+    >
+      <BundleComponentsEditor v-model="editBundleComponents" />
+    </FormModal>
     <FormModal
       v-if="showNew"
       :title="newSoftwareTitle"
@@ -590,7 +737,9 @@ onMounted(() => Promise.all([load(), loadFields()]))
       @submit="createSoftware"
       @change="onNewSoftwareChange"
       @cancel="showNew = false"
-    />
+    >
+      <BundleComponentsEditor v-if="!matchedSoftware" v-model="newBundleComponents" />
+    </FormModal>
 
     <DetailModal
       v-if="detail"

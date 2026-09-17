@@ -22,6 +22,7 @@ from ..services.device_schema import (
     validate_plugin_invocation,
 )
 from ..services.plugin_configuration import resolve_plugin_configuration, validate_plugin_configuration
+from ..services.ai_configuration import resolve_ai_configuration, validate_ai_profile_references
 from ..services.plugin_host import registry
 from .deps import get_current_user, require_admin, require_write
 
@@ -146,6 +147,10 @@ def list_actions(
                 contributed["unavailable_reason"] = (
                     "this plugin is not enabled for any device type"
                 )
+            elif action.get("required_user_role") and user.role != action["required_user_role"]:
+                contributed["unavailable_reason"] = (
+                    f"{action['required_user_role']} permission is required"
+                )
             elif scoped_types and len(reasons_by_type) == len(scoped_types):
                 contributed["unavailable_reason"] = "; ".join(sorted(set(reasons_by_type.values())))
             result.append(contributed)
@@ -238,6 +243,17 @@ def invoke_action(
         )
         entity["_plugin_configuration"] = configuration
         entity["_plugin_configuration_source"] = source
+        reboot_method = configuration.get("method") or (manifest or {}).get("configuration_defaults", {}).get("method", "ai")
+        if "ai_configuration" in (manifest or {}) and (
+            plugin_id == "device-info-agent" or
+            (plugin_id == "device-reboot" and reboot_method == "ai")
+        ):
+            try:
+                entity["_ai_configuration"] = resolve_ai_configuration(
+                    db, plugin_id, configuration, manifest,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
     payload = {
         "action_id": action_id,
         "actor": {"id": user.id, "username": user.username, "role": user.role},
@@ -260,7 +276,7 @@ def _device_plugin_assignment(db: Session, plugin_id: str, device_id: str) -> tu
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
     assignment = db.scalar(select(DeviceTypePlugin).where(
-        DeviceTypePlugin.device_type_id == device.device_type_id,
+        DeviceTypePlugin.device_type_id == getattr(device, "device_type_id", None),
         DeviceTypePlugin.plugin_id == plugin_id,
         DeviceTypePlugin.enabled.is_(True),
     ))
@@ -276,7 +292,8 @@ def get_device_plugin_configuration(
     device, assignment = _device_plugin_assignment(db, plugin_id, device_id)
     direct = (assignment.configuration or {}).get("_device_overrides", {}).get(device.id, {})
     effective, source = resolve_plugin_configuration(assignment.configuration or {}, device)
-    return {"configuration": direct, "effective_configuration": effective, "source": source}
+    return {"configuration": direct, "effective_configuration": effective, "source": source,
+            "ai_configuration": (registry.manifest(plugin_id) or {}).get("ai_configuration", {})}
 
 
 @router.put("/{plugin_id}/devices/{device_id}/configuration")
@@ -290,6 +307,15 @@ def put_device_plugin_configuration(
     if any(str(key).startswith("_") for key in body.configuration):
         raise HTTPException(status_code=422, detail="A device override may contain only plugin settings")
     validate_plugin_configuration(plugin_id, body.configuration)
+    try:
+        validate_ai_profile_references(db, body.configuration)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    ai_manifest = (registry.manifest(plugin_id) or {}).get("ai_configuration", {})
+    if ai_manifest.get("locked") and any(
+        key in body.configuration for key in ("ai_profile_id", "ai_model", "ai_repeat_model")
+    ):
+        raise HTTPException(status_code=409, detail="This plugin's AI settings are managed by Helm")
     configuration = dict(assignment.configuration or {})
     overrides = dict(configuration.get("_device_overrides", {}))
     before = overrides.get(device.id)
@@ -304,7 +330,8 @@ def put_device_plugin_configuration(
     }, request)
     db.commit()
     effective, source = resolve_plugin_configuration(configuration, device)
-    return {"configuration": body.configuration, "effective_configuration": effective, "source": source}
+    return {"configuration": body.configuration, "effective_configuration": effective, "source": source,
+            "ai_configuration": ai_manifest}
 
 
 @router.delete("/{plugin_id}/devices/{device_id}/configuration")
@@ -403,6 +430,18 @@ def device_info_results(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     by_role = role_map(field for field in fields_for_device(db, device) if field.visible)
+    assignment = db.scalar(select(DeviceTypePlugin).where(
+        DeviceTypePlugin.device_type_id == device.device_type_id,
+        DeviceTypePlugin.plugin_id == plugin_id,
+    ))
+    resolved_configuration, _source = resolve_plugin_configuration(
+        assignment.configuration if assignment and isinstance(assignment.configuration, dict) else {},
+        device,
+    )
+    requested_roles = set(resolved_configuration.get("discovery_roles") or {
+        "discovery_hardware", "discovery_firmware",
+        "discovery_lan_mac", "discovery_wan_mac",
+    })
     accepted, conflicts, rejected = {}, {}, {}
     old = dict(device._data or {})
     for role, finding in body.findings.items():
@@ -413,7 +452,13 @@ def device_info_results(
         } or not field:
             rejected[role] = "role is not configured"
             continue
+        if role not in requested_roles:
+            rejected[role] = "role was not requested for this device"
+            continue
         current = (device._data or {}).get(field.key)
+        if role in {"discovery_lan_mac", "discovery_wan_mac"} and current is not None and str(current).strip():
+            rejected[role] = "existing MAC addresses are protected"
+            continue
         if current != finding.starting_value:
             conflicts[role] = {"current": current, "starting": finding.starting_value}
             continue

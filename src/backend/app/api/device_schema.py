@@ -13,6 +13,7 @@ was before and what it became.
 import yaml
 
 from ..services.plugin_configuration import validate_plugin_configuration
+from ..services.ai_configuration import validate_ai_profile_references
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -60,6 +61,7 @@ from ..services.device_schema_yaml import (
     reconcile_from_settings,
     status as yaml_status,
 )
+from ..services.entity_fields import ensure_entity_field_indexes
 from ..services.io import download_response
 from ..services.plugin_host import registry
 from .deps import get_current_user, require_admin
@@ -548,6 +550,7 @@ def get_type_plugins(type_id: str, db: Session = Depends(get_db), user: User = D
             "enabled": bool(row and row.enabled),
             "configuration": (row.configuration if row else {}) or {},
             "configuration_defaults": manifest.get("configuration_defaults", {}),
+            "ai_configuration": manifest.get("ai_configuration", {}),
             "configuration_source": row.configuration_source if row else None,
             "missing_roles": missing_plugin_roles(db, plugin_id, item.id),
             "actions": [
@@ -696,6 +699,7 @@ def put_type_plugins(
     for entry in body.plugins:
         try:
             validate_plugin_configuration(entry.plugin_id, entry.configuration)
+            validate_ai_profile_references(db, entry.configuration)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         valid_field_keys = {field.key for field in get_effective_fields(db, item.id)}
@@ -711,6 +715,12 @@ def put_type_plugins(
         manifest = registry.manifest(entry.plugin_id)
         if manifest is None and entry.plugin_id not in existing:
             raise HTTPException(status_code=422, detail=f"Plugin '{entry.plugin_id}' is not installed")
+        if manifest and manifest.get("ai_configuration", {}).get("locked") and any(
+            key in entry.configuration for key in ("ai_profile_id", "ai_model", "ai_repeat_model")
+        ):
+            raise HTTPException(status_code=409, detail=(
+                f"{manifest.get('label', entry.plugin_id)} AI settings are managed by Helm"
+            ))
         if entry.enabled and manifest is not None:
             added = _assign_recommended_plugin_fields(db, item, manifest)
             if added:
@@ -803,6 +813,7 @@ async def import_schema(
     if result["revision"] is not None:
         invalidate_cache()
         refresh_managed_indexes(db)
+        ensure_entity_field_indexes(db)
     return result
 
 

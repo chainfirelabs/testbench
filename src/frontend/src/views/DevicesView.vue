@@ -91,6 +91,9 @@ const infoConfig = ref<{ enabled: boolean; required_fields: string[]; url_field:
 // Rows with unsaved changes: row id -> set of changed fields
 const dirty = ref<Map<string, Set<string>>>(new Map())
 const selected = ref<any[]>([])
+const bulkEditing = ref(false)
+const savingBulkEdit = ref(false)
+const bulkEditValues = ref<Record<string, any>>({})
 const scanningIds = ref<Set<string>>(new Set())
 const infoStartingIds = ref<Set<string>>(new Set())
 // Brief per-row result shown after a single-device scan finishes
@@ -621,6 +624,73 @@ async function deleteSelected() {
     showToast(`Deleted ${ids.length} device${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
+  }
+}
+
+// A bulk edit may span device types. Offer only writable fields whose key,
+// storage, type and choices agree in every selected device's effective schema.
+const commonBulkDeviceFields = computed<SchemaField[]>(() => {
+  if (!selected.value.length) return []
+  const schemas = selected.value.map((row) => fieldsByType.value.get(row.device_type_key || '') || [])
+  const first = schemas[0].filter((field) =>
+    field.visible && field.writable && field.storage !== 'derived'
+    && !['unique_id', 'device_type', 'device_type_id', 'misc_data'].includes(field.key))
+  return first.filter((field) => schemas.every((schema) => {
+    const match = schema.find((candidate) => candidate.key === field.key)
+    return !!match && match.visible && match.writable && match.storage === field.storage
+      && match.type === field.type && JSON.stringify(match.options || []) === JSON.stringify(field.options || [])
+  }))
+})
+
+const BULK_DEVICE_FIELDS = computed<FormField[]>(() => commonBulkDeviceFields.value.map((field) => {
+  const form = schemaFormField(field)
+  // Existing rows already satisfy required constraints; bulk edit validates
+  // only fields the operator explicitly opts into changing.
+  form.required = false
+  if (field.type === 'select') {
+    form.options = field.options.map((value) => ({ value, label: optionLabel(value) }))
+  }
+  return form
+}))
+
+function sharedDeviceValue(field: SchemaField): any {
+  const values = selected.value.map((row) => fieldValue(row, field))
+  const encoded = values.map((value) => JSON.stringify(value ?? null))
+  return encoded.every((value) => value === encoded[0]) ? values[0] ?? '' : ''
+}
+
+function openBulkEdit() {
+  bulkEditValues.value = Object.fromEntries(
+    commonBulkDeviceFields.value.map((field) => [field.key, sharedDeviceValue(field)]),
+  )
+  bulkEditing.value = true
+}
+
+async function saveBulkEdit(values: Record<string, any>) {
+  savingBulkEdit.value = true
+  let updated = 0
+  const errors: string[] = []
+  for (const row of selected.value) {
+    try {
+      const result = await api<any>(`/devices/${row.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(toDevicePayload(values, commonBulkDeviceFields.value)),
+      })
+      Object.assign(row, result)
+      dirty.value.delete(row.id)
+      updated++
+    } catch (e: any) {
+      errors.push(`${row.unique_id}: ${e.message}`)
+    }
+  }
+  table.value?.refreshRows(selected.value.map((row) => row.id))
+  invalidateSuggestions('devices')
+  savingBulkEdit.value = false
+  if (errors.length) {
+    showToast(`Updated ${updated}; ${errors.length} failed — ${errors.slice(0, 3).join('; ')}`, true)
+  } else {
+    bulkEditing.value = false
+    showToast(`Updated ${updated} selected device${updated === 1 ? '' : 's'}`)
   }
 }
 
@@ -1210,12 +1280,18 @@ onBeforeUnmount(() => {
               v-for="action in pluginActions.filter((item) => item.scope === 'collection' && !item.unavailable_reason)"
               :key="`${action.plugin_id}:${action.id}`"
               class="btn"
-              :class="{ 'btn-danger': action.risk === 'disruptive' }"
-              :disabled="pluginRunning.has(`${action.plugin_id}:${action.id}:collection`)"
-              :title="action.title"
+              :class="{
+                'btn-danger': action.risk === 'disruptive',
+                scanning: pluginRunning.has(`${action.plugin_id}:${action.id}:collection`),
+              }"
+              :title="pluginRunning.has(`${action.plugin_id}:${action.id}:collection`)
+                ? `View ${action.label} output`
+                : action.title"
               @click="runPluginAction(action)"
             >
-              {{ pluginRunning.has(`${action.plugin_id}:${action.id}:collection`) ? `${action.label}…` : action.label }}
+              {{ pluginRunning.has(`${action.plugin_id}:${action.id}:collection`)
+                ? `View ${action.label} output`
+                : action.label }}
             </button>
           </template>
           <button class="btn" @click="exportAs('json')">Export JSON</button>
@@ -1267,6 +1343,15 @@ onBeforeUnmount(() => {
       <template #selection-actions>
         <button
           v-if="auth.canWrite && selected.length"
+          class="btn"
+          title="Edit fields shared by the selected devices"
+          :disabled="!commonBulkDeviceFields.length"
+          @click="openBulkEdit"
+        >
+          Edit
+        </button>
+        <button
+          v-if="auth.canWrite && selected.length"
           class="btn btn-danger"
           title="Delete the selected devices"
           @click="deleteSelected"
@@ -1275,6 +1360,17 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </DataTable>
+    <FormModal
+      v-if="bulkEditing"
+      :title="`Edit ${selected.length} selected devices`"
+      :fields="BULK_DEVICE_FIELDS"
+      :values="bulkEditValues"
+      :busy="savingBulkEdit"
+      selective
+      submit-label="Apply changes"
+      @submit="saveBulkEdit"
+      @cancel="bulkEditing = false"
+    />
     <FormModal
       v-if="editTarget"
       :title="`Edit Device — ${editTarget.unique_id}`"

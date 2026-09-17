@@ -59,6 +59,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Users', roles: ['admin'] },
   },
   {
+    path: '/settings/ai',
+    name: 'ai-providers',
+    component: () => import('../views/AiProvidersView.vue'),
+    meta: { title: 'AI Providers', roles: ['admin'] },
+  },
+  {
     path: '/settings/schema',
     name: 'schema',
     component: () => import('../views/DeviceSchemaView.vue'),

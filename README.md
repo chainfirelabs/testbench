@@ -12,7 +12,8 @@ compatibility, and testing history into one web app.
 - **Shared equipment:** check devices out, track return dates, and receive
   upcoming and overdue reminders.
 - **Software and tests:** track software versions, vendor compatibility claims,
-  and actual test outcomes against individual devices.
+  optional version-specific [software bundles](docs/software-bundles.md), and
+  actual test outcomes against individual devices.
 - **Team access:** admin, tester, and read-only roles, with an audit trail of changes.
 - **Data access:** spreadsheet-style editing, JSON/CSV import and export,
   additive DeviceSchema YAML import/export, a REST API, and an optional
@@ -21,7 +22,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.8.8`.
+`chainfirelabs/testbench` and tag `1.9.0`.
 
 | Image repository | Purpose |
 |---|---|
@@ -59,7 +60,8 @@ default. Enable a plugin in Helm, then allow it for the relevant device types in
 | Reboot | Restarts eligible online devices and checks that they return online. Uses per-type SSH or AI browser settings with global defaults. | `plugins.reboot.enabled: true` |
 
 Device Info and Reboot use per-device credentials. Browser-agent actions require
-an AI endpoint, model, and API-key Secret; SSH reboot does not. Saved steps can
+an AI endpoint and model from either Helm or the admin GUI; Helm-managed AI also
+uses an API-key Secret. SSH reboot does not. Saved steps can
 be viewed, edited, or cleared in the device's **Plugin Steps** tab. Reboot must
 be allowed explicitly per device type.
 
@@ -157,6 +159,8 @@ starter device catalog.
 | `frontend.service.type` | `ClusterIP`, `NodePort`, or `LoadBalancer`; default `ClusterIP`. |
 | `frontend.service.port` / `nodePort` | `80` / unset; optional fixed node port for NodePort or LoadBalancer services. |
 | `applicationSecret.existingSecret` | Required existing Secret containing application `TB_*` secrets. |
+| `TB_CREDENTIAL_ENCRYPTION_KEY` | Application Secret value used to encrypt API keys entered under **AI Providers**. Required only for GUI-managed credentials. |
+| `authentik.tls.existingConfigMap` / `key` | Optional ConfigMap and PEM key for trusting a private Authentik CA; empty by default. |
 | `config.frontendUrl` | Required public URL, such as `https://testbench.example.com`. |
 | `config.corsOrigins` | Required comma-separated browser origins. Usually the public URL. |
 | `config.timezone` | `UTC`; an IANA timezone such as `America/New_York`. |
@@ -190,7 +194,7 @@ in **Schema**.
 | `schema.devices.allowGlobalExclusions` | `false`; whether device types may exclude global fields. |
 | `schema.devices.rejectUnknownFields` | `false`; set `true` to reject writes containing undefined field keys. |
 | `schema.software.optionalFields` / `schema.tests.optionalFields` | Lists of optional built-in fields to include in the initial catalog. |
-| `schema.software.additionalFields` / `schema.tests.additionalFields` | `[]`; custom field definitions, e.g. `[{key: lab, label: Lab, type: select, options: [East, West]}]`. |
+| `schema.software.additionalFields` / `schema.tests.additionalFields` | `[]`; custom field definitions, e.g. `[{key: lab, label: Lab, type: select, options: [East, West]}]`. Vendor-device fields belong in `spec.vendorDeviceFields` of the external DeviceSchema ConfigMap. |
 
 Required identity and relationship fields are always included. See
 [device schema configuration](docs/device-schema.md) for field types and semantic roles.
@@ -210,10 +214,10 @@ All plugins require `plugins.sharedSecret.existingSecret`; its key defaults to
 |---|---|
 | `networkScan.timeoutSeconds` / `concurrency` | `2` seconds per connection / `10` devices probed concurrently per worker. |
 | `networkScan.intervalMinutes` | `15`; set `0` to disable scheduled scans. |
-| `deviceInfo.ai.url` / `reboot.ai.url` | Required when enabled; an OpenAI-compatible API base URL reachable by the jobs. |
-| `deviceInfo.ai.model` / `reboot.ai.model` | Required when enabled; model identifier accepted by the endpoint. |
-| `deviceInfo.ai.repeatModel` | `""`; optional model for repeat lookups using saved steps. Empty uses `ai.model`. |
-| `deviceInfo.ai.existingSecret` / `reboot.ai.existingSecret` | Required when enabled; API-key Secret in the job namespace. `ai.apiKeySecretKey` defaults to `OPENAI_API_KEY`. |
+| `deviceInfo.ai.url` / `reboot.ai.url` | Optional OpenAI-compatible API base URL. Setting URL and model locks that plugin's AI configuration to Helm; leaving both empty enables admin GUI management. |
+| `deviceInfo.ai.model` / `reboot.ai.model` | Helm-managed discovery model. Must be set together with the corresponding URL. |
+| `deviceInfo.ai.repeatModel` / `reboot.ai.repeatModel` | Optional model used when a saved successful recipe exists. Empty uses `ai.model`. |
+| `deviceInfo.ai.existingSecret` / `reboot.ai.existingSecret` | Required only for Helm-managed AI settings; API-key Secret in the job namespace. `ai.apiKeySecretKey` defaults to `OPENAI_API_KEY`. |
 | `deviceInfo.prompt` / `reboot.prompt` | Task instructions supporting `{device_url}` and `{device_json}`. Credentials and required result instructions are appended automatically. |
 | `deviceInfo.researchImage.*` / `reboot.researchImage.*` | Browser-agent repository, tag, and optional digest. |
 | `deviceInfo.httpPort` / `deviceInfo.httpsPort` | `80` / `443`; global web-interface ports. Type, ordered-rule, and device `http_port` / `https_port` settings override them independently. Device Info gives the agent HTTPS then HTTP candidates. |

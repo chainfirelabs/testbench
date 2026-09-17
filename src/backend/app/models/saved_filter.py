@@ -13,10 +13,19 @@ FILTER_ENTITIES = ("devices", "software", "tests", "audit", "users")
 # scoped by type as "devices:<type key>". Without that, saving a router layout
 # would overwrite the phone layout and the columns in it would not even exist.
 DEVICE_SCOPED_ENTITY = re.compile(r"^devices:[a-z][a-z0-9-]{0,49}$")
+SOFTWARE_DETAIL_SCOPED_ENTITY = re.compile(
+    r"^(?:vendor_devices|tested_devices):"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def is_filter_entity(value: str) -> bool:
-    return value in FILTER_ENTITIES or bool(DEVICE_SCOPED_ENTITY.fullmatch(value))
+    return (
+        value in FILTER_ENTITIES
+        or bool(DEVICE_SCOPED_ENTITY.fullmatch(value))
+        or bool(SOFTWARE_DETAIL_SCOPED_ENTITY.fullmatch(value))
+    )
 
 # A view is saved for the shape of screen it was built on. A desktop view names
 # fourteen columns and a hundred rows a page; the same view on a phone is a wall
@@ -33,7 +42,7 @@ class SavedFilter(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # devices | devices:<type key> | software | tests | audit | users
+    # Base entities, devices:<type key>, or vendor/tested devices:<software UUID>.
     entity: Mapped[str] = mapped_column(String(60), nullable=False)
     # Defaults to desktop so every view saved before platforms existed keeps
     # behaving exactly as it did.

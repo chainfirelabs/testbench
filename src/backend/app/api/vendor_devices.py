@@ -7,11 +7,12 @@ the software has actually been run against comes from `tests` instead
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
-from sqlalchemy import func, or_, select
+from pydantic import BaseModel
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
-from ..models import Software, User, VendorDevice
+from ..models import EntityField, Software, User, VendorDevice, VendorDeviceFieldOverride
 from ..models.vendor_device import build_match_key
 from ..schemas import (
     BulkIds,
@@ -31,13 +32,16 @@ from ..services.io import (
     template_csv,
 )
 from ..services.query import order_by, row_error
-from .deps import get_current_user, require_write
+from ..services.entity_fields import (
+    field_payload, get_entity_fields, merge_extra_columns, project_fields,
+    validate_custom_values,
+)
+from .deps import get_current_user, require_admin, require_write
 
 router = APIRouter(prefix="/software/{software_id}/vendor-devices", tags=["vendor-devices"])
 
 EXPORT_COLUMNS = [
     "id",
-    "vendor",
     "make",
     "model",
     "firmware_version",
@@ -52,7 +56,6 @@ EXPORT_COLUMNS = [
 ]
 
 EDITABLE_FIELDS = [
-    "vendor",
     "make",
     "model",
     "firmware_version",
@@ -65,17 +68,75 @@ EDITABLE_FIELDS = [
 ]
 
 # Fields the API owns; an import file carrying them is ignored rather than rejected.
-IMPORT_IGNORED = {"id", "software_id", "match_key", "created_at", "updated_at", "created_by", "updated_by"}
+IMPORT_IGNORED = {"id", "software_id", "vendor", "match_key", "created_at", "updated_at", "created_by", "updated_by"}
 
 # The columns an import template offers. None is required on its own, but a row
 # has to say something about which device it describes (see build_match_key).
 TEMPLATE_COLUMNS = EDITABLE_FIELDS
 
-SEARCH_FIELDS = ("vendor", "make", "model", "firmware_version", "hardware_version", "architecture", "source", "notes")
+SEARCH_FIELDS = ("make", "model", "firmware_version", "hardware_version", "architecture", "source", "notes")
+
+
+class VendorFieldOverrideIn(BaseModel):
+    id: str
+    visible: bool = True
+    required: bool = False
+
+
+class VendorFieldLayoutIn(BaseModel):
+    fields: list[VendorFieldOverrideIn]
 
 
 def _vd_dict(vd: VendorDevice) -> dict:
     return VendorDeviceOut.model_validate(vd).model_dump(mode="json")
+
+
+def _effective_fields(db: Session, software: Software) -> list[tuple[EntityField, dict]]:
+    fields = get_entity_fields(db, "vendor_devices")
+    overrides = {
+        item.field_id: item for item in db.scalars(select(VendorDeviceFieldOverride).where(
+            VendorDeviceFieldOverride.software_id == software.id,
+        )).all()
+    }
+    effective = []
+    for field in fields:
+        override = overrides.get(field.id)
+        payload = field_payload(field)
+        if override:
+            payload.update(
+                visible=override.visible,
+                list_visible=override.visible,
+                required=override.required,
+                position=override.position,
+                inherited=False,
+            )
+        else:
+            payload["inherited"] = True
+        effective.append((field, payload))
+    return sorted(effective, key=lambda item: item[1]["position"])
+
+
+def _validate_values(
+    db: Session, software: Software, values: dict, *, partial: bool = False,
+) -> dict:
+    effective = _effective_fields(db, software)
+    overrides = {
+        field.key: {"visible": payload["visible"], "required": payload["required"]}
+        for field, payload in effective
+    }
+    normalized = validate_custom_values(
+        db, "vendor_devices", values, "misc_data", partial=partial,
+        field_overrides=overrides,
+    )
+    for field, payload in effective:
+        if field.storage == "data" or not payload["visible"] or not payload["required"]:
+            continue
+        if partial and field.key not in normalized:
+            continue
+        value = normalized.get(field.key)
+        if value is None or value == "":
+            raise ValueError(f"{field.label} is required")
+    return normalized
 
 
 def _get_software(db: Session, key: str) -> Software:
@@ -122,7 +183,7 @@ def _find_duplicate(db: Session, software: Software, match_key: str, exclude_id:
 def _describe(values: dict) -> str:
     """Human-readable label for a row, for conflict messages."""
     parts: list[str] = []
-    for f in ("vendor", "make", "model"):
+    for f in ("make", "model"):
         part = str(values[f]).strip() if values.get(f) else ""
         # Vendor and make are usually the same word; say it once.
         if part and part.lower() not in (p.lower() for p in parts):
@@ -134,15 +195,57 @@ def _query(db: Session, software: Software, search: str | None):
     q = select(VendorDevice).where(VendorDevice.software_id == software.id)
     if search:
         like = f"%{search}%"
-        q = q.where(or_(*[getattr(VendorDevice, f).ilike(like) for f in SEARCH_FIELDS]))
+        custom = [
+            VendorDevice.misc_data[field.key].astext.ilike(like)
+            for field, _payload in _effective_fields(db, software)
+            if field.storage == "data" and not field.sensitive
+        ]
+        q = q.where(or_(
+            *[getattr(VendorDevice, f).ilike(like) for f in SEARCH_FIELDS],
+            *custom,
+        ))
     return q
+
+
+@router.get("/schema")
+def vendor_device_schema(
+    software_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    software = _get_software(db, software_id)
+    return [payload for _field, payload in _effective_fields(db, software)]
+
+
+@router.put("/schema")
+def update_vendor_device_schema(
+    software_id: str, body: VendorFieldLayoutIn, db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    software = _get_software(db, software_id)
+    fields = get_entity_fields(db, "vendor_devices")
+    by_id = {field.id: field for field in fields}
+    supplied = [item.id for item in body.fields]
+    if len(supplied) != len(set(supplied)) or set(supplied) != set(by_id):
+        raise HTTPException(status_code=422, detail="Layout must contain every vendor-device field exactly once")
+    db.execute(delete(VendorDeviceFieldOverride).where(
+        VendorDeviceFieldOverride.software_id == software.id,
+    ))
+    for position, item in enumerate(body.fields):
+        field = by_id[item.id]
+        if item.required and not item.visible:
+            raise HTTPException(status_code=422, detail=f"{field.label} cannot be required while hidden")
+        db.add(VendorDeviceFieldOverride(
+            software_id=software.id, field_id=field.id, visible=item.visible,
+            required=item.required, position=position * 10,
+        ))
+    db.commit()
+    return [payload for _field, payload in _effective_fields(db, software)]
 
 
 @router.get("", response_model=Page[VendorDeviceOut])
 def list_vendor_devices(
     software_id: str,
     search: str | None = None,
-    sort: str = "vendor",
+    sort: str = "make",
     order: str = "asc",
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=1000),
@@ -153,7 +256,7 @@ def list_vendor_devices(
     q = _query(db, software, search)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     # Secondary sort keeps paging stable when the primary column repeats.
-    q = q.order_by(order_by(VendorDevice, sort, order, "vendor"), VendorDevice.match_key.asc())
+    q = q.order_by(order_by(VendorDevice, sort, order, "make"), VendorDevice.match_key.asc())
     items = db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all()
     return Page(
         items=[VendorDeviceOut.model_validate(v) for v in items],
@@ -174,7 +277,8 @@ def export_vendor_devices(
 ):
     software = _get_software(db, software_id)
     items = db.scalars(_query(db, software, search).order_by(VendorDevice.match_key)).all()
-    rows = [_vd_dict(v) for v in items]
+    fields = [field for field, payload in _effective_fields(db, software) if payload["visible"]]
+    rows = [project_fields(_vd_dict(v), fields, "misc_data") for v in items]
     log_action(
         db, user, "software.vendor_devices.export", "software", software.id,
         {"format": format, "count": len(rows)}, request,
@@ -182,7 +286,7 @@ def export_vendor_devices(
     db.commit()
     # The stem carries a software name, which is free text: safe_filename keeps a
     # quote or newline in it from breaking out of the Content-Disposition header.
-    return export_response(rows, EXPORT_COLUMNS, format, f"{software.name}-vendor-devices")
+    return export_response(rows, [field.key for field in fields], format, f"{software.name}-vendor-devices")
 
 
 @router.get("/template")
@@ -190,7 +294,11 @@ def vendor_device_template(software_id: str, db: Session = Depends(get_db), user
     """A blank CSV with the columns an import accepts — fill it in and import it."""
     software = _get_software(db, software_id)
     name = safe_filename(f"{software.name}-vendor-devices-template", "csv")
-    return download_response(template_csv(TEMPLATE_COLUMNS), name, "text/csv")
+    columns = [
+        field.key for field, payload in _effective_fields(db, software)
+        if payload["visible"] and field.writable and field.key != "misc_data"
+    ]
+    return download_response(template_csv(columns), name, "text/csv")
 
 
 @router.post("/import", response_model=ImportResult)
@@ -203,7 +311,7 @@ async def import_vendor_devices(
 ):
     """Load a vendor compatibility list.
 
-    Rows are matched on the identity fields (vendor/make/model/firmware/
+    Rows are matched on the identity fields (make/model/firmware/
     hardware/architecture), so re-importing an updated list refreshes the
     existing rows instead of duplicating them.
     """
@@ -215,13 +323,21 @@ async def import_vendor_devices(
     # back mid-file would also undo the rows already applied from it, while the
     # counts kept claiming they had landed.
     parsed: list[tuple[str, dict]] = []
+    fields = get_entity_fields(db, "vendor_devices")
+    # JSON-backed catalog fields (and still-unknown spreadsheet columns) are
+    # folded into misc_data; only physical columns remain top-level.
+    known = {
+        field.key for field in fields if field.storage != "data"
+    } | IMPORT_IGNORED | {"misc_data"}
     for i, row in enumerate(rows):
         try:
             if not isinstance(row, dict):
                 raise ValueError("row must be an object")
+            row = merge_extra_columns(row, known, "misc_data")
             data = VendorDeviceCreate(
                 **strip_nulls({k: v for k, v in row.items() if k not in IMPORT_IGNORED})
             ).model_dump()
+            data = _validate_values(db, software, data)
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": i, "error": row_error(exc)})
             continue
@@ -295,7 +411,10 @@ def create_vendor_device(
     user: User = Depends(require_write),
 ):
     software = _get_software(db, software_id)
-    data = body.model_dump()
+    try:
+        data = _validate_values(db, software, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     key = build_match_key(data)
     if _find_duplicate(db, software, key):
         raise HTTPException(
@@ -326,7 +445,11 @@ def update_vendor_device(
     software = _get_software(db, software_id)
     vd = _get_vd(db, software, vd_id)
     old = {f: getattr(vd, f) for f in EDITABLE_FIELDS}
-    _apply(vd, body.model_dump(exclude_unset=True))
+    try:
+        data = _validate_values(db, software, body.model_dump(exclude_unset=True), partial=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _apply(vd, data)
     if _find_duplicate(db, software, vd.match_key, exclude_id=vd.id):
         db.rollback()
         raise HTTPException(

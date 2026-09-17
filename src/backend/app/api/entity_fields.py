@@ -15,7 +15,7 @@ from ..services.entity_fields import (
 from .deps import get_current_user, require_admin
 
 router = APIRouter(prefix="/entity-fields", tags=["schema"])
-EDITABLE_ENTITIES = ("software", "tests")
+EDITABLE_ENTITIES = ("software", "tests", "vendor_devices")
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,99}$")
 
 
@@ -96,7 +96,7 @@ def list_entity_fields(
         "devices": [device_field_payload(field) for field in get_global_fields(db) if field.visible],
         **{
             entity: [field_payload(field) for field in get_entity_fields(db, entity, visible=True)]
-            for entity in ("software", "tests")
+            for entity in ("software", "tests", "vendor_devices")
         },
     }
 
@@ -145,6 +145,7 @@ def create_entity_field(body: EntityFieldCreate, entity: str, db: Session = Depe
         visible=True, sensitive=body.sensitive, writable=True, storage="data",
         position=position, indexed=body.indexed or body.unique_value,
         unique_value=body.unique_value,
+        configuration_source="gui",
     )
     db.add(item)
     db.commit()
@@ -157,6 +158,8 @@ def create_entity_field(body: EntityFieldCreate, entity: str, db: Session = Depe
 def update_entity_field(body: EntityFieldUpdate, entity: str, field_id: str,
                         db: Session = Depends(get_db), user: User = Depends(require_admin)):
     item = _field(db, entity, field_id)
+    if item.configuration_source == "yaml":
+        raise HTTPException(status_code=409, detail=f"{item.label} is owned by the DeviceSchema ConfigMap")
     changes = body.model_dump(exclude_unset=True)
     if _protected(item):
         forbidden = set(changes) - {"label", "description", "visible", "position"}
@@ -183,6 +186,8 @@ def update_entity_field(body: EntityFieldUpdate, entity: str, field_id: str,
 def delete_entity_field(entity: str, field_id: str, db: Session = Depends(get_db),
                         user: User = Depends(require_admin)):
     item = _field(db, entity, field_id)
+    if item.configuration_source == "yaml":
+        raise HTTPException(status_code=409, detail=f"{item.label} is owned by the DeviceSchema ConfigMap")
     if _protected(item):
         raise HTTPException(status_code=409, detail=f"{item.label} is required by the application and cannot be deleted")
     drop_entity_field_indexes(db, item)

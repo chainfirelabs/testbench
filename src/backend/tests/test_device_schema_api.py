@@ -530,6 +530,11 @@ class InventoryTests(SchemaCase):
         self.assertIn("carrier", header)
         self.assertNotIn("carrier", self.get("/api/v1/devices/template?device_type=router").text.split("\n")[0])
 
+    def test_all_devices_template_carries_the_union_of_type_fields(self):
+        header = self.get("/api/v1/devices/template").text.split("\n")[0]
+        self.assertIn("rack", header)
+        self.assertIn("carrier", header)
+
     def test_exports_carry_the_stable_type_key(self):
         rows = self.get("/api/v1/devices/export?format=json&device_type=router").json()
         self.assertEqual(rows[0]["device_type"], "router")

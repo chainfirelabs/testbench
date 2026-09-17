@@ -33,6 +33,12 @@ from ..models import (
     DeviceSchemaRevision,
     DeviceType,
     DeviceTypePlugin,
+    EntityField,
+)
+from .entity_fields import (
+    BUILTINS as ENTITY_BUILTINS,
+    FIELD_TYPES as ENTITY_FIELD_TYPES,
+    ensure_entity_field_indexes,
 )
 from .device_schema import (
     FIELD_TYPES,
@@ -175,6 +181,28 @@ def export_document(db: Session, name: str = "testbench") -> dict:
             entry["plugins"] = plugins
         device_types.append(entry)
 
+    vendor_device_fields = []
+    for field in db.scalars(select(EntityField).where(
+        EntityField.entity == "vendor_devices",
+    ).order_by(EntityField.position)):
+        item = {
+            "key": field.key,
+            "label": field.label,
+            "type": field.field_type,
+            "visible": field.visible,
+            "listVisible": field.list_visible,
+            "required": field.required,
+        }
+        for source, target in (
+            ("description", "description"), ("options", "options"),
+            ("sensitive", "sensitive"), ("indexed", "indexed"),
+            ("unique_value", "unique"),
+        ):
+            value = getattr(field, source)
+            if value not in (None, [], False):
+                item[target] = value
+        vendor_device_fields.append(item)
+
     return {
         "apiVersion": API_VERSION,
         "kind": KIND,
@@ -183,6 +211,7 @@ def export_document(db: Session, name: str = "testbench") -> dict:
             "fields": fields,
             "globalFields": [_export_assignment(row, by_id[row.field_definition_id].key) for row in global_rows],
             "deviceTypes": device_types,
+            "vendorDeviceFields": vendor_device_fields,
         },
     }
 
@@ -215,6 +244,50 @@ def parse_document(text: str) -> dict:
     _require(raw.get("kind") == KIND, f"kind must be {KIND}")
     spec = raw.get("spec") or {}
     _require(isinstance(spec, dict), "spec must be a mapping")
+
+    vendor_device_fields: list[dict] = []
+    seen_vendor_fields: set[str] = set()
+    for position, entry in enumerate(spec.get("vendorDeviceFields") or []):
+        _require(isinstance(entry, dict), "each spec.vendorDeviceFields entry must be a mapping")
+        key = _string(entry.get("key"), "a vendor-device field key")
+        _require(key != "vendor",
+                 "vendor-device field 'vendor' was removed; the software name identifies the vendor")
+        _require(bool(KEY_RE.fullmatch(key)),
+                 f"vendor-device field key '{key}' must be lowercase letters, digits or underscores")
+        _require(key not in seen_vendor_fields, f"vendor-device field '{key}' is declared twice")
+        seen_vendor_fields.add(key)
+        field_type = entry.get("type", "text")
+        _require(field_type in ENTITY_FIELD_TYPES,
+                 f"vendor-device field '{key}' has unsupported type '{field_type}'")
+        builtin = ENTITY_BUILTINS["vendor_devices"].get(key)
+        if builtin:
+            _require(field_type == builtin["field_type"],
+                     f"built-in vendor-device field '{key}' must keep type '{builtin['field_type']}'")
+        options = entry.get("options") or []
+        _require(isinstance(options, list) and all(isinstance(value, str) for value in options),
+                 f"vendor-device field '{key}' options must be a list of strings")
+        if field_type == "select":
+            _require(bool(options), f"vendor-device select field '{key}' needs at least one option")
+        visible = bool(entry.get("visible", True))
+        required = bool(entry.get("required", False))
+        _require(visible or not required,
+                 f"vendor-device field '{key}' cannot be required while hidden")
+        vendor_device_fields.append({
+            "key": key,
+            "label": entry.get("label") or key.replace("_", " ").title(),
+            "field_type": field_type,
+            "description": entry.get("description"),
+            "options": options,
+            "required": required,
+            "visible": visible,
+            "list_visible": bool(entry.get("listVisible", visible)),
+            "sensitive": bool(entry.get("sensitive", False)),
+            "indexed": bool(entry.get("indexed", False)) or bool(entry.get("unique", False)),
+            "unique_value": bool(entry.get("unique", False)),
+            "position": entry.get("position", position * 10),
+        })
+        _require(isinstance(vendor_device_fields[-1]["position"], int),
+                 f"vendor-device field '{key}' position must be an integer")
 
     fields: list[dict] = []
     seen_fields: set[str] = set()
@@ -320,6 +393,7 @@ def parse_document(text: str) -> dict:
         "fields": fields,
         "global_assignments": _assignments(spec.get("globalFields"), "globalFields"),
         "device_types": types,
+        "vendor_device_fields": vendor_device_fields,
         "generation": sha256(text.encode()).hexdigest()[:16],
     }
 
@@ -361,8 +435,13 @@ def additive_import_plan(db: Session, document: dict) -> dict:
         (row.device_type_id, row.plugin_id)
         for row in db.scalars(select(DeviceTypePlugin))
     }
+    vendor_fields = {
+        row.key for row in db.scalars(select(EntityField).where(
+            EntityField.entity == "vendor_devices",
+        ))
+    }
     additions = {"fields": [], "device_types": [], "global_assignments": [],
-                 "type_assignments": [], "plugins": []}
+                 "type_assignments": [], "plugins": [], "vendor_device_fields": []}
     skipped = {key: [] for key in additions}
 
     for spec in document["fields"]:
@@ -387,6 +466,9 @@ def additive_import_plan(db: Session, document: dict) -> dict:
         for spec in entry["plugins"]:
             target = skipped if (type_id, spec["plugin_id"]) in plugins else additions
             target["plugins"].append(f"{entry['key']}/{spec['plugin_id']}")
+    for spec in document.get("vendor_device_fields", []):
+        target = skipped if spec["key"] in vendor_fields else additions
+        target["vendor_device_fields"].append(spec["key"])
 
     counts = {key: len(value) for key, value in additions.items()}
     return {"generation": document["generation"], "additions": additions,
@@ -397,6 +479,18 @@ def apply_additive_import(db: Session, document: dict, user=None) -> dict:
     """Create only missing schema objects and publish one GUI revision."""
     plan = additive_import_plan(db, document)
     generation = document["generation"]
+
+    existing_vendor_fields = {
+        row.key for row in db.scalars(select(EntityField).where(
+            EntityField.entity == "vendor_devices",
+        ))
+    }
+    _apply_vendor_device_fields(
+        db, [
+            spec for spec in document.get("vendor_device_fields", [])
+            if spec["key"] not in existing_vendor_fields
+        ],
+    )
 
     definitions = {row.key: row for row in db.scalars(select(DeviceFieldDefinition))}
     for spec in document["fields"]:
@@ -619,6 +713,51 @@ def _prune(db: Session, model, generation: str, keep_ids: set[str], hard: bool) 
     return removed
 
 
+def _apply_vendor_device_fields(
+    db: Session, specs: list[dict], *, source: str = "yaml", generation: str | None = None,
+) -> int:
+    """Apply the shared vendor-device catalog carried by DeviceSchema.
+
+    Core fields retain physical-column storage; additional fields use
+    misc_data. Reconciliation updates definitions named by the document but
+    deliberately does not delete omitted definitions or stored values.
+    """
+    changed = 0
+    existing = {
+        field.key: field for field in db.scalars(select(EntityField).where(
+            EntityField.entity == "vendor_devices",
+        ))
+    }
+    builtins = ENTITY_BUILTINS["vendor_devices"]
+    for spec in specs:
+        field = existing.get(spec["key"])
+        if field is None:
+            field = EntityField(
+                entity="vendor_devices", key=spec["key"], writable=True,
+                storage="column" if spec["key"] in builtins else "data",
+                configuration_source=source,
+            )
+            db.add(field)
+            existing[spec["key"]] = field
+        before = (
+            field.label, field.field_type, field.description, field.options,
+            field.required, field.visible, field.list_visible, field.sensitive,
+            field.indexed, field.unique_value, field.position,
+        )
+        for name, value in spec.items():
+            if name != "key":
+                setattr(field, name, value)
+        field.configuration_source = source
+        field.source_revision = generation
+        after = (
+            field.label, field.field_type, field.description, field.options,
+            field.required, field.visible, field.list_visible, field.sensitive,
+            field.indexed, field.unique_value, field.position,
+        )
+        changed += before != after
+    return changed
+
+
 def reconcile(db: Session, document: dict | None = None, mode: str | None = None) -> dict:
     """Apply a DeviceSchema document according to the configured mode.
 
@@ -682,6 +821,11 @@ def reconcile(db: Session, document: dict | None = None, mode: str | None = None
     keep_definitions: set[str] = set()
     keep_types: set[str] = set()
     keep_plugins: set[str] = set()
+
+    vendor_fields_changed = _apply_vendor_device_fields(
+        db, document.get("vendor_device_fields", []), generation=generation,
+    )
+    db.flush()
 
     for spec in document["fields"]:
         definition = _apply_definition(db, spec, generation, mode, conflicts)
@@ -770,11 +914,15 @@ def reconcile(db: Session, document: dict | None = None, mode: str | None = None
     revision = publish_revision(
         db, source="yaml",
         note=f"Reconciled DeviceSchema '{document['name']}' in {mode} mode",
-        summary={"generation": generation, "mode": mode, "conflicts": len(conflicts), "retired": removed},
+        summary={
+            "generation": generation, "mode": mode, "conflicts": len(conflicts),
+            "retired": removed, "vendor_device_fields": vendor_fields_changed,
+        },
     )
     db.commit()
     invalidate_cache()
     refresh_managed_indexes(db)
+    ensure_entity_field_indexes(db)
 
     _status = {
         "mode": mode,

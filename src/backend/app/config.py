@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     plugins: str = ""
     plugin_shared_secret: str = ""
     plugin_timeout_seconds: float = 10.0
+    # Encrypts admin-managed AI provider credentials at rest. Required only
+    # when a GUI profile stores an API key; Helm-locked profiles keep using a
+    # Kubernetes Secret and never enter the database.
+    credential_encryption_key: str = ""
 
     # Helm's optional MCP deployment receives the same generated credential.
     # It authenticates only as a synthetic readonly identity and is never

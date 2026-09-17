@@ -149,6 +149,34 @@ def test_single_scan_respects_type_visibility_override():
         assert caught.value.status_code == 409
 
 
+def test_single_scan_refuses_a_disabled_network_scan_plugin():
+    device = NS(id='device', device_type_id='router', unique_id='router-1')
+    action = {
+        'plugin_id': 'network-scan', 'id': 'network-scan.scan-device',
+        'available': False,
+        'unavailable_reason': 'Network Scan is not enabled for the Router device type',
+    }
+    with (patch.object(devices, '_get_device', return_value=device),
+          patch.object(devices, 'get_available_actions', return_value=[action]),
+          patch.object(devices, 'scan_device') as scan):
+        with pytest.raises(HTTPException) as caught:
+            devices.scan_single_device('device', NS(), Mock(), NS(role='admin'))
+    assert caught.value.status_code == 403
+    assert caught.value.detail == action['unavailable_reason']
+    scan.assert_not_called()
+
+
+def test_single_scan_requires_a_healthy_network_scan_plugin():
+    device = NS(id='device', device_type_id='router', unique_id='router-1')
+    with (patch.object(devices, '_get_device', return_value=device),
+          patch.object(devices, 'get_available_actions', return_value=[]),
+          patch.object(devices, 'scan_device') as scan):
+        with pytest.raises(HTTPException) as caught:
+            devices.scan_single_device('device', NS(), Mock(), NS(role='admin'))
+    assert caught.value.status_code == 409
+    scan.assert_not_called()
+
+
 def test_query_lookup_passes_exact_name_then_reads_by_id():
     db = Mock()
     db.scalar.return_value = NS(id='real-id')

@@ -306,6 +306,12 @@ kind: DeviceSchema
 metadata:
   name: default
 spec:
+  vendorDeviceFields:
+    - {key: make, label: Make, type: text}
+    - {key: model, label: Model, type: text}
+    - {key: firmware_version, label: Firmware Version, type: text}
+    - {key: hardware_version, label: Hardware Version, type: text}
+    - {key: license_tier, label: License Tier, type: select, options: [standard, enterprise]}
   fields:
     - key: location
       label: Location
@@ -401,7 +407,7 @@ schema:
     optionalFields: [version]
     additionalFields: []
   tests:
-    optionalFields: [tag, run_at, notes]
+    optionalFields: [component_name, component_version, tag, run_at, notes]
     additionalFields: []
   devices:
     source: configMap        # opt in to external bootstrap; default is database

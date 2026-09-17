@@ -31,6 +31,8 @@ export interface FormField {
    * is unchanged.
    */
   type?: 'text' | 'password' | 'select' | 'textarea' | 'json' | 'datalist' | 'date' | 'number' | 'boolean'
+  /** JSON fields normally accept objects; opt into an array for list-valued APIs. */
+  jsonShape?: 'object' | 'array'
   /**
    * Choices for `select`, suggestions for `datalist`.
    *
@@ -70,8 +72,10 @@ const props = withDefaults(
     values: Record<string, any>
     submitLabel?: string
     busy?: boolean
+    /** Bulk edit: only checked fields are emitted, leaving every other value untouched. */
+    selective?: boolean
   }>(),
-  { submitLabel: 'Create', busy: false },
+  { submitLabel: 'Create', busy: false, selective: false },
 )
 
 const emit = defineEmits<{
@@ -82,6 +86,18 @@ const emit = defineEmits<{
 
 const error = ref('')
 const card = ref<HTMLElement | null>(null)
+const selectedKeys = ref(new Set<string>())
+
+function fieldSelected(field: FormField): boolean {
+  return !props.selective || selectedKeys.value.has(field.key)
+}
+
+function toggleField(field: FormField, checked: boolean) {
+  const next = new Set(selectedKeys.value)
+  if (checked) next.add(field.key)
+  else next.delete(field.key)
+  selectedKeys.value = next
+}
 
 /** `required` resolved against the values as they stand right now. */
 function isRequired(f: FormField): boolean {
@@ -90,6 +106,7 @@ function isRequired(f: FormField): boolean {
 
 /** Likewise `disabled` — re-read on every render, so it tracks the form. */
 function isDisabled(f: FormField): boolean {
+  if (props.selective && !fieldSelected(f)) return true
   return typeof f.disabled === 'function' ? f.disabled(props.values) : !!f.disabled
 }
 
@@ -144,6 +161,7 @@ const hiddenFields = computed(() => props.fields.filter((f) => !shownKeys.value.
 
 const useDisclosure = computed(
   () =>
+    !props.selective &&
     isStacked.value &&
     !showAllFields.value &&
     props.fields.length > FIELD_DISCLOSURE_THRESHOLD &&
@@ -156,7 +174,7 @@ const visibleFields = computed(() =>
 
 const missing = computed(() =>
   props.fields.filter(
-    (f) => isRequired(f) && !isDisabled(f) && !String(props.values[f.key] ?? '').trim(),
+    (f) => fieldSelected(f) && isRequired(f) && !isDisabled(f) && !String(props.values[f.key] ?? '').trim(),
   ),
 )
 
@@ -166,6 +184,10 @@ function onInput(field: FormField, value: any) {
 }
 
 function submit() {
+  if (props.selective && !selectedKeys.value.size) {
+    error.value = 'Select at least one field to update'
+    return
+  }
   if (missing.value.length) {
     error.value = `${missing.value.map((f) => f.label).join(', ')} ${missing.value.length > 1 ? 'are' : 'is'} required`
     return
@@ -180,6 +202,7 @@ function submit() {
   // Build the payload: blank text becomes null, JSON fields become objects.
   const payload: Record<string, any> = {}
   for (const f of props.fields) {
+    if (!fieldSelected(f)) continue
     const raw = props.values[f.key]
     if (isDisabled(f)) {
       // Explicitly null rather than omitted: on a PATCH a missing key means
@@ -188,13 +211,14 @@ function submit() {
       payload[f.key] = null
     } else if (f.type === 'json') {
       try {
-        const parsed = JSON.parse((raw ?? '').trim() || '{}')
-        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-          throw new Error('not an object')
+        const wantsArray = f.jsonShape === 'array'
+        const parsed = JSON.parse((raw ?? '').trim() || (wantsArray ? '[]' : '{}'))
+        if (wantsArray ? !Array.isArray(parsed) : (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))) {
+          throw new Error(`not ${wantsArray ? 'an array' : 'an object'}`)
         }
         payload[f.key] = parsed
       } catch {
-        error.value = `${f.label} must be a JSON object`
+        error.value = `${f.label} must be a JSON ${f.jsonShape === 'array' ? 'array' : 'object'}`
         return
       }
     } else if (f.type === 'password') {
@@ -236,6 +260,14 @@ onMounted(() =>
       <form class="form-grid" @submit.prevent="submit">
         <template v-for="f in visibleFields" :key="f.key">
           <label :for="`ff-${f.key}`">
+            <input
+              v-if="selective"
+              class="field-selector"
+              type="checkbox"
+              :checked="fieldSelected(f)"
+              :aria-label="`Apply ${f.label}`"
+              @change="toggleField(f, ($event.target as HTMLInputElement).checked)"
+            />
             {{ f.label
             }}<span v-if="isRequired(f) && !isDisabled(f)" class="req" title="Required">*</span>
           </label>
@@ -319,6 +351,7 @@ onMounted(() =>
       >
         More fields ({{ hiddenFields.length }})
       </button>
+      <slot />
       <p v-if="error" class="form-error">{{ error }}</p>
       </div>
       <div class="modal-actions">
@@ -346,6 +379,11 @@ onMounted(() =>
 .req {
   color: var(--red);
   margin-left: 3px;
+}
+
+.field-selector {
+  margin: 0 7px 0 0;
+  vertical-align: middle;
 }
 
 .form-error {

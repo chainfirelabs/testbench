@@ -11,8 +11,12 @@ metadata:
 {{- end }}
 {{- if .Values.plugins.reboot.enabled }}
 {{- $rebootNs := include "testbench.rebootNamespace" . }}
-{{- $aiUrl := required "plugins.reboot.ai.url is required" .Values.plugins.reboot.ai.url }}
-{{- $aiModel := required "plugins.reboot.ai.model is required" .Values.plugins.reboot.ai.model }}
+{{- $aiUrl := .Values.plugins.reboot.ai.url }}
+{{- $aiModel := .Values.plugins.reboot.ai.model }}
+{{- if and (or $aiUrl $aiModel) (not (and $aiUrl $aiModel)) }}{{- fail "plugins.reboot.ai.url and model must either both be set (Helm-managed) or both be empty (GUI-managed)" }}{{- end }}
+{{- $aiRepeatModel := default $aiModel .Values.plugins.reboot.ai.repeatModel }}
+{{- $aiSecret := .Values.plugins.reboot.ai.existingSecret }}
+{{- if and $aiUrl $aiModel }}{{- $aiSecret = required "plugins.reboot.ai.existingSecret is required for Helm-managed AI settings" $aiSecret }}{{- end }}
 {{- if and .Values.plugins.reboot.worker.createNamespace (ne $rebootNs .Release.Namespace) }}
 ---
 apiVersion: v1
@@ -84,10 +88,11 @@ spec:
             - {name: TB_REBOOT_SSH_PORT, value: {{ .Values.plugins.reboot.sshPort | quote }}}
             - {name: TB_REBOOT_PROMPT, value: {{ .Values.plugins.reboot.prompt | quote }}}
             - {name: TB_REBOOT_CAPTURE_IMAGES, value: {{ .Values.plugins.reboot.captureImages | quote }}}
-            - {name: TB_REBOOT_AI_SECRET_NAME, value: {{ required "plugins.reboot.ai.existingSecret is required" .Values.plugins.reboot.ai.existingSecret | quote }}}
+            - {name: TB_REBOOT_AI_SECRET_NAME, value: {{ $aiSecret | quote }}}
             - {name: TB_REBOOT_AI_SECRET_KEY, value: {{ required "plugins.reboot.ai.apiKeySecretKey is required" .Values.plugins.reboot.ai.apiKeySecretKey | quote }}}
             - {name: TB_REBOOT_AI_URL, value: {{ $aiUrl | quote }}}
             - {name: TB_REBOOT_AI_MODEL, value: {{ $aiModel | quote }}}
+            - {name: TB_REBOOT_AI_REPEAT_MODEL, value: {{ $aiRepeatModel | quote }}}
             - {name: TB_REBOOT_RECOVERY_TIMEOUT_SECONDS, value: {{ .Values.plugins.reboot.recoveryTimeoutSeconds | quote }}}
             - {name: TB_REBOOT_MAX_CONCURRENT_PODS, value: {{ .Values.plugins.reboot.maxConcurrentPods | quote }}}
             - {name: TB_REBOOT_TTL_SECONDS, value: {{ .Values.plugins.reboot.worker.ttlSecondsAfterFinished | quote }}}
@@ -169,9 +174,12 @@ spec:
 {{- end }}
 {{- if .Values.plugins.deviceInfo.enabled }}
 {{- $infoNs := include "testbench.researchNamespace" . }}
-{{- $aiUrl := required "plugins.deviceInfo.ai.url is required" .Values.plugins.deviceInfo.ai.url }}
-{{- $aiModel := required "plugins.deviceInfo.ai.model is required" .Values.plugins.deviceInfo.ai.model }}
+{{- $aiUrl := .Values.plugins.deviceInfo.ai.url }}
+{{- $aiModel := .Values.plugins.deviceInfo.ai.model }}
+{{- if and (or $aiUrl $aiModel) (not (and $aiUrl $aiModel)) }}{{- fail "plugins.deviceInfo.ai.url and model must either both be set (Helm-managed) or both be empty (GUI-managed)" }}{{- end }}
 {{- $aiRepeatModel := default $aiModel .Values.plugins.deviceInfo.ai.repeatModel }}
+{{- $aiSecret := .Values.plugins.deviceInfo.ai.existingSecret }}
+{{- if and $aiUrl $aiModel }}{{- $aiSecret = required "plugins.deviceInfo.ai.existingSecret is required for Helm-managed AI settings" $aiSecret }}{{- end }}
 {{- if and .Values.plugins.deviceInfo.research.createNamespace (ne $infoNs .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
@@ -240,7 +248,7 @@ spec:
             - {name: TB_INFO_HTTP_PORT, value: {{ .Values.plugins.deviceInfo.httpPort | quote }}}
             - {name: TB_INFO_HTTPS_PORT, value: {{ .Values.plugins.deviceInfo.httpsPort | quote }}}
             - {name: TB_INFO_CAPTURE_IMAGES, value: {{ .Values.plugins.deviceInfo.captureImages | quote }}}
-            - {name: TB_INFO_AI_SECRET_NAME, value: {{ required "plugins.deviceInfo.ai.existingSecret is required" .Values.plugins.deviceInfo.ai.existingSecret | quote }}}
+            - {name: TB_INFO_AI_SECRET_NAME, value: {{ $aiSecret | quote }}}
             - {name: TB_INFO_AI_SECRET_KEY, value: {{ required "plugins.deviceInfo.ai.apiKeySecretKey is required" .Values.plugins.deviceInfo.ai.apiKeySecretKey | quote }}}
             - {name: TB_INFO_AI_URL, value: {{ $aiUrl | quote }}}
             - {name: TB_INFO_AI_MODEL, value: {{ $aiModel | quote }}}

@@ -10,6 +10,20 @@ data:
     metadata:
       name: testbench
     spec:
+      # Shared catalog for vendor compatibility rows. Built-in keys keep their
+      # application types; additional keys are stored in misc_data. Individual
+      # software versions may override shown/required in the admin UI.
+      vendorDeviceFields:
+        - {key: make, label: Make, type: text}
+        - {key: model, label: Model, type: text}
+        - {key: firmware_version, label: Firmware Version, type: text}
+        - {key: hardware_version, label: Hardware Version, type: text}
+        - {key: architecture, label: Architecture, type: text}
+        - {key: support_status, label: Support, type: select, options: [supported, partial, unsupported, planned], required: true}
+        - {key: source, label: Source, type: text}
+        - {key: notes, label: Notes, type: textarea}
+        - {key: misc_data, label: Misc Data, type: json, listVisible: false}
+        - {key: license_tier, label: License Tier, type: select, options: [standard, enterprise]}
       fields:
         - {key: location, label: Location, type: text, indexed: true}
         - {key: imei, label: IMEI, type: text, indexed: true}

@@ -113,6 +113,20 @@ class EntityFieldConfigurationTests(unittest.TestCase):
         status = configured["devices"][1]
         self.assertNotIn("checked_out", status["options"])
 
+    def test_vendor_device_catalog_supports_global_custom_fields(self):
+        configured = self.configured({
+            "devices": {}, "software": {}, "tests": {},
+            "vendor_devices": {
+                "optional_fields": ["make", "model", "firmware_version"],
+                "custom_fields": [{"key": "license_tier", "label": "License Tier"}],
+            },
+        })
+        fields = {field["key"]: field for field in configured["vendor_devices"]}
+        self.assertNotIn("vendor", fields)
+        self.assertTrue(fields["firmware_version"]["visible"])
+        self.assertFalse(fields["hardware_version"]["visible"])
+        self.assertEqual(fields["license_tier"]["storage"], "data")
+
     def test_device_credentials_are_predefined_with_plaintext_storage(self):
         configured = self.configured({
             "devices": {"optional_fields": ["username", "password"]},

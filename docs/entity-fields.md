@@ -1,11 +1,22 @@
-# Software and test schema fields
+# Software, test, and vendor-device schema fields
 
 > **Devices have moved on.** Device fields are configurable at runtime and can
 > differ per device type — see [device-schema.md](device-schema.md). What
 > follows describes the storage and validation contract for software and test
 > fields. They are now editable at runtime from **Schema → Software** and
-> **Schema → Tests**. The Helm chart exposes all three catalogs together under
-> `schema`, with the device catalog under `schema.devices`.
+> **Schema → Tests**. The Helm chart seeds those two catalogs under `schema`;
+> device and vendor-device declarations can live in the external DeviceSchema
+> ConfigMap selected by `schema.devices`.
+
+Vendor Devices have a shared field catalog under **Schema → Vendor Devices**.
+Each software version can override which catalog fields are shown or required
+from its **Vendor Devices → Customize fields** action. A new software version
+inherits those overrides and can diverge afterward.
+
+Additional vendor-device values are stored in `misc_data`, but appear as normal
+columns in forms, CSV templates, imports, and exports. API and MCP searches scan
+the complete custom document, and MCP results expose it as `custom_fields`.
+Deleting a field definition leaves previously stored JSON values intact.
 
 TestBench persists the logical columns for software and tests in
 `entity_fields`. `TB_ENTITY_FIELDS_JSON` can seed that catalog on first start;

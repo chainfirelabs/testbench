@@ -83,6 +83,34 @@ class ParseTests(unittest.TestCase):
         carrier = next(f for f in self.doc["fields"] if f["key"] == "carrier")
         self.assertEqual(carrier["options"], ["AT&T", "T-Mobile", "Verizon"])
 
+    def test_vendor_device_fields_share_the_schema_document(self):
+        doc = document(f"""
+            apiVersion: {API_VERSION}
+            kind: DeviceSchema
+            spec:
+              vendorDeviceFields:
+                - {{key: make, label: Manufacturer, type: text}}
+                - key: license_tier
+                  label: License Tier
+                  type: select
+                  options: [standard, enterprise]
+                  required: true
+        """)
+        fields = {field["key"]: field for field in doc["vendor_device_fields"]}
+        self.assertEqual(fields["make"]["label"], "Manufacturer")
+        self.assertEqual(fields["license_tier"]["options"], ["standard", "enterprise"])
+        self.assertTrue(fields["license_tier"]["required"])
+
+    def test_vendor_device_builtin_type_cannot_be_redefined(self):
+        with self.assertRaisesRegex(DocumentError, "must keep type 'text'"):
+            document(f"""
+                apiVersion: {API_VERSION}
+                kind: DeviceSchema
+                spec:
+                  vendorDeviceFields:
+                    - {{key: make, type: number}}
+            """)
+
     def test_device_type_fields_and_plugins(self):
         router = next(t for t in self.doc["device_types"] if t["key"] == "router")
         self.assertEqual([a["key"] for a in router["assignments"]], ["wan_ip"])

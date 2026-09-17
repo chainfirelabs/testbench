@@ -30,11 +30,6 @@ ARCH_ALIASES = {
 # Best claim wins when several describe the same device.
 SUPPORT_RANK = {"supported": 0, "partial": 1, "planned": 2, "unsupported": 3}
 
-# A claim's make, falling back to the vendor name when the make is blank —
-# a row that only says "Cisco" is a claim about Cisco hardware.
-EFFECTIVE_MAKE = func.coalesce(func.nullif(func.trim(VendorDevice.make), ""), VendorDevice.vendor)
-
-
 def _is_blank(col):
     return or_(col.is_(None), func.trim(col) == "")
 
@@ -60,7 +55,7 @@ def _field_matches(col, value: str | None):
 def _claim_pins(vd: VendorDevice, field: str) -> bool:
     """Whether this claim actually named the field (rather than wildcarding it)."""
     if field == "make":
-        return bool((vd.make or "").strip() or (vd.vendor or "").strip())
+        return bool((vd.make or "").strip())
     return bool((getattr(vd, field) or "").strip())
 
 
@@ -72,7 +67,7 @@ def compatible_software(db: Session, device: Device) -> list[dict]:
     about a device. Each entry carries every claim that matched, so the UI can
     show what the vendor actually said.
     """
-    conditions = [_field_matches(EFFECTIVE_MAKE, device.make)]
+    conditions = [_field_matches(VendorDevice.make, device.make)]
     conditions += [
         _field_matches(getattr(VendorDevice, f), getattr(device, f))
         for f in MATCH_FIELDS

@@ -4,7 +4,7 @@ import type { FormField } from './components/FormModal.vue'
 
 export interface EntityField {
   id: string
-  entity: 'software' | 'tests'
+  entity: 'software' | 'tests' | 'vendor_devices'
   key: string
   label: string
   type: 'text' | 'password' | 'textarea' | 'number' | 'boolean' | 'date' | 'select' | 'json'
@@ -34,7 +34,7 @@ function catalog() {
 
 export function invalidateEntityFields() { catalogPromise = null }
 
-export function useEntityFields(entity: 'devices' | 'software' | 'tests'): {
+export function useEntityFields(entity: 'devices' | 'software' | 'tests' | 'vendor_devices'): {
   fields: Ref<EntityField[]>
   loadFields: () => Promise<void>
 } {

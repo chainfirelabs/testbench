@@ -3,6 +3,12 @@
 from typing import Any
 
 
+DEVICE_INFO_DISCOVERY_ROLES = {
+    "discovery_hardware", "discovery_firmware",
+    "discovery_lan_mac", "discovery_wan_mac",
+}
+
+
 def validate_plugin_configuration(plugin_id: str, configuration: dict) -> None:
     if not isinstance(configuration, dict):
         raise ValueError("Plugin configuration must be an object")
@@ -28,12 +34,55 @@ def validate_plugin_configuration(plugin_id: str, configuration: dict) -> None:
         validate_plugin_configuration(plugin_id, override)
     port_keys = {
         "device-reboot": ("ssh_port",),
-        "device-info-agent": ("http_port", "https_port"),
+        "device-info-agent": ("http_port", "https_port", "ssh_port"),
     }.get(plugin_id, ())
     for key in port_keys:
         port = configuration.get(key)
         if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535):
             raise ValueError(f"{key.replace('_', ' ').title()} must be an integer from 1 to 65535 or null to inherit")
+    if plugin_id in {"device-reboot", "device-info-agent"}:
+        for key in ("ai_profile_id", "ai_model", "ai_repeat_model"):
+            value = configuration.get(key)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{key.replace('_', ' ').title()} must be a nonempty string or null to inherit")
+    if plugin_id == "device-info-agent":
+        if configuration.get("method") not in (None, "browser", "ssh", "auto"):
+            raise ValueError("Device Info method must be browser, ssh, auto, or null to inherit")
+        if configuration.get("ssh_host_key_policy") not in (None, "accept-new", "strict"):
+            raise ValueError("SSH host key policy must be accept-new, strict, or null to inherit")
+        for key in ("ssh_connect_timeout", "ssh_command_timeout"):
+            value = configuration.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 300):
+                raise ValueError(f"{key.replace('_', ' ').title()} must be an integer from 1 to 300 or null to inherit")
+        commands = configuration.get("ssh_commands")
+        if commands is not None:
+            if not isinstance(commands, list) or not commands:
+                raise ValueError("SSH commands must be a nonempty list or null to inherit")
+            for item in commands:
+                if not isinstance(item, dict) or not isinstance(item.get("command"), str) or not item["command"].strip():
+                    raise ValueError("Each SSH command must be an object with a nonempty command")
+                if len(item["command"]) > 2000 or "\n" in item["command"] or "\r" in item["command"]:
+                    raise ValueError("SSH commands must be single-line strings no longer than 2000 characters")
+                yields = item.get("yields")
+                if not isinstance(yields, list) or not yields or not all(isinstance(role, str) for role in yields):
+                    raise ValueError("Each SSH command must declare one or more yielded discovery roles")
+                unknown = sorted(set(yields) - DEVICE_INFO_DISCOVERY_ROLES)
+                if unknown:
+                    raise ValueError("Unknown SSH command discovery roles: " + ", ".join(unknown))
+        roles = configuration.get("discovery_roles")
+        if roles is not None:
+            if not isinstance(roles, list) or not roles or not all(isinstance(role, str) for role in roles):
+                raise ValueError("Discovery roles must be a nonempty list or null to inherit")
+            unknown = sorted(set(roles) - DEVICE_INFO_DISCOVERY_ROLES)
+            if unknown:
+                raise ValueError("Unknown discovery roles: " + ", ".join(unknown))
+            if len(roles) != len(set(roles)):
+                raise ValueError("Discovery roles cannot contain duplicates")
+        addendum = configuration.get("prompt_addendum")
+        if addendum is not None and (
+            not isinstance(addendum, str) or not addendum.strip() or len(addendum) > 8000
+        ):
+            raise ValueError("Prompt addendum must be 1 to 8000 characters or null to inherit")
     if plugin_id != "device-reboot":
         return
     if configuration.get("method") not in (None, "ssh", "ai"):

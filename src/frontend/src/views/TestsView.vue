@@ -121,6 +121,12 @@ function versionHint(): string {
   return 'The build that was run.'
 }
 
+const matchedComponents = computed(() => matchedSoftware.value?.bundle_components || [])
+const componentNames = computed(() => [...new Set(matchedComponents.value.map((item: any) => item.name))])
+const matchedComponentVersions = computed(() => matchedComponents.value.filter(
+  (item: any) => key(item.name) === key(newTest.value.component_name),
+))
+
 const BASE_NEW_TEST_FIELDS = computed<FormField[]>(() => [
   {
     key: 'device_unique_id',
@@ -151,6 +157,22 @@ const BASE_NEW_TEST_FIELDS = computed<FormField[]>(() => [
     hint: versionHint(),
   },
   {
+    key: 'component_name',
+    label: 'Component',
+    type: 'select',
+    options: componentNames.value.map((name: any) => ({ value: name, label: name })),
+    hint: 'Optional. Select a component defined beneath this software suite.',
+  },
+  {
+    key: 'component_version',
+    label: 'Component Version',
+    type: 'select',
+    options: matchedComponentVersions.value
+      .filter((item: any) => item.version)
+      .map((item: any) => ({ value: item.version, label: item.version })),
+    hint: 'Optional version of the suite component tested.',
+  },
+  {
     key: 'outcome',
     label: 'Outcome',
     type: 'select',
@@ -168,18 +190,31 @@ const BASE_NEW_TEST_FIELDS = computed<FormField[]>(() => [
   { key: 'misc_data', label: 'Misc data (JSON)', type: 'json', placeholder: '{}' },
 ])
 
-const NEW_TEST_FIELDS = computed<FormField[]>(() => testFields.value
-  .filter((field) => field.writable)
-  .map((field) => {
-    const builtIn = BASE_NEW_TEST_FIELDS.value.find((item) => item.key === field.key)
-    return builtIn ? { ...builtIn, label: field.label } : customFormField(field)
-  }))
+const NEW_TEST_FIELDS = computed<FormField[]>(() => {
+  const fields = testFields.value
+    .filter((field) => field.writable && !['component_name', 'component_version'].includes(field.key))
+    .map((field) => {
+      const builtIn = BASE_NEW_TEST_FIELDS.value.find((item) => item.key === field.key)
+      return builtIn ? { ...builtIn, label: field.label } : customFormField(field)
+    })
+  if (!matchedComponents.value.length) return fields
+
+  const componentFields = BASE_NEW_TEST_FIELDS.value.filter(
+    (field) => field.key === 'component_name' || field.key === 'component_version',
+  )
+  const softwareVersionIndex = fields.findIndex((field) => field.key === 'software_version')
+  const softwareIndex = fields.findIndex((field) => field.key === 'software_name')
+  fields.splice(Math.max(softwareVersionIndex, softwareIndex) + 1, 0, ...componentFields)
+  return fields
+})
 
 function openNew() {
   newTest.value = {
     device_unique_id: '',
     software_name: '',
     software_version: '',
+    component_name: '',
+    component_version: '',
     outcome: 'pass',
     tag: 'adhoc',
     notes: '',
@@ -190,13 +225,24 @@ function openNew() {
 
 /** Naming software fills in its current version, which stays editable. */
 function onNewTestChange(key_: string) {
-  if (key_ !== 'software_name') return
-  newTest.value.software_version = matchedSoftwareVersions.value[0]?.version || ''
+  if (key_ === 'software_name') {
+    newTest.value.software_version = matchedSoftwareVersions.value[0]?.version || ''
+    newTest.value.component_name = ''
+    newTest.value.component_version = ''
+  } else if (key_ === 'software_version') {
+    newTest.value.component_name = ''
+    newTest.value.component_version = ''
+  } else if (key_ === 'component_name') {
+    newTest.value.component_version = matchedComponentVersions.value[0]?.version || ''
+  }
 }
 
 // Rows with unsaved changes: row id -> set of changed fields
 const dirty = ref<Map<string, Set<string>>>(new Map())
 const selected = ref<any[]>([])
+const bulkEditing = ref(false)
+const savingBulkEdit = ref(false)
+const bulkEditValues = ref<Record<string, any>>({})
 
 const EDITABLE_FIELDS = new Set(['software_version', 'outcome', 'tag', 'run_at', 'notes', 'misc_data'])
 
@@ -236,6 +282,8 @@ const baseColumns = [
     // Recorded per test: the software's version at the time of the run, not now.
     headerTooltip: 'The software build this run exercised',
   },
+  { field: 'component_name', headerName: 'Component', editable: false },
+  { field: 'component_version', headerName: 'Component Version', editable: false },
   {
     field: 'outcome',
     headerName: 'Outcome',
@@ -460,6 +508,60 @@ async function deleteSelected() {
   }
 }
 
+const BULK_TEST_FIELDS = computed<FormField[]>(() => testFields.value
+  .filter((field) => field.visible && field.writable
+    && !['device_unique_id', 'software_name'].includes(field.key))
+  .map((field) => {
+    const builtIn = BASE_EDIT_TEST_FIELDS.value.find((item) => item.key === field.key)
+    const form = builtIn ? { ...builtIn, label: field.label } : customFormField(field)
+    form.required = false
+    return form
+  }))
+
+function sharedTestValue(fieldKey: string, type?: FormField['type']): any {
+  const field = testFields.value.find((candidate) => candidate.key === fieldKey)!
+  const values = selected.value.map((row) => dataValue(row, field, 'misc_data'))
+  const encoded = values.map((value) => JSON.stringify(value ?? null))
+  const shared = encoded.every((value) => value === encoded[0]) ? values[0] : undefined
+  return type === 'json' ? JSON.stringify(shared || {}, null, 2) : shared ?? ''
+}
+
+function openBulkEdit() {
+  bulkEditValues.value = Object.fromEntries(BULK_TEST_FIELDS.value.map((field) => [
+    field.key, sharedTestValue(field.key, field.type),
+  ]))
+  bulkEditing.value = true
+}
+
+async function saveBulkEdit(values: Record<string, any>) {
+  savingBulkEdit.value = true
+  let updated = 0
+  const errors: string[] = []
+  for (const row of selected.value) {
+    try {
+      const result = await api<any>(`/tests/${row.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(mergeCustomValues(
+          { misc_data: row.misc_data || {}, ...values }, testFields.value, 'misc_data',
+        )),
+      })
+      Object.assign(row, result)
+      dirty.value.delete(row.id)
+      updated++
+    } catch (e: any) {
+      errors.push(`${row.device_unique_id} / ${row.software_name}: ${e.message}`)
+    }
+  }
+  table.value?.refreshRows(selected.value.map((row) => row.id))
+  savingBulkEdit.value = false
+  if (errors.length) {
+    showToast(`Updated ${updated}; ${errors.length} failed — ${errors.slice(0, 3).join('; ')}`, true)
+  } else {
+    bulkEditing.value = false
+    showToast(`Updated ${updated} selected test${updated === 1 ? '' : 's'}`)
+  }
+}
+
 async function saveNewTest(values: Record<string, any>) {
   // The fields hold what was typed; the API wants ids.
   const device = matchedDevice.value
@@ -477,6 +579,8 @@ async function saveNewTest(values: Record<string, any>) {
     device_id: device.id,
     software_id: software.id,
     software_version: merged.software_version || software.version,
+    component_name: merged.component_name || null,
+    component_version: merged.component_version || null,
     outcome: merged.outcome,
     tag: merged.tag,
     notes: merged.notes,
@@ -570,6 +674,14 @@ onMounted(() => Promise.all([load(), loadFields()]))
       <template #selection-actions>
         <button
           v-if="auth.canWrite && selected.length"
+          class="btn"
+          title="Edit common values on the selected tests"
+          @click="openBulkEdit"
+        >
+          Edit
+        </button>
+        <button
+          v-if="auth.canWrite && selected.length"
           class="btn btn-danger"
           title="Delete the selected tests"
           @click="deleteSelected"
@@ -578,6 +690,18 @@ onMounted(() => Promise.all([load(), loadFields()]))
         </button>
       </template>
     </DataTable>
+
+    <FormModal
+      v-if="bulkEditing"
+      :title="`Edit ${selected.length} selected tests`"
+      :fields="BULK_TEST_FIELDS"
+      :values="bulkEditValues"
+      :busy="savingBulkEdit"
+      selective
+      submit-label="Apply changes"
+      @submit="saveBulkEdit"
+      @cancel="bulkEditing = false"
+    />
 
     <FormModal
       v-if="editTarget"

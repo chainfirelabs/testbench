@@ -34,7 +34,7 @@ frontend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/frontend
-    tag: "1.8.8"
+    tag: "1.9.0"
     digest: "" # Example: sha256:...
     pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
   service:
@@ -56,7 +56,7 @@ backend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/backend
-    tag: "1.8.8"
+    tag: "1.9.0"
     digest: ""
     pullPolicy: ""
   # Scheduler requests and container limits for each backend Pod.
@@ -73,7 +73,7 @@ mcp:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/mcp
-    tag: "1.8.8"
+    tag: "1.9.0"
     digest: ""
     pullPolicy: ""
   service:
@@ -116,8 +116,16 @@ database:
 
 applicationSecret:
   # Existing release-namespace Secret exposed to the backend with envFrom.
-  # Store TB_JWT_SECRET and optional OAuth credentials in it.
+  # Store TB_JWT_SECRET, optional OAuth credentials, and
+  # TB_CREDENTIAL_ENCRYPTION_KEY when GUI-managed AI API keys are used.
   existingSecret: "" # REQUIRED: e.g. testbench-secrets
+
+authentik:
+  tls:
+    # Optional ConfigMap containing the PEM CA certificate used to verify the
+    # Authentik issuer during OIDC discovery, token exchange, and userinfo.
+    existingConfigMap: ""
+    key: ca.crt
 
 config:
   # Catalog settings belong under schema below; config.entityFields is not used.
@@ -157,9 +165,10 @@ schema:
     additionalFields: []
   tests:
     # Device, Software, and Outcome are protected and automatic.
-    # All optional built-ins: software_version, tag, run_at, notes, misc_data,
-    # created_at, created_by_username.
-    optionalFields: [software_version, tag, run_at, notes, misc_data, created_at, created_by_username]
+    # All optional built-ins: software_version, component_name,
+    # component_version, tag, run_at, notes, misc_data, created_at,
+    # created_by_username.
+    optionalFields: [software_version, component_name, component_version, tag, run_at, notes, misc_data, created_at, created_by_username]
     # Additional field entry (same options for software and tests):
     # additionalFields:
     #   - key: lab
@@ -251,7 +260,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/network-scan
-      tag: "1.8.8"
+      tag: "1.9.0"
       digest: "" # Optional immutable digest; overrides tag.
       pullPolicy: ""
     # Per-port TCP connection timeout.
@@ -278,10 +287,12 @@ plugins:
     allowedEgressCidrs: []
 
   deviceInfo:
-    # Add the Info action for eligible online devices.
+    # Add row-level Info and admin-only collection-level Gather info for all
+    # devices actions for eligible online devices.
     enabled: false
-    # Maximum device-information research Pods allowed at once. Additional
-    # requests are rejected until an active run finishes or is stopped.
+    # Maximum device-information research Pods allowed at once. The collection
+    # action queues remaining devices; excess individual requests are rejected
+    # until an active run finishes or is stopped.
     maxConcurrentPods: 5
     # Global web-interface ports. Type, rule, and device plugin configuration
     # can override either independently.
@@ -293,7 +304,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/device-info
-      tag: "1.8.8"
+      tag: "1.9.0"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -318,6 +329,9 @@ plugins:
     # The per-device username/password are appended as a separate authentication
     # instruction, as are the required result schema and any previously saved
     # successful discovery recipe. Those additions cannot be disabled here.
+    # The GUI can restrict discovery roles and append trusted guidance by
+    # device type, matching rule, or individual device; the protected result
+    # contract and credential handling are still appended by the controller.
     # No other `{...}` placeholders are currently supported; unknown text is
     # left unchanged. Use JSON/YAML quoting if the prompt contains `:` or `#`.
     prompt: "Use the browser tool to browse {device_url} and identify hardware, firmware, and MAC. Device inventory: {device_json}"
@@ -332,14 +346,14 @@ plugins:
       # `model` is used when the device has no saved successful recipe and can
       # be the stronger discovery model. `repeatModel` is used when a saved
       # recipe exists; empty makes it fall back to `model`. The two may match.
-      url: "" # REQUIRED when enabled: e.g. https://ai.example.com/v1
-      model: "" # REQUIRED when enabled: model/deployment identifier
+      url: "" # e.g. https://ai.example.com/v1; leave url and model empty for GUI management.
+      model: "" # Set url+model to lock settings to Helm; leave both empty for GUI management.
       repeatModel: ""
       # Name of an existing Secret in `research.namespace`, not the release
       # namespace, and the key within it containing the endpoint bearer token.
       # It is exposed as OPENAI_API_KEY; the current OMP image also receives
       # the same value under its LiteLLM compatibility alias.
-      existingSecret: "" # REQUIRED when enabled: e.g. testbench-ai
+      existingSecret: "" # Required only when url+model are set: e.g. testbench-ai
       apiKeySecretKey: OPENAI_API_KEY
     research:
       # Empty runs research Pods in the TestBench release namespace.
@@ -369,7 +383,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/reboot
-      tag: "1.8.8"
+      tag: "1.9.0"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -408,12 +422,14 @@ plugins:
       # Any OpenAI-compatible endpoint can be used, including a LiteLLM proxy.
       # URL must be reachable from the worker namespace; model is the exact
       # endpoint model/deployment identifier.
-      url: "" # REQUIRED when enabled: e.g. https://ai.example.com/v1
-      model: "" # REQUIRED when enabled: model/deployment identifier
+      url: "" # e.g. https://ai.example.com/v1; leave url and model empty for GUI management.
+      model: "" # Set url+model to lock settings to Helm; leave both empty for GUI management.
+      # Used after a successful reboot recipe exists; empty falls back to model.
+      repeatModel: ""
       # Existing Secret in `worker.namespace` and the key containing its token.
       # It is exposed as OPENAI_API_KEY; the current OMP image also receives
       # the same value under its LiteLLM compatibility alias.
-      existingSecret: "" # REQUIRED when enabled: e.g. testbench-ai
+      existingSecret: "" # Required only when url+model are set: e.g. testbench-ai
       apiKeySecretKey: OPENAI_API_KEY
     # Maximum seconds to wait for the device to return online.
     recoveryTimeoutSeconds: 600

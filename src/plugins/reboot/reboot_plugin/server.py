@@ -39,7 +39,7 @@ MAX_OUTPUT_CHARS = 1_000_000
 ACP_WORKER = Path(__file__).with_name("acp_worker.py").read_text(encoding="utf-8")
 
 
-def _safe_output(output: str | bytes, username=None, password=None) -> str:
+def _safe_output(output: str | bytes, username=None, password=None, api_key=None) -> str:
     if isinstance(output, bytes): output = output.decode("utf-8", errors="replace")
     elif output.startswith(("b'", 'b"')):
         try:
@@ -47,6 +47,9 @@ def _safe_output(output: str | bytes, username=None, password=None) -> str:
             if isinstance(raw, bytes): output = raw.decode("utf-8", errors="replace")
         except (SyntaxError, ValueError): pass
     output = ANSI_ESCAPE.sub("", output)
+    for secret in (username, password, api_key):
+        if secret is not None and str(secret):
+            output = output.replace(str(secret), "[REDACTED]")
     return output[-MAX_OUTPUT_CHARS:]
 
 
@@ -122,8 +125,8 @@ def _display_worker_output(output: str, events: list[dict]) -> str:
     return "\n".join(rendered)[-MAX_OUTPUT_CHARS:]
 
 
-def _update_worker_output(run_id: str, output: str | bytes, username=None, password=None) -> str:
-    safe = _safe_output(output, username, password)
+def _update_worker_output(run_id: str, output: str | bytes, username=None, password=None, api_key=None) -> str:
+    safe = _safe_output(output, username, password, api_key)
     events = _worker_events(safe)
     display = _display_worker_output(safe, events) if events else safe
     RUNS[run_id].update(output=display, events=events)
@@ -175,7 +178,8 @@ def _auth(plugin: str | None, secret: str | None):
 @app.get("/plugin/v1/manifest")
 def manifest(x_testbench_plugin: str | None = Header(None), x_testbench_plugin_secret: str | None = Header(None)):
     _auth(x_testbench_plugin, x_testbench_plugin_secret)
-    return {"configuration_defaults": {"method": os.getenv("TB_REBOOT_METHOD", "ai"), "ssh_command": os.getenv("TB_REBOOT_SSH_COMMAND", "reboot"), "ssh_port": int(os.getenv("TB_REBOOT_SSH_PORT", "22"))}, "id": PLUGIN_ID, "label": "Device Reboot", "version": "1.0.0", "protocol_version": 1,
+    ai_url, ai_model = os.getenv("TB_REBOOT_AI_URL", ""), os.getenv("TB_REBOOT_AI_MODEL", "")
+    return {"ai_configuration": {"locked": bool(ai_url or ai_model), "provider_type": "openai-compatible", "url": ai_url, "model": ai_model, "repeat_model": os.getenv("TB_REBOOT_AI_REPEAT_MODEL", "") or ai_model}, "configuration_defaults": {"method": os.getenv("TB_REBOOT_METHOD", "ai"), "ssh_command": os.getenv("TB_REBOOT_SSH_COMMAND", "reboot"), "ssh_port": int(os.getenv("TB_REBOOT_SSH_PORT", "22"))}, "id": PLUGIN_ID, "label": "Device Reboot", "version": "1.0.0", "protocol_version": 1,
       "recommended_fields": [
         {"key": "username", "label": "Username", "type": "text", "role": "device_username"},
         {"key": "password", "label": "Password", "type": "text", "role": "device_password", "sensitive": True},
@@ -250,7 +254,7 @@ def _job(run_id: str, entity: dict):
             prompt = os.getenv("TB_REBOOT_PROMPT", "Use the browser tool to reboot the device at {device_url}.")
             safe_entity = {
                 key: value for key, value in entity.items()
-                if key not in {"_plugin_roles", "username", "password"}
+                if key not in {"_plugin_roles", "_ai_configuration", "username", "password"}
             }
             if isinstance(safe_entity.get("misc_data"), dict):
                 safe_entity["misc_data"] = {
@@ -276,10 +280,21 @@ def _job(run_id: str, entity: dict):
             recipe = _artifact(str(entity["id"]))
             if recipe:
                 prompt += "\nTry these previously validated reboot steps first: " + json.dumps(recipe)
+            ai = entity.get("_ai_configuration") or {}
+            gui_api_key = ai.get("api_key")
+            secret_data = {"prompt": prompt, "acp_worker.py": ACP_WORKER}
+            if gui_api_key is not None:
+                secret_data["ai-api-key"] = str(gui_api_key)
             core.create_namespaced_secret(NAMESPACE, client.V1Secret(
                 metadata=client.V1ObjectMeta(name=secret_name, labels=labels),
-                string_data={"prompt": prompt, "acp_worker.py": ACP_WORKER},
+                string_data=secret_data,
             ))
+            base_url = str(ai.get("url") or os.getenv("TB_REBOOT_AI_URL", ""))
+            discovery_model = str(ai.get("model") or os.getenv("TB_REBOOT_AI_MODEL", ""))
+            repeat_model = str(ai.get("repeat_model") or os.getenv("TB_REBOOT_AI_REPEAT_MODEL", "") or discovery_model)
+            model = repeat_model if recipe else discovery_model
+            ai_secret = secret_name if gui_api_key is not None else os.environ["TB_REBOOT_AI_SECRET_NAME"]
+            ai_secret_key = "ai-api-key" if gui_api_key is not None else os.getenv("TB_REBOOT_AI_SECRET_KEY", "OPENAI_API_KEY")
             image, command, args = RESEARCH_IMAGE, ["python3", "/run/testbench/acp_worker.py"], None
             image_pull_policy = os.getenv("TB_REBOOT_RESEARCH_IMAGE_PULL_POLICY", "IfNotPresent")
             volume_mounts = [client.V1VolumeMount(name="run-config", mount_path="/run/testbench", read_only=True)]
@@ -292,26 +307,26 @@ def _job(run_id: str, entity: dict):
             )]
             env += [
                 client.V1EnvVar(name="TB_REBOOT_RUN_PROMPT", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(name=secret_name, key="prompt"))),
-                client.V1EnvVar(name="TB_AI_BASE_URL", value=os.getenv("TB_REBOOT_AI_URL", "")),
-                client.V1EnvVar(name="TB_AI_MODEL", value=os.getenv("TB_REBOOT_AI_MODEL", "")),
+                client.V1EnvVar(name="TB_AI_BASE_URL", value=base_url),
+                client.V1EnvVar(name="TB_AI_MODEL", value=model),
                 client.V1EnvVar(name="TB_AI_SYSTEM_PROMPT", value=AI_SYSTEM_PROMPT),
-                client.V1EnvVar(name="OPENAI_BASE_URL", value=os.getenv("TB_REBOOT_AI_URL", "")),
-                client.V1EnvVar(name="OPENAI_MODEL", value=os.getenv("TB_REBOOT_AI_MODEL", "")),
+                client.V1EnvVar(name="OPENAI_BASE_URL", value=base_url),
+                client.V1EnvVar(name="OPENAI_MODEL", value=model),
                 client.V1EnvVar(name="OPENAI_API_KEY", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(
-                    name=os.environ["TB_REBOOT_AI_SECRET_NAME"],
-                    key=os.getenv("TB_REBOOT_AI_SECRET_KEY", "OPENAI_API_KEY"),
+                    name=ai_secret,
+                    key=ai_secret_key,
                 ))),
-                client.V1EnvVar(name="LITELLM_BASE_URL", value=os.getenv("TB_REBOOT_AI_URL", "")),
+                client.V1EnvVar(name="LITELLM_BASE_URL", value=base_url),
                 client.V1EnvVar(name="LITELLM_API_KEY", value_from=client.V1EnvVarSource(secret_key_ref=client.V1SecretKeySelector(
-                    name=os.environ["TB_REBOOT_AI_SECRET_NAME"],
-                    key=os.getenv("TB_REBOOT_AI_SECRET_KEY", "OPENAI_API_KEY"),
+                    name=ai_secret,
+                    key=ai_secret_key,
                 ))),
                 # ACP must begin reading JSON-RPC immediately. Avoid OMP startup
                 # discovery and its unrelated LiteLLM MCP gateway for this worker.
                 client.V1EnvVar(name="LITELLM_ROLES", value="off"),
                 client.V1EnvVar(name="LITELLM_MCP", value="off"),
             ]
-            RUNS[run_id].update(model=os.getenv("TB_REBOOT_AI_MODEL", ""), execution_mode="acp")
+            RUNS[run_id].update(model=model, model_selection="saved_recipe" if recipe else "discovery", execution_mode="acp")
         container = client.V1Container(name="reboot", image=image, image_pull_policy=image_pull_policy,
             command=command, args=args, env=env, env_from=env_from,
             volume_mounts=volume_mounts,
@@ -342,7 +357,8 @@ def _job(run_id: str, entity: dict):
             if pod_name:
                 try:
                     live_logs = _update_worker_output(
-                        run_id, core.read_namespaced_pod_log(pod_name, NAMESPACE), username, password
+                        run_id, core.read_namespaced_pod_log(pod_name, NAMESPACE), username, password,
+                        gui_api_key if method == "ai" else None,
                     )
                     marker = _result_marker(live_logs)
                     if marker:
@@ -357,7 +373,10 @@ def _job(run_id: str, entity: dict):
             if job.status.succeeded or job.status.failed: break
             time.sleep(2)
         if not pod_name: raise RuntimeError("Reboot worker pod was not created")
-        logs = _update_worker_output(run_id, core.read_namespaced_pod_log(pod_name, NAMESPACE), username, password)
+        logs = _update_worker_output(
+            run_id, core.read_namespaced_pod_log(pod_name, NAMESPACE), username, password,
+            gui_api_key if method == "ai" else None,
+        )
         marker = _result_marker(logs)
         if not marker: raise RuntimeError("Reboot worker did not emit a verified result")
         _complete_reboot(marker, str(address), run_id, str(entity["id"]), ssh_port)

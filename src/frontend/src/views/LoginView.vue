@@ -67,12 +67,9 @@ function ssoLogin() {
       <img src="/logo-banner.png" alt="TestBench" class="login-logo" />
       <h1>Welcome to TestBench</h1>
       <p class="login-attribution">
-        <span class="login-attribution-prefix">Made by </span><a
+        <span class="login-attribution-prefix">Made by </span><span
           class="login-attribution-brand"
-          href="https://chainfirelabs.com"
-          target="_blank"
-          rel="noopener noreferrer"
-        >ChainFire Labs</a>
+        >ChainFire Labs</span>
       </p>
       <form @submit.prevent="submit">
         <input v-model="username" placeholder="Username" autocomplete="username" required />

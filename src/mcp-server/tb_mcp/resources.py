@@ -84,7 +84,7 @@ SCHEMA = {
     "vendor_device": {
         "support_status": list(VENDOR_SUPPORT_STATUSES),
         "fields": [
-            "vendor", "make", "model", "firmware_version", "hardware_version",
+            "make", "model", "firmware_version", "hardware_version",
             "architecture", "support_status", "source", "notes",
         ],
         "notes": [

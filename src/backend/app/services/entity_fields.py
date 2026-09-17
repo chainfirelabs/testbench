@@ -14,7 +14,7 @@ from ..models import EntityField
 
 logger = logging.getLogger(__name__)
 
-ENTITIES = ("devices", "software", "tests")
+ENTITIES = ("devices", "software", "tests", "vendor_devices")
 FIELD_TYPES = {"text", "password", "textarea", "number", "boolean", "date", "select", "json"}
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,99}$")
 EXTRA_FIELDS_KEY = "__extra_fields"
@@ -94,6 +94,8 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
         _field("device_unique_id", "Device", required=True),
         _field("software_name", "Software", required=True),
         _field("software_version", "Software Version"),
+        _field("component_name", "Component"),
+        _field("component_version", "Component Version"),
         _field("outcome", "Outcome", "select", required=True, role="outcome", indexed=True, options=["pass", "fail", "warn"]),
         _field("tag", "Tag", "select", options=["adhoc", "acceptance", "end-to-end", "automated"]),
         _field("run_at", "Run At", "date", role="run_date", indexed=True),
@@ -101,6 +103,18 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
         _field("misc_data", "Misc Data", "json"),
         _field("created_at", "Created", writable=False),
         _field("created_by_username", "Created By", writable=False),
+    ],
+    "vendor_devices": [
+        _field("make", "Make"),
+        _field("model", "Model"),
+        _field("firmware_version", "Firmware Version"),
+        _field("hardware_version", "Hardware Version"),
+        _field("architecture", "Architecture"),
+        _field("support_status", "Support", "select", required=True,
+               options=["supported", "partial", "unsupported", "planned"]),
+        _field("source", "Source"),
+        _field("notes", "Notes", "textarea"),
+        _field("misc_data", "Misc Data", "json"),
     ],
 }
 
@@ -121,6 +135,7 @@ REQUIRED_FIELDS = {
     "devices": ("unique_id",),
     "software": ("name",),
     "tests": ("device_unique_id", "software_name", "outcome"),
+    "vendor_devices": (),
 }
 
 
@@ -133,7 +148,9 @@ def _configured_fields() -> dict[str, list[dict]]:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"TB_ENTITY_FIELDS_JSON is invalid JSON: {exc}") from exc
     if not isinstance(raw, dict):
-        raise RuntimeError("TB_ENTITY_FIELDS_JSON must be an object keyed by devices, software and tests")
+        raise RuntimeError(
+            "TB_ENTITY_FIELDS_JSON must be an object keyed by devices, software, tests and vendor_devices"
+        )
     unknown_entities = sorted(set(raw) - set(ENTITIES))
     if unknown_entities:
         raise RuntimeError(f"TB_ENTITY_FIELDS_JSON has unknown entities: {', '.join(unknown_entities)}")
@@ -165,6 +182,10 @@ def _configured_fields() -> dict[str, list[dict]]:
         fields = []
         seen = set(REQUIRED_FIELDS[entity])
         selected = set(REQUIRED_FIELDS[entity])
+        # These fields predate the configurable catalog. Preserve the existing
+        # vendor-device form and table on both new installs and upgrades.
+        if entity == "vendor_devices" and not section:
+            selected.update(BUILTINS[entity])
         ordered_selected = []
         for key in builtins:
             key = key.strip()
@@ -201,6 +222,8 @@ def _configured_fields() -> dict[str, list[dict]]:
             if "unique" in spec and "unique_value" not in spec:
                 spec["unique_value"] = spec["unique"]
             key = str(spec.get("key", "")).strip()
+            if entity == "vendor_devices" and key == "vendor":
+                raise RuntimeError("vendor_devices.vendor was removed; the software name identifies the vendor")
             if not KEY_RE.fullmatch(key) or key in seen:
                 raise RuntimeError(f"Invalid or duplicate custom {entity} field key: {key!r}")
             if key in BUILTINS[entity]:
@@ -250,7 +273,10 @@ def initialize_entity_fields() -> None:
                     if (entity, spec["key"]) in existing:
                         continue
                     candidate = deepcopy(spec)
-                    candidate.update(visible=False, required=False)
+                    if entity == "vendor_devices":
+                        candidate.update(visible=True)
+                    else:
+                        candidate.update(visible=False, required=False)
                     db.add(EntityField(entity=entity, position=position, **candidate))
                     position += 1
             db.commit()
@@ -310,17 +336,26 @@ def ensure_entity_field_indexes(db: Session) -> None:
     the published device schema (services/device_schema.py), which knows about
     fields this catalog never had.
     """
-    for entity in ("software", "tests"):
+    for entity in ("software", "tests", "vendor_devices"):
         for field in get_entity_fields(db, entity):
             if not (field.indexed or field.unique_value):
                 continue
             suffix = sha1(f"{entity}:{field.key}:{field.field_type}".encode()).hexdigest()[:10]
             name = f"ix_{entity}_field_{suffix}{'_uq' if field.unique_value else ''}"
             unique = "UNIQUE " if field.unique_value else ""
-            db.execute(text(
-                f'CREATE {unique}INDEX IF NOT EXISTS "{name}" '
-                f'ON "{entity}" ({_index_expression(field)})'
-            ))
+            if entity == "vendor_devices":
+                value = f"misc_data->>'{field.key}'"
+                expression = f"({value})"
+                columns = f"software_id, {expression}" if field.unique_value else expression
+                db.execute(text(
+                    f'CREATE {unique}INDEX IF NOT EXISTS "{name}" '
+                    f'ON vendor_devices ({columns})'
+                ))
+            else:
+                db.execute(text(
+                    f'CREATE {unique}INDEX IF NOT EXISTS "{name}" '
+                    f'ON "{entity}" ({_index_expression(field)})'
+                ))
     # Software identity plus version is a pair rather than two independently
     # unique values. Roles allow installations to rename either field.
     software = get_entity_fields(db, "software")
@@ -387,10 +422,12 @@ def entity_order_by(db: Session, entity: str, model, sort: str, order: str):
 def field_database_storage(field: EntityField) -> str:
     if field.key in {"created_at", "updated_at"}:
         return "column"
-    elif field.key in {"device_unique_id", "software_name", "created_by_username", "checked_out_by_username"}:
+    elif field.key in {"device_unique_id", "software_name", "component_name", "component_version", "created_by_username", "checked_out_by_username"}:
         return "relationship"
     elif field.key in {"vendor_device_count", "version_count"}:
         return "derived"
+    elif field.storage == "column":
+        return "column"
     return "json"
 
 
@@ -416,6 +453,7 @@ def field_payload(field: EntityField) -> dict:
         "protected": field.key in REQUIRED_FIELDS[field.entity] or field.storage != "data",
         "list_visibility_locked": field.key in REQUIRED_FIELDS[field.entity],
         "position": field.position,
+        "configuration_source": field.configuration_source,
     }
 
 
@@ -460,6 +498,7 @@ def validate_custom_values(
     data_key: str,
     *,
     partial: bool = False,
+    field_overrides: dict[str, dict] | None = None,
 ) -> dict:
     """Validate and type JSON-backed catalog fields, returning a copied payload."""
     normalized = dict(payload)
@@ -469,12 +508,15 @@ def validate_custom_values(
     for field in get_entity_fields(db, entity):
         if field.storage != "data":
             continue
+        override = (field_overrides or {}).get(field.key, {})
+        visible = override.get("visible", field.visible)
+        required = override.get("required", field.required)
         present = field.key in document
         value = document.get(field.key)
-        if field.visible and field.required and not partial and (not present or value is None or value == ""):
+        if visible and required and not partial and (not present or value is None or value == ""):
             raise ValueError(f"{field.label} is required")
         if not present or value is None or value == "":
-            if present and not field.required:
+            if present and not required:
                 document.pop(field.key, None)
             continue
         try:

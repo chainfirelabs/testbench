@@ -176,6 +176,22 @@ class DeviceTypeOut(DeviceTypeBase):
 
 # ---------- Software ----------
 
+class SoftwareBundleComponentIn(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    version: str | None = None
+    required: bool = True
+    position: int = 0
+
+
+class SoftwareBundleComponentOut(BaseModel):
+    id: str
+    name: str
+    version: str = ""
+    required: bool = True
+    position: int = 0
+
+
 class SoftwareBase(BaseModel):
     name: str
     # Never None: the (name, version) unique constraint cannot see NULLs.
@@ -189,7 +205,7 @@ class SoftwareBase(BaseModel):
 
 
 class SoftwareCreate(SoftwareBase):
-    pass
+    bundle_components: list[SoftwareBundleComponentIn] | None = None
 
 
 class SoftwareUpdate(BaseModel):
@@ -202,6 +218,7 @@ class SoftwareUpdate(BaseModel):
     name: str | None = None
     version: str | None = None
     misc_data: dict | None = None
+    bundle_components: list[SoftwareBundleComponentIn] | None = None
 
 
 class SoftwareOut(SoftwareBase):
@@ -212,6 +229,8 @@ class SoftwareOut(SoftwareBase):
     # How many versions share this row's name, and whether this is the newest.
     version_count: int = 1
     is_latest: bool = True
+    bundle_components: list[SoftwareBundleComponentOut] = Field(default_factory=list)
+    bundle_parent_count: int = 0
     created_at: datetime
     updated_at: datetime | None = None
 
@@ -233,6 +252,7 @@ class SoftwareTestedDeviceOut(BaseModel):
     test_count: int
     last_test_at: datetime | None = None
     outcomes: dict = Field(default_factory=dict)  # e.g. {"pass": 3, "fail": 1}
+    component: SoftwareBundleComponentOut | None = None
 
 
 class SoftwareTestedDevicesOut(BaseModel):
@@ -269,7 +289,6 @@ def _validate_support_status(v: str | None) -> str | None:
 
 
 class VendorDeviceBase(BaseModel):
-    vendor: str | None = None
     make: str | None = None
     model: str | None = None
     firmware_version: str | None = None
@@ -292,7 +311,6 @@ class VendorDeviceUpdate(BaseModel):
     def _check_support_status(cls, v):
         return _validate_support_status(v)
 
-    vendor: str | None = None
     make: str | None = None
     model: str | None = None
     firmware_version: str | None = None
@@ -317,6 +335,9 @@ class VendorDeviceOut(VendorDeviceBase):
 
 class TestCreate(BaseModel):
     software_id: str
+    component_id: str | None = None
+    component_name: str | None = None
+    component_version: str | None = None
     device_id: str
     # The software build the run exercised. Left unset, the API snapshots the
     # software's current version rather than leaving the run unattributed.
@@ -342,6 +363,9 @@ class TestImportRow(BaseModel):
     device_id: str | None = None
     device_unique_id: str | None = None
     software_version: str | None = None
+    component_id: str | None = None
+    component_name: str | None = None
+    component_version: str | None = None
     outcome: str
     tag: str = "adhoc"
     misc_data: dict = Field(default_factory=dict)
@@ -361,6 +385,7 @@ class TestImportRow(BaseModel):
 
 
 class TestUpdate(BaseModel):
+    component_id: str | None = None
     software_version: str | None = None
     outcome: str | None = None
     tag: str | None = None
@@ -376,6 +401,9 @@ class TestOut(BaseModel):
     software_id: str
     software_name: str | None = None
     software_version: str | None = None
+    component_id: str | None = None
+    component_name: str | None = None
+    component_version: str | None = None
     device_id: str
     device_unique_id: str | None = None
     device_make: str | None = None

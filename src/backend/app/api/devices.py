@@ -747,7 +747,9 @@ def device_template(
         resolved = _resolve_device_type(db, device_type, allow_disabled=True) if device_type else None
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    fields = get_effective_fields(db, resolved.id if resolved else None)
+    # A type-specific button gets that layout. The all-devices button needs the
+    # union so a mixed-fleet CSV can carry fields that exist on only one type.
+    fields = get_effective_fields(db, resolved.id) if resolved else _union_fields(db)
     columns = ["device_type", *[
         field.key for field in fields
         # Scan- and checkout-owned columns are filled in by the server, not by
@@ -992,6 +994,24 @@ def scan_single_device(
     device = _get_device(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
+    scan_action = next(
+        (
+            action for action in get_available_actions(db, device, user)
+            if action.get("plugin_id") == "network-scan"
+            and action.get("id") == "network-scan.scan-device"
+        ),
+        None,
+    )
+    if scan_action is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Network Scan is not installed or is unhealthy",
+        )
+    if not scan_action.get("available"):
+        raise HTTPException(
+            status_code=403,
+            detail=scan_action.get("unavailable_reason") or "Network Scan is not enabled for this device type",
+        )
     _require_scan_addresses(db, device)
     try:
         result = scan_device(db, device)

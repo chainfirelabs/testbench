@@ -2,7 +2,9 @@
 import { computed, onMounted, ref, toRaw, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DataTable from '../components/DataTable.vue'
+import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
+import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
@@ -14,7 +16,12 @@ import { invalidateSuggestions, useSuggestions } from '../suggestions'
 import { api, downloadFile } from '../api/client'
 import { useImportProgress } from '../importProgress'
 import { useAuthStore } from '../stores/auth'
-import { dataValue, useEntityFields } from '../entityFields'
+import {
+  customColumn, customFormField, dataValue, mergeCustomValues,
+  type EntityField, useEntityFields,
+} from '../entityFields'
+import { loadAllPages } from '../pagination'
+import { collapseVendorDevices } from '../vendorDeviceGroups'
 
 const route = useRoute()
 const router = useRouter()
@@ -36,6 +43,20 @@ function openDetail(title: string, value: any) {
   detail.value = { title, value }
 }
 const toastError = ref(false)
+const vendorTable = ref<InstanceType<typeof DataTable> | null>(null)
+const testedTable = ref<InstanceType<typeof DataTable> | null>(null)
+const vendorProfiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
+const testedProfiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
+const vendorViewEntity = computed(() => `vendor_devices:${software.value?.id || ''}`)
+const testedViewEntity = computed(() => `tested_devices:${software.value?.id || ''}`)
+
+function onVendorGridReady() {
+  vendorProfiles.value?.applyDefault()
+}
+
+function onTestedGridReady() {
+  testedProfiles.value?.applyDefault()
+}
 
 /* ---------------- Versions ---------------- */
 /*
@@ -48,6 +69,9 @@ const versions = ref<any[]>([])
 const showNewVersion = ref(false)
 const creatingVersion = ref(false)
 const newVersion = ref<Record<string, any>>({})
+const showNewComponent = ref(false)
+const creatingComponent = ref(false)
+const newComponent = ref<Record<string, any>>({})
 
 const NEW_VERSION_FIELDS: FormField[] = [
   {
@@ -67,6 +91,22 @@ const NEW_VERSION_FIELDS: FormField[] = [
       { value: 'no', label: 'Start with an empty list' },
     ],
     hint: 'Inherited devices are copies — editing them here leaves the older version alone.',
+  },
+]
+
+const NEW_COMPONENT_FIELDS: FormField[] = [
+  {
+    key: 'name',
+    label: 'Component name',
+    required: true,
+    placeholder: 'Microsoft Outlook',
+    hint: 'The component remains beneath this software and is not created as standalone software.',
+  },
+  {
+    key: 'version',
+    label: 'Component version',
+    placeholder: '16.2',
+    hint: 'Optional.',
   },
 ]
 
@@ -97,6 +137,48 @@ async function createVersion(values: Record<string, any>) {
     showToast(e.message, true)
   } finally {
     creatingVersion.value = false
+  }
+}
+
+function openNewComponent() {
+  newComponent.value = { name: '', version: '' }
+  showNewComponent.value = true
+}
+
+async function createComponent(values: Record<string, any>) {
+  const name = String(values.name || '').trim()
+  const version = String(values.version || '').trim()
+  if (!name) {
+    showToast('Component needs a name', true)
+    return
+  }
+  const components = software.value.bundle_components || []
+  if (components.some((item: any) =>
+    String(item.name || '').trim().toLowerCase() === name.toLowerCase()
+    && String(item.version || '').trim() === version
+  )) {
+    showToast(`${name}${version ? ` ${version}` : ''} is already a component`, true)
+    return
+  }
+
+  creatingComponent.value = true
+  try {
+    const updated = await api<any>(`/software/${software.value.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        bundle_components: bundlePayload([
+          ...components,
+          { name, version, required: true },
+        ]),
+      }),
+    })
+    Object.assign(software.value, updated)
+    showNewComponent.value = false
+    showToast(`${name}${version ? ` ${version}` : ''} added`)
+  } catch (e: any) {
+    showToast(e.message, true)
+  } finally {
+    creatingComponent.value = false
   }
 }
 
@@ -136,6 +218,17 @@ const editing = ref(false)
 const saving = ref(false)
 const form = ref<any>(null)
 
+function bundlePayload(items: any[]): any[] {
+  return items.map((item, position) => {
+    const name = String(item.name || '').trim()
+    if (!name) throw new Error(`Bundle component ${position + 1} needs a name`)
+    return {
+      id: item.id, name, version: String(item.version || '').trim(),
+      required: item.required !== false, position,
+    }
+  })
+}
+
 function startEdit() {
   form.value = Object.fromEntries(
     softwareFields.value.filter((field) => field.writable).map((field) => {
@@ -143,6 +236,10 @@ function startEdit() {
       return [field.key, field.type === 'json' ? JSON.stringify(value || {}, null, 2) : value ?? '']
     }),
   )
+  form.value.bundle_components = (software.value.bundle_components || []).map((item: any, position: number) => ({
+    id: item.id, name: item.name, version: item.version || '',
+    required: item.required !== false, position,
+  }))
   editing.value = true
   tab.value = 'details'
 }
@@ -181,6 +278,12 @@ async function saveEdit() {
     }
   }
   payload.misc_data = misc
+  try {
+    payload.bundle_components = bundlePayload(form.value.bundle_components || [])
+  } catch (error: any) {
+    showToast(error.message, true)
+    return
+  }
   saving.value = true
   try {
     const updated = await api<any>(`/software/${software.value.id}`, {
@@ -211,10 +314,47 @@ async function saveEdit() {
  */
 
 const vendorRows = ref<any[]>([])
+const vendorFields = ref<EntityField[]>([])
+const selectedFirmwareByGroup = ref<Record<string, string>>({})
+const vendorDisplayRows = computed(() => collapseVendorDevices(
+  vendorRows.value,
+  selectedFirmwareByGroup.value,
+))
 const vendorSelected = ref<any[]>([])
 // Rows with unsaved changes: row id -> set of changed fields
 const vendorDirty = ref<Map<string, Set<string>>>(new Map())
 const fileInput = ref<HTMLInputElement | null>(null)
+const editingVendorSchema = ref(false)
+const savingVendorSchema = ref(false)
+const vendorSchemaDraft = ref<EntityField[]>([])
+
+function openVendorSchema() {
+  vendorSchemaDraft.value = vendorFields.value.map((field) => ({ ...field }))
+  editingVendorSchema.value = true
+}
+
+async function saveVendorSchema() {
+  savingVendorSchema.value = true
+  try {
+    vendorFields.value = await api<EntityField[]>(
+      `/software/${software.value.id}/vendor-devices/schema`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          fields: vendorSchemaDraft.value.map((field) => ({
+            id: field.id, visible: field.visible, required: field.required,
+          })),
+        }),
+      },
+    )
+    editingVendorSchema.value = false
+    showToast('Vendor device fields saved')
+  } catch (e: any) {
+    showToast(e.message, true)
+  } finally {
+    savingVendorSchema.value = false
+  }
+}
 
 const SUPPORT_VALUES = ['supported', 'partial', 'unsupported', 'planned']
 const SUPPORT_LABELS: Record<string, string> = {
@@ -223,19 +363,6 @@ const SUPPORT_LABELS: Record<string, string> = {
   unsupported: 'Unsupported',
   planned: 'Planned',
 }
-
-const VENDOR_EDITABLE_FIELDS = new Set([
-  'vendor',
-  'make',
-  'model',
-  'firmware_version',
-  'hardware_version',
-  'architecture',
-  'support_status',
-  'source',
-  'notes',
-  'misc_data',
-])
 
 /** A text column that autocompletes over the values it already holds. */
 function suggesting(col: Record<string, any>) {
@@ -246,14 +373,44 @@ function suggesting(col: Record<string, any>) {
   }
 }
 
-const vendorColumns = [
-  // A vendor's compatibility list is the same handful of vendors, makes and
-  // models repeated down the page — and a claim only matches a device if the
+const baseVendorColumns = [
+  // A vendor's compatibility list repeats the same makes and models down the
+  // page — and a claim only matches a device if the
   // spellings agree, so offering the spelling already in use is not cosmetic.
-  suggesting({ field: 'vendor', headerName: 'Vendor', minWidth: 150 }),
   suggesting({ field: 'make', headerName: 'Make', minWidth: 140 }),
   suggesting({ field: 'model', headerName: 'Model', minWidth: 140 }),
-  suggesting({ field: 'firmware_version', headerName: 'Firmware' }),
+  {
+    field: 'firmware_version',
+    headerName: 'Firmware',
+    editable: false,
+    minWidth: 150,
+    cellRenderer: (p: any) => {
+      const members = p.data?._firmwareMembers || []
+      if (members.length <= 1) {
+        const span = document.createElement('span')
+        span.textContent = p.value || '—'
+        return span
+      }
+      const select = document.createElement('select')
+      select.className = 'firmware-picker'
+      select.title = `${members.length} firmware records; newest shown first`
+      for (const member of members) {
+        const option = document.createElement('option')
+        option.value = member.id
+        option.textContent = member.firmware_version || '(unspecified)'
+        option.selected = member.id === p.data.id
+        select.appendChild(option)
+      }
+      select.addEventListener('click', (event) => event.stopPropagation())
+      select.addEventListener('change', () => {
+        selectedFirmwareByGroup.value = {
+          ...selectedFirmwareByGroup.value,
+          [p.data._groupKey]: select.value,
+        }
+      })
+      return select
+    },
+  },
   suggesting({ field: 'hardware_version', headerName: 'Hardware' }),
   { field: 'architecture', headerName: 'Architecture' },
   {
@@ -301,6 +458,13 @@ const vendorColumns = [
   },
 ]
 
+const vendorColumns = computed(() => vendorFields.value
+  .filter((field) => field.visible && field.list_visible)
+  .map((field) => {
+    const builtIn = baseVendorColumns.find((column: any) => column.field === field.key)
+    return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+  }))
+
 // A computed (not a function called from the template): a fresh Set on every
 // render would look like a change to the grid and trigger needless refreshes.
 const vendorDirtyIds = computed(() => new Set(vendorDirty.value.keys()))
@@ -313,7 +477,6 @@ function isVendorRowDirty(row: any): boolean {
 // device it describes has nothing to dedupe on.
 function hasAnyIdentity(row: any): boolean {
   return !!(
-    row.vendor ||
     row.make ||
     row.model ||
     row.firmware_version ||
@@ -323,13 +486,25 @@ function hasAnyIdentity(row: any): boolean {
 }
 
 async function loadVendorDevices() {
-  const page = await api<any>(`/software/${software.value.id}/vendor-devices?page_size=1000`)
-  vendorRows.value = page.items
+  const result = await loadAllPages<any>((page) => api<any>(
+    `/software/${software.value.id}/vendor-devices?page=${page}&page_size=1000`,
+  ))
+  vendorRows.value = result.items
+  // The server total is unpaginated. Using the first page's length here made
+  // a successful 1,030-row import appear capped at exactly 1,000.
+  if (software.value) software.value.vendor_device_count = result.total
+}
+
+async function loadVendorSchema() {
+  vendorFields.value = await api<EntityField[]>(
+    `/software/${software.value.id}/vendor-devices/schema`,
+  )
 }
 
 function onVendorCellEdit(row: any, field: string, value: any) {
-  row[field] = value
-  if (row.id && VENDOR_EDITABLE_FIELDS.has(field)) {
+  const definition = vendorFields.value.find((item) => item.key === field)
+  if (definition?.storage !== 'data') row[field] = value
+  if (row.id && definition?.writable) {
     if (!vendorDirty.value.has(row.id)) vendorDirty.value.set(row.id, new Set())
     vendorDirty.value.get(row.id)!.add(field)
   }
@@ -342,8 +517,10 @@ function onVendorCellEdit(row: any, field: string, value: any) {
 const showNewVendor = ref(false)
 const creatingVendor = ref(false)
 const newVendor = ref<Record<string, any>>({})
+const vendorEditTarget = ref<any>(null)
+const savingVendorEdit = ref(false)
+const vendorEditValues = ref<Record<string, any>>({})
 
-const vendorNames = useSuggestions('vendor-devices', 'vendor')
 const vendorMakes = useSuggestions('vendor-devices', 'make')
 const vendorModels = useSuggestions('vendor-devices', 'model')
 const vendorFirmwares = useSuggestions('vendor-devices', 'firmware_version')
@@ -352,14 +529,7 @@ const vendorSources = useSuggestions('vendor-devices', 'source')
 
 // A computed, not a constant: the suggestion lists arrive after the first
 // render and again after a write, and the dialog has to see them.
-const NEW_VENDOR_FIELDS = computed<FormField[]>(() => [
-  {
-    key: 'vendor',
-    label: 'Vendor',
-    type: 'datalist',
-    options: vendorNames.value,
-    hint: 'Who publishes the compatibility claim.',
-  },
+const BASE_NEW_VENDOR_FIELDS = computed<FormField[]>(() => [
   { key: 'make', label: 'Make', type: 'datalist', options: vendorMakes.value },
   { key: 'model', label: 'Model', type: 'datalist', options: vendorModels.value },
   {
@@ -393,6 +563,15 @@ const NEW_VENDOR_FIELDS = computed<FormField[]>(() => [
   { key: 'misc_data', label: 'Misc data (JSON)', type: 'json', placeholder: '{}' },
 ])
 
+const NEW_VENDOR_FIELDS = computed<FormField[]>(() => vendorFields.value
+  .filter((field) => field.visible && field.writable)
+  .map((field) => {
+    const builtIn = BASE_NEW_VENDOR_FIELDS.value.find((item) => item.key === field.key)
+    return builtIn
+      ? { ...builtIn, label: field.label, required: field.required }
+      : customFormField(field)
+  }))
+
 function openNewVendor() {
   newVendor.value = Object.fromEntries(NEW_VENDOR_FIELDS.value.map((f) => [f.key, '']))
   newVendor.value.support_status = 'supported'
@@ -402,14 +581,15 @@ function openNewVendor() {
 
 async function createVendorDevice(values: Record<string, any>) {
   if (!hasAnyIdentity(values)) {
-    showToast('A vendor device needs at least a vendor, make or model', true)
+    showToast('A vendor device needs at least a make, model, firmware, hardware version, or architecture', true)
     return
   }
   creatingVendor.value = true
   try {
+    const payload = mergeCustomValues(values, vendorFields.value, 'misc_data')
     const created = await api<any>(`/software/${software.value.id}/vendor-devices`, {
       method: 'POST',
-      body: JSON.stringify(values),
+      body: JSON.stringify(payload),
     })
     // Newest first, so the row you just made is where you are looking.
     vendorRows.value.unshift(created)
@@ -425,19 +605,64 @@ async function createVendorDevice(values: Record<string, any>) {
   }
 }
 
+function openVendorEdit(row: any) {
+  vendorEditValues.value = Object.fromEntries(NEW_VENDOR_FIELDS.value.map((field) => {
+    if (field.key === 'misc_data') return [field.key, JSON.stringify(row.misc_data || {}, null, 2)]
+    const definition = vendorFields.value.find((item) => item.key === field.key)
+    return [field.key, definition?.storage === 'data'
+      ? row.misc_data?.[field.key] ?? ''
+      : row[field.key] ?? '']
+  }))
+  vendorEditTarget.value = row
+}
+
+async function saveVendorEdit(values: Record<string, any>) {
+  const row = vendorEditTarget.value
+  if (!row) return
+  if (!hasAnyIdentity(values)) {
+    showToast('A vendor device needs at least a make, model, firmware, hardware version, or architecture', true)
+    return
+  }
+  savingVendorEdit.value = true
+  try {
+    const payload = mergeCustomValues(values, vendorFields.value, 'misc_data')
+    const updated = await api<any>(`/software/${software.value.id}/vendor-devices/${row.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+    Object.assign(row, updated)
+    const source = vendorRows.value.find((item) => item.id === updated.id)
+    if (source) Object.assign(source, updated)
+    vendorDirty.value.delete(row.id)
+    invalidateSuggestions('vendor-devices')
+    vendorEditTarget.value = null
+    showToast('Vendor device saved')
+  } catch (e: any) {
+    showToast(e.message, true)
+  } finally {
+    savingVendorEdit.value = false
+  }
+}
+
 async function saveVendorRow(row: any) {
   // Every row in the grid is a saved vendor device: new ones come from the dialog.
   if (!row.id) return
   const fields = vendorDirty.value.get(row.id)
   if (!fields || fields.size === 0) return
   const payload: Record<string, any> = {}
-  for (const f of fields) payload[f] = row[f]
+  for (const key of fields) {
+    const field = vendorFields.value.find((item) => item.key === key)
+    if (field?.storage === 'data') payload.misc_data = row.misc_data || {}
+    else payload[key] = row[key]
+  }
   try {
     const updated = await api<any>(`/software/${software.value.id}/vendor-devices/${row.id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
     Object.assign(row, updated)
+    const source = vendorRows.value.find((item) => item.id === updated.id)
+    if (source) Object.assign(source, updated)
     invalidateSuggestions('vendor-devices')
     vendorDirty.value.delete(row.id)
     showToast('Vendor device saved')
@@ -479,7 +704,7 @@ async function deleteSelectedVendorRows() {
 }
 
 function describeVendorRow(row: any): string {
-  return [row.vendor, row.make, row.model].filter(Boolean).join(' ') || 'this vendor device'
+  return [row.make, row.model].filter(Boolean).join(' ') || 'this vendor device'
 }
 
 /** Keep the Details tab's count in step without re-fetching the software. */
@@ -511,7 +736,6 @@ async function onImportFile(e: Event) {
     const result = await runImport(`/software/${software.value.id}/vendor-devices/import`, file)
     if (result) {
       await loadVendorDevices()
-      if (software.value) software.value.vendor_device_count = vendorRows.value.length
     }
   } finally {
     if (fileInput.value) fileInput.value.value = ''
@@ -529,6 +753,11 @@ const testedRows = ref<any[]>([])
 const testedLoading = ref(false)
 
 const testedColumns = [
+  {
+    field: 'component_name', headerName: 'Component', minWidth: 180,
+    valueFormatter: (p: any) => p.value
+      ? `${p.value}${p.data.component_version ? ` ${p.data.component_version}` : ''}` : '',
+  },
   {
     field: 'unique_id',
     headerName: 'Device',
@@ -596,7 +825,9 @@ async function loadTestedDevices() {
     const res = await api<any>(`/software/${software.value.id}/tested-devices`)
     // Flattened so the grid can sort and filter on the device fields directly.
     testedRows.value = (res.devices || []).map((t: any) => ({
-      id: t.device.id,
+      id: `${t.component?.id || software.value.id}:${t.device.id}`,
+      component_name: t.component?.name || '',
+      component_version: t.component?.version || '',
       unique_id: t.device.unique_id,
       make: t.device.make,
       model: t.device.model,
@@ -640,7 +871,7 @@ async function load() {
       )
     }
     // Both tabs load up front so their counts are correct before they are opened.
-    await Promise.all([loadVendorDevices(), loadTestedDevices()])
+    await Promise.all([loadVendorSchema(), loadVendorDevices(), loadTestedDevices()])
   } catch (e: any) {
     error.value = e.message
   }
@@ -677,6 +908,9 @@ onMounted(load)
           <button v-if="!editing" class="btn" @click="startEdit">Edit</button>
           <button v-if="!editing" class="btn" title="Add a version, inheriting this one's vendor devices" @click="openNewVersion">
             + New version
+          </button>
+          <button v-if="!editing" class="btn" title="Add a component beneath this software version" @click="openNewComponent">
+            + New component
           </button>
           <template v-else>
             <button class="btn btn-primary" :disabled="saving" @click="saveEdit">
@@ -716,6 +950,7 @@ onMounted(load)
           ></textarea>
           <input v-else v-model="form[field.key]" :type="field.type === 'date' ? 'date' : field.type === 'number' ? 'number' : 'text'" />
         </template>
+        <BundleComponentsEditor v-model="form.bundle_components" style="grid-column: 1 / -1" />
       </form>
       <template v-else>
         <dl class="kv">
@@ -730,6 +965,13 @@ onMounted(load)
               <strong v-else>{{ versionLabel(v) }}</strong><span v-if="i < versions.length - 1">, </span>
             </span>
           </dd>
+          <dt>Bundle Components</dt>
+          <dd v-if="software.bundle_components?.length">
+            <span v-for="(component, i) in software.bundle_components" :key="component.id">
+              {{ component.name }} {{ component.version }}<span v-if="i < software.bundle_components.length - 1">, </span>
+            </span>
+          </dd>
+          <dd v-else>—</dd>
           <dt>Vendor Devices</dt>
           <dd>
             {{ software.vendor_device_count ?? vendorRows.length }}
@@ -754,10 +996,16 @@ onMounted(load)
           Hardware the vendor claims {{ software.name }} {{ versionLabel(software) }} works against. These
           are not inventory devices — import a vendor's compatibility list here. This list belongs
           to this version alone: a new version starts as a copy of it and the two diverge from there.
+          Matching make, model, and hardware records are collapsed; use the Firmware dropdown to
+          select an underlying record. All {{ vendorRows.length }} records remain available to API/MCP
+          searches and exports.
         </p>
         <div class="toolbar">
           <button v-if="auth.canWrite" class="btn btn-primary" @click="openNewVendor">
             + New vendor device
+          </button>
+          <button v-if="auth.isAdmin" class="btn" @click="openVendorSchema">
+            Customize fields
           </button>
           <!-- Outside the menu: the panel closes on click, and a file input
                unmounted mid-picker never fires `change`. -->
@@ -782,19 +1030,29 @@ onMounted(load)
             <button class="btn" @click="exportVendorAs('json')">Export JSON</button>
             <button class="btn" @click="exportVendorAs('csv')">Export CSV</button>
           </OverflowMenu>
+          <FilterProfilesMenu
+            ref="vendorProfiles"
+            :entity="vendorViewEntity"
+            :get-state="() => vendorTable?.getState()"
+            :apply-state="(state) => vendorTable?.applyState(state)"
+          />
         </div>
       </div>
       <DataTable
+        ref="vendorTable"
         :columns="vendorColumns"
-        :rows="vendorRows"
+        :rows="vendorDisplayRows"
         :editable="auth.canWrite"
+        :row-editable="auth.canWrite"
         :selectable="auth.canWrite"
         :dirty-ids="vendorDirtyIds"
         :is-row-dirty="isVendorRowDirty"
         @cell-edit="onVendorCellEdit"
         @save-row="saveVendorRow"
+        @edit-row="openVendorEdit"
         @delete-row="deleteVendorRow"
         @selection-change="(r: any[]) => (vendorSelected = r)"
+        @grid-ready="onVendorGridReady"
       >
         <template #selection-actions>
           <button
@@ -807,6 +1065,23 @@ onMounted(load)
           </button>
         </template>
       </DataTable>
+      <div v-if="editingVendorSchema" class="modal-backdrop">
+        <form class="modal-card modal-wide" @submit.prevent="saveVendorSchema">
+          <h3 class="modal-title">Vendor Device Fields — {{ software.name }} {{ versionLabel(software) }}</h3>
+          <p class="muted">These overrides apply to this software version. Field definitions are managed under Schema → Vendor Devices.</p>
+          <div class="schema-field-list">
+            <div v-for="field in vendorSchemaDraft" :key="field.id" class="schema-field-row">
+              <div><strong>{{ field.label }}</strong><br /><code>{{ field.key }}</code></div>
+              <label class="check"><input v-model="field.visible" type="checkbox" @change="!field.visible && (field.required = false)" /> Shown</label>
+              <label class="check"><input v-model="field.required" type="checkbox" :disabled="!field.visible" /> Required</label>
+            </div>
+          </div>
+          <div class="actions">
+            <button type="button" class="btn" :disabled="savingVendorSchema" @click="editingVendorSchema = false">Cancel</button>
+            <button class="btn btn-primary" :disabled="savingVendorSchema">{{ savingVendorSchema ? 'Saving…' : 'Save fields' }}</button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <!-- Tested Devices -->
@@ -816,9 +1091,23 @@ onMounted(load)
           Inventory devices {{ software.name }} has actually been run against, summarised from
           recorded tests. Read-only — edit the underlying runs on the Tests page.
         </p>
+        <div class="toolbar">
+          <FilterProfilesMenu
+            ref="testedProfiles"
+            :entity="testedViewEntity"
+            :get-state="() => testedTable?.getState()"
+            :apply-state="(state) => testedTable?.applyState(state)"
+          />
+        </div>
       </div>
       <p v-if="testedLoading" class="muted">Loading…</p>
-      <DataTable v-else :columns="testedColumns" :rows="testedRows" />
+      <DataTable
+        v-else
+        ref="testedTable"
+        :columns="testedColumns"
+        :rows="testedRows"
+        @grid-ready="onTestedGridReady"
+      />
     </div>
 
     <FormModal
@@ -830,6 +1119,28 @@ onMounted(load)
       submit-label="Create version"
       @submit="createVersion"
       @cancel="showNewVersion = false"
+    />
+
+    <FormModal
+      v-if="showNewComponent"
+      :title="`New Component for ${software.name} ${versionLabel(software)}`"
+      :fields="NEW_COMPONENT_FIELDS"
+      :values="newComponent"
+      :busy="creatingComponent"
+      submit-label="Add component"
+      @submit="createComponent"
+      @cancel="showNewComponent = false"
+    />
+
+    <FormModal
+      v-if="vendorEditTarget"
+      :title="`Edit Vendor Device — ${describeVendorRow(vendorEditTarget)}`"
+      :fields="NEW_VENDOR_FIELDS"
+      :values="vendorEditValues"
+      :busy="savingVendorEdit"
+      submit-label="Save changes"
+      @submit="saveVendorEdit"
+      @cancel="vendorEditTarget = null"
     />
 
     <FormModal
@@ -912,5 +1223,33 @@ onMounted(load)
   margin: 0;
   max-width: 70ch;
   font-size: 12.5px;
+}
+
+.schema-field-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  max-height: min(55vh, 560px);
+  overflow: auto;
+}
+
+.schema-field-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 20px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+@media (max-width: 599px) {
+  .schema-field-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .schema-field-row > div {
+    grid-column: 1 / -1;
+  }
 }
 </style>

@@ -3,7 +3,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
-from ..models import Device, Test, Software, User
+from ..models import Device, Test, Software, SoftwareComponent, User
 from ..models.test import TEST_OUTCOMES, TEST_TAGS
 from ..schemas import (
     BulkIds,
@@ -25,15 +25,16 @@ router = APIRouter(prefix="/tests", tags=["tests"])
 
 EXPORT_COLUMNS = [
     "id", "software_id", "software_name", "software_version", "device_id", "device_unique_id",
+    "component_id", "component_name", "component_version",
     "device_make", "device_model", "outcome", "tag", "misc_data", "notes",
     "run_at", "created_at", "created_by_username",
 ]
-EDITABLE_FIELDS = ["software_version", "outcome", "tag", "misc_data", "notes", "run_at"]
+EDITABLE_FIELDS = ["component_id", "software_version", "outcome", "tag", "misc_data", "notes", "run_at"]
 
 # The columns an import template offers, required first. A row identifies its
 # software and device by name — a hand-filled file has no UUIDs to quote.
 TEMPLATE_COLUMNS = [
-    "device_unique_id", "software_name", "software_version",
+    "device_unique_id", "software_name", "software_version", "component_name", "component_version",
     "outcome", "tag", "run_at", "notes",
 ]
 
@@ -44,7 +45,7 @@ IMPORT_IGNORED = {"created_at", "updated_at", "created_by_username", "device_mak
 # test-specific measurements. They travel in Test.misc_data so a sheet can append
 # fields such as `ping` without first encoding them as JSON by hand.
 IMPORT_COLUMNS = set(TestImportRow.model_fields) | IMPORT_IGNORED
-IMPORT_RELATION_FIELDS = {"id", "software_id", "software_name", "device_id", "device_unique_id", "misc_data"}
+IMPORT_RELATION_FIELDS = {"id", "software_id", "software_name", "device_id", "device_unique_id", "component_id", "component_name", "component_version", "misc_data"}
 
 
 def _merge_csv_extra_columns(row: dict, known: set[str] | None = None) -> dict:
@@ -54,6 +55,35 @@ def _merge_csv_extra_columns(row: dict, known: set[str] | None = None) -> dict:
 
 def _test_dict(t: Test) -> dict:
     return TestOut.model_validate(t).model_dump(mode="json")
+
+
+def _resolve_component(
+    db: Session, software: Software, component_id: str | None,
+    component_name: str | None, component_version: str | None,
+) -> SoftwareComponent | None:
+    component = db.get(SoftwareComponent, component_id) if component_id else None
+    name = (component_name or "").strip()
+    version = (component_version or "").strip()
+    if component is not None and component.software_id != software.id:
+        raise ValueError("component does not belong to the selected software suite")
+    if component is None and name:
+        component = db.scalar(select(SoftwareComponent).where(
+            SoftwareComponent.software_id == software.id,
+            func.lower(SoftwareComponent.name) == name.lower(),
+            SoftwareComponent.version == version,
+        ))
+        if component is None:
+            component = SoftwareComponent(
+                software_id=software.id, name=name, version=version,
+                position=db.scalar(select(func.count()).select_from(SoftwareComponent).where(
+                    SoftwareComponent.software_id == software.id,
+                )) or 0,
+            )
+            db.add(component)
+            db.flush()
+    elif component is None and component_id:
+        raise ValueError("unknown component_id")
+    return component
 
 
 def _resolve_import_row(db: Session, row: TestImportRow) -> dict:
@@ -77,6 +107,10 @@ def _resolve_import_row(db: Session, row: TestImportRow) -> dict:
     if software is None:
         raise ValueError(f"unknown software: {row.software_name or row.software_id or '(none given)'}")
 
+    component = _resolve_component(
+        db, software, row.component_id, row.component_name, row.component_version,
+    )
+
     device = db.get(Device, row.device_id) if row.device_id else None
     if device is None and row.device_unique_id:
         device = db.scalar(select(Device).where(Device.unique_id == row.device_unique_id))
@@ -90,6 +124,7 @@ def _resolve_import_row(db: Session, row: TestImportRow) -> dict:
 
     return {
         "software_id": software.id,
+        "component_id": component.id if component else None,
         "device_id": device.id,
         # Unstated version means "whatever the software is on now", same as the API.
         "software_version": row.software_version or software.version,
@@ -120,11 +155,18 @@ def _query_tests(
     if tag:
         q = q.where(Test.tag == tag)
     catalog = {field.key: field for field in get_entity_fields(db, "tests")}
+    joined_component = False
     for key, value in (filters or {}).items():
         field = catalog.get(key)
         if not field or field.key in {"device_unique_id", "software_name", "created_by_username", "created_at"}:
             continue
-        expression = entity_field_expression(Test, field)
+        if key in {"component_name", "component_version"}:
+            if not joined_component:
+                q = q.outerjoin(SoftwareComponent, Test.component_id == SoftwareComponent.id)
+                joined_component = True
+            expression = getattr(SoftwareComponent, "name" if key == "component_name" else "version")
+        else:
+            expression = entity_field_expression(Test, field)
         value = coerce_query_value(field, value)
         q = q.where(expression == value if field.indexed else expression.ilike(f"%{value}%"))
     if search:
@@ -133,10 +175,19 @@ def _query_tests(
             entity_field_expression(Test, field).ilike(like)
             for field in get_entity_fields(db, "tests")
             if field.field_type in {"text", "textarea", "select"}
-            and field.key not in {"device_unique_id", "software_name", "created_by_username"}
+            and field.key not in {
+                "device_unique_id", "software_name", "component_name",
+                "component_version", "created_by_username",
+            }
         ]
+        if not joined_component:
+            q = q.outerjoin(SoftwareComponent, Test.component_id == SoftwareComponent.id)
         q = q.join(Device, Test.device_id == Device.id).join(Software, Test.software_id == Software.id).where(
-            or_(Device.unique_id.ilike(like), Software.name.ilike(like), *configured)
+            or_(
+                Device.unique_id.ilike(like), Software.name.ilike(like),
+                SoftwareComponent.name.ilike(like), SoftwareComponent.version.ilike(like),
+                *configured,
+            )
         )
     return q
 
@@ -190,10 +241,14 @@ def export_tests(
 @router.get("/template")
 def test_template(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """A blank CSV with base test columns; extra headers become misc data."""
-    columns = [
+    configured = [
         field.key for field in get_entity_fields(db, "tests")
         if field.writable and field.key != "misc_data"
     ]
+    # Keep the hand-filled columns in a stable, useful order. In particular,
+    # component fields must be present even on an upgraded installation where
+    # the entity-field catalog initially added them as hidden.
+    columns = [*TEMPLATE_COLUMNS, *(key for key in configured if key not in TEMPLATE_COLUMNS)]
     return download_response(template_csv(columns), "tests-template.csv", "text/csv")
 
 
@@ -222,13 +277,22 @@ def create_test(
     if db.get(Device, body.device_id) is None:
         raise HTTPException(status_code=400, detail="Unknown device_id")
     try:
-        data = validate_custom_values(db, "tests", body.model_dump(), "misc_data")
+        component = _resolve_component(
+            db, software, body.component_id, body.component_name, body.component_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        data = validate_custom_values(
+            db, "tests", body.model_dump(exclude={"component_name", "component_version"}), "misc_data",
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not data.get("software_version"):
         # Record what the software is on now: the run is evidence about that build,
         # and the software's own version will move on without it.
         data["software_version"] = software.version
+    data["component_id"] = component.id if component else None
     test = Test(**data, created_by=user.id)
     db.add(test)
     detail = body.model_dump(mode="json")
@@ -254,6 +318,10 @@ def update_test(
         raise HTTPException(status_code=400, detail=f"outcome must be one of {TEST_OUTCOMES}")
     if body.tag is not None and body.tag not in TEST_TAGS:
         raise HTTPException(status_code=400, detail=f"tag must be one of {TEST_TAGS}")
+    if body.component_id is not None:
+        component = db.get(SoftwareComponent, body.component_id)
+        if component is None or component.software_id != test.software_id:
+            raise HTTPException(status_code=400, detail="Component does not belong to this test's software")
     old = {f: getattr(test, f) for f in EDITABLE_FIELDS}
     try:
         updates = validate_custom_values(
@@ -315,7 +383,15 @@ def bulk_tests(
     for i, row in enumerate(body.upserts):
         try:
             with row_scope(db):
-                data = TestCreate(**{k: v for k, v in row.items() if k != "id"}).model_dump()
+                parsed = TestCreate(**{k: v for k, v in row.items() if k != "id"})
+                software = db.get(Software, parsed.software_id)
+                if software is None:
+                    raise ValueError("unknown software_id")
+                component = _resolve_component(
+                    db, software, parsed.component_id, parsed.component_name, parsed.component_version,
+                )
+                data = parsed.model_dump(exclude={"component_name", "component_version"})
+                data["component_id"] = component.id if component else None
                 data = validate_custom_values(db, "tests", data, "misc_data")
                 if not data.get("software_version"):
                     software = db.get(Software, data["software_id"])

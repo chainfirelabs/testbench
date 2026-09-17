@@ -116,6 +116,23 @@
         }
       }
     },
+    "authentik": {
+      "type": "object",
+      "properties": {
+        "tls": {
+          "type": "object",
+          "properties": {
+            "existingConfigMap": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
     "config": {
       "type": "object",
       "required": [
@@ -267,44 +284,7 @@
             "researchImage": {
               "$ref": "#/$defs/image"
             }
-          },
-          "allOf": [
-            {
-              "if": {
-                "properties": {
-                  "enabled": {
-                    "const": true
-                  }
-                }
-              },
-              "then": {
-                "properties": {
-                  "ai": {
-                    "required": [
-                      "url",
-                      "model",
-                      "existingSecret",
-                      "apiKeySecretKey"
-                    ],
-                    "properties": {
-                      "url": {
-                        "minLength": 1
-                      },
-                      "model": {
-                        "minLength": 1
-                      },
-                      "existingSecret": {
-                        "minLength": 1
-                      },
-                      "apiKeySecretKey": {
-                        "minLength": 1
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          ]
+          }
         },
         "reboot": {
           "type": "object",
@@ -345,6 +325,9 @@
                 "model": {
                   "type": "string"
                 },
+                "repeatModel": {
+                  "type": "string"
+                },
                 "existingSecret": {
                   "type": "string"
                 },
@@ -359,44 +342,7 @@
             "researchImage": {
               "$ref": "#/$defs/image"
             }
-          },
-          "allOf": [
-            {
-              "if": {
-                "properties": {
-                  "enabled": {
-                    "const": true
-                  }
-                }
-              },
-              "then": {
-                "properties": {
-                  "ai": {
-                    "required": [
-                      "url",
-                      "model",
-                      "existingSecret",
-                      "apiKeySecretKey"
-                    ],
-                    "properties": {
-                      "url": {
-                        "minLength": 1
-                      },
-                      "model": {
-                        "minLength": 1
-                      },
-                      "existingSecret": {
-                        "minLength": 1
-                      },
-                      "apiKeySecretKey": {
-                        "minLength": 1
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          ]
+          }
         }
       }
     },

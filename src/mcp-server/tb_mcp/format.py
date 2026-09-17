@@ -116,6 +116,7 @@ def software_brief(s: dict) -> dict:
         "version_count": s.get("version_count") if (s.get("version_count") or 1) > 1 else None,
         "is_latest": False if s.get("is_latest") is False else None,
         "vendor_device_count": s.get("vendor_device_count"),
+        "component_count": len(s.get("bundle_components") or []) or None,
     })
 
 
@@ -123,6 +124,7 @@ def software_full(s: dict) -> dict:
     return drop_empty({
         **software_brief(s),
         "misc_data": s.get("misc_data"),
+        "bundle_components": s.get("bundle_components") or None,
         "created_at": _date(s.get("created_at")),
         "updated_at": _date(s.get("updated_at")),
     })
@@ -133,6 +135,8 @@ def test_brief(t: dict) -> dict:
         "device": t.get("device_unique_id"),
         "software": t.get("software_name"),
         "software_version": t.get("software_version") or None,
+        "component": t.get("component_name"),
+        "component_version": t.get("component_version") or None,
         "outcome": t.get("outcome"),
         "tag": t.get("tag"),
         "run_at": _date(t.get("run_at") or t.get("created_at")),
@@ -145,8 +149,11 @@ def test_brief(t: dict) -> dict:
 
 
 def vendor_device_brief(v: dict) -> dict:
+    custom = {
+        key: value for key, value in (v.get("misc_data") or {}).items()
+        if not key.startswith("__")
+    }
     return drop_empty({
-        "vendor": v.get("vendor"),
         "make": v.get("make"),
         "model": v.get("model"),
         "firmware_version": v.get("firmware_version"),
@@ -155,6 +162,7 @@ def vendor_device_brief(v: dict) -> dict:
         "support_status": v.get("support_status"),
         "source": v.get("source"),
         "notes": _preview(v.get("notes")),
+        "custom_fields": custom,
     })
 
 

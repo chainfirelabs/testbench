@@ -38,9 +38,6 @@ const writableFields = computed(() =>
 )
 const statusField = computed(() => displayFields.value.find((field) => field.key === 'status'))
 const hasStatus = computed(() => !!statusField.value?.visible)
-const scanEnabled = computed(() =>
-  ['scan_address_wan', 'scan_address_lan'].some((role) => fieldByRole(displayFields.value, role)),
-)
 const addressRoleFor = (field: SchemaField) =>
   field.role === 'scan_address_wan' ? 'wan' : field.role === 'scan_address_lan' ? 'lan' : null
 
@@ -52,6 +49,11 @@ const addressRoleFor = (field: SchemaField) =>
  * only one side of the wire knows the answer.
  */
 const deviceActions = ref<PluginAction[]>([])
+const scanEnabled = computed(() => deviceActions.value.some((action) =>
+  action.plugin_id === 'network-scan'
+  && action.id === 'network-scan.scan-device'
+  && action.available === true,
+))
 
 async function loadSchema() {
   const key = configuredType.value?.key
@@ -116,8 +118,9 @@ const artifactDefinitions = [
   { plugin_id: 'device-info-agent', artifact_type: 'discovery_recipe', label: 'Device Info' },
   { plugin_id: 'device-reboot', artifact_type: 'reboot_recipe', label: 'Reboot' },
 ]
-const rebootOverride = ref<{ method: 'ssh' | 'ai' | null; ssh_command: string | null; ssh_port: number | null }>({ method: null, ssh_command: null, ssh_port: null })
+const rebootOverride = ref<{ method: 'ssh' | 'ai' | null; ssh_command: string | null; ssh_port: number | null; ai_profile_id: string | null; ai_model: string | null; ai_repeat_model: string | null }>({ method: null, ssh_command: null, ssh_port: null, ai_profile_id: null, ai_model: null, ai_repeat_model: null })
 const rebootEffective = ref<Record<string, any>>({})
+const rebootAiConfiguration = ref<Record<string, any>>({})
 const rebootConfigSource = ref('')
 const rebootConfigAvailable = ref(false)
 
@@ -129,9 +132,13 @@ async function loadRebootOverride() {
       method: result.configuration?.method ?? null,
       ssh_command: result.configuration?.ssh_command ?? null,
       ssh_port: result.configuration?.ssh_port ?? null,
+      ai_profile_id: result.configuration?.ai_profile_id ?? null,
+      ai_model: result.configuration?.ai_model ?? null,
+      ai_repeat_model: result.configuration?.ai_repeat_model ?? null,
     }
     rebootEffective.value = result.effective_configuration || {}
     rebootConfigSource.value = result.source || ''
+    rebootAiConfiguration.value = result.ai_configuration || {}
     rebootConfigAvailable.value = true
   } catch {
     rebootConfigAvailable.value = false
@@ -156,7 +163,7 @@ async function saveRebootOverride() {
 async function clearRebootOverride() {
   try {
     const result = await api<any>(`/plugins/device-reboot/devices/${detail.value.id}/configuration`, { method: 'DELETE' })
-    rebootOverride.value = { method: null, ssh_command: null, ssh_port: null }
+    rebootOverride.value = { method: null, ssh_command: null, ssh_port: null, ai_profile_id: null, ai_model: null, ai_repeat_model: null }
     rebootEffective.value = result.effective_configuration || {}
     rebootConfigSource.value = result.source || ''
     toast.value = 'Device reboot override cleared'
@@ -166,8 +173,36 @@ async function clearRebootOverride() {
   setTimeout(() => (toast.value = ''), 3000)
 }
 
-const infoOverride = ref<{ http_port: number | null; https_port: number | null }>({ http_port: null, https_port: null })
+const DISCOVERY_ROLE_OPTIONS = [
+  { value: 'discovery_hardware', label: 'Hardware version' },
+  { value: 'discovery_firmware', label: 'Firmware version' },
+  { value: 'discovery_lan_mac', label: 'LAN MAC' },
+  { value: 'discovery_wan_mac', label: 'WAN MAC' },
+]
+type InfoOverride = {
+  method: 'browser' | 'ssh' | 'auto' | null
+  http_port: number | null; https_port: number | null
+  ssh_port: number | null; ssh_connect_timeout: number | null; ssh_command_timeout: number | null
+  ssh_host_key_policy: 'accept-new' | 'strict' | null
+  ssh_commands: { command: string; yields: string[] }[] | null
+  ai_profile_id: string | null; ai_model: string | null; ai_repeat_model: string | null
+  discovery_roles: string[] | null; prompt_addendum: string | null
+}
+const emptyInfoOverride = (): InfoOverride => ({
+  method: null, http_port: null, https_port: null, ssh_port: null, ssh_connect_timeout: null,
+  ssh_command_timeout: null, ssh_host_key_policy: null, ssh_commands: null,
+  ai_profile_id: null, ai_model: null,
+  ai_repeat_model: null, discovery_roles: null, prompt_addendum: null,
+})
+const infoOverride = ref<InfoOverride>(emptyInfoOverride())
 const infoEffective = ref<Record<string, any>>({})
+const infoAiConfiguration = ref<Record<string, any>>({})
+const aiProfiles = ref<any[]>([])
+const aiModels = (profileId: string | null) => aiProfiles.value.find((item) => item.id === profileId)?.models || []
+async function loadAiProfiles() {
+  if (!auth.isAdmin || aiProfiles.value.length) return
+  aiProfiles.value = (await api<any[]>('/ai/providers')).filter((item) => item.enabled)
+}
 const infoConfigSource = ref('')
 const infoConfigAvailable = ref(false)
 
@@ -176,11 +211,23 @@ async function loadInfoOverride() {
   try {
     const result = await api<any>(`/plugins/device-info-agent/devices/${detail.value.id}/configuration`)
     infoOverride.value = {
+      method: result.configuration?.method ?? null,
       http_port: result.configuration?.http_port ?? null,
       https_port: result.configuration?.https_port ?? null,
+      ssh_port: result.configuration?.ssh_port ?? null,
+      ssh_connect_timeout: result.configuration?.ssh_connect_timeout ?? null,
+      ssh_command_timeout: result.configuration?.ssh_command_timeout ?? null,
+      ssh_host_key_policy: result.configuration?.ssh_host_key_policy ?? null,
+      ssh_commands: result.configuration?.ssh_commands ?? null,
+      ai_profile_id: result.configuration?.ai_profile_id ?? null,
+      ai_model: result.configuration?.ai_model ?? null,
+      ai_repeat_model: result.configuration?.ai_repeat_model ?? null,
+      discovery_roles: result.configuration?.discovery_roles ?? null,
+      prompt_addendum: result.configuration?.prompt_addendum ?? null,
     }
     infoEffective.value = result.effective_configuration || {}
     infoConfigSource.value = result.source || ''
+    infoAiConfiguration.value = result.ai_configuration || {}
     infoConfigAvailable.value = true
   } catch {
     infoConfigAvailable.value = false
@@ -189,7 +236,9 @@ async function loadInfoOverride() {
 
 async function saveInfoOverride() {
   try {
-    const configuration = Object.fromEntries(Object.entries(infoOverride.value).filter(([, value]) => value != null))
+    const configuration = Object.fromEntries(Object.entries(infoOverride.value).filter(
+      ([, value]) => value != null && value !== '',
+    ))
     const result = await api<any>(`/plugins/device-info-agent/devices/${detail.value.id}/configuration`, {
       method: 'PUT', body: JSON.stringify({ configuration }),
     })
@@ -202,10 +251,26 @@ async function saveInfoOverride() {
   setTimeout(() => (toast.value = ''), 3000)
 }
 
+function toggleInfoDiscoveryOverride(enabled: boolean) {
+  infoOverride.value.discovery_roles = enabled
+    ? [...(infoEffective.value.discovery_roles || DISCOVERY_ROLE_OPTIONS.map((item) => item.value))]
+    : null
+}
+
+function addDeviceInfoSshCommand() {
+  if (!Array.isArray(infoOverride.value.ssh_commands)) infoOverride.value.ssh_commands = []
+  infoOverride.value.ssh_commands.push({ command: '', yields: DISCOVERY_ROLE_OPTIONS.map((item) => item.value) })
+}
+
+function toggleDeviceInfoSshCommands(enabled: boolean) {
+  infoOverride.value.ssh_commands = enabled ? [] : null
+  if (enabled) addDeviceInfoSshCommand()
+}
+
 async function clearInfoOverride() {
   try {
     const result = await api<any>(`/plugins/device-info-agent/devices/${detail.value.id}/configuration`, { method: 'DELETE' })
-    infoOverride.value = { http_port: null, https_port: null }
+    infoOverride.value = emptyInfoOverride()
     infoEffective.value = result.effective_configuration || {}
     infoConfigSource.value = result.source || ''
     toast.value = 'Device Info override cleared'
@@ -343,6 +408,7 @@ function invalidateCompat() {
 watch(tab, (t) => {
   if (t === 'software' && !compat.value && !compatLoading.value) loadCompat()
   if (t === 'plugin-steps') {
+    loadAiProfiles()
     loadPluginArtifacts()
     loadRebootOverride()
     loadInfoOverride()
@@ -714,6 +780,17 @@ watch(() => detail.value?.device_type_id, () => {
           <template v-if="rebootConfigSource"> (from {{ rebootConfigSource }})</template>.
         </p>
         <div class="device-config-fields">
+          <template v-if="rebootAiConfiguration.locked">
+            <label>AI endpoint<input :value="rebootAiConfiguration.url" disabled /></label>
+            <label>AI model<input :value="rebootAiConfiguration.model" disabled /></label>
+            <label>AI repeat model<input :value="rebootAiConfiguration.repeat_model || rebootAiConfiguration.model" disabled /></label>
+          </template>
+          <template v-else>
+            <label>AI provider<select v-model="rebootOverride.ai_profile_id"><option :value="null">Inherit</option><option v-for="p in aiProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+            <label>AI model<input v-model="rebootOverride.ai_model" list="reboot-device-ai-models" placeholder="Inherit" /></label>
+            <label>AI repeat model<input v-model="rebootOverride.ai_repeat_model" list="reboot-device-ai-models" placeholder="Inherit model" /></label>
+            <datalist id="reboot-device-ai-models"><option v-for="model in aiModels(rebootOverride.ai_profile_id)" :key="model" :value="model" /></datalist>
+          </template>
           <label>Method
             <select v-model="rebootOverride.method">
               <option :value="null">No device override</option>
@@ -740,6 +817,18 @@ watch(() => detail.value?.device_type_id, () => {
           <template v-if="infoConfigSource"> Effective settings are from {{ infoConfigSource }}.</template>
         </p>
         <div class="device-config-fields">
+          <label>Collection method<select v-model="infoOverride.method"><option :value="null">Inherit</option><option value="browser">Browser</option><option value="ssh">SSH only</option><option value="auto">Auto (SSH, then browser)</option></select></label>
+          <template v-if="infoAiConfiguration.locked">
+            <label>AI endpoint<input :value="infoAiConfiguration.url" disabled /></label>
+            <label>AI model<input :value="infoAiConfiguration.model" disabled /></label>
+            <label>AI repeat model<input :value="infoAiConfiguration.repeat_model || infoAiConfiguration.model" disabled /></label>
+          </template>
+          <template v-else>
+            <label>AI provider<select v-model="infoOverride.ai_profile_id"><option :value="null">Inherit</option><option v-for="p in aiProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+            <label>AI model<input v-model="infoOverride.ai_model" list="info-device-ai-models" placeholder="Inherit" /></label>
+            <label>AI repeat model<input v-model="infoOverride.ai_repeat_model" list="info-device-ai-models" placeholder="Inherit model" /></label>
+            <datalist id="info-device-ai-models"><option v-for="model in aiModels(infoOverride.ai_profile_id)" :key="model" :value="model" /></datalist>
+          </template>
           <label>HTTP port
             <input v-model.number="infoOverride.http_port" type="number" min="1" max="65535"
               :placeholder="String(infoEffective.http_port || 80)" />
@@ -747,6 +836,38 @@ watch(() => detail.value?.device_type_id, () => {
           <label>HTTPS port
             <input v-model.number="infoOverride.https_port" type="number" min="1" max="65535"
               :placeholder="String(infoEffective.https_port || 443)" />
+          </label>
+          <label>SSH port<input v-model.number="infoOverride.ssh_port" type="number" min="1" max="65535" :placeholder="String(infoEffective.ssh_port || 22)" /></label>
+          <label>SSH host keys<select v-model="infoOverride.ssh_host_key_policy"><option :value="null">Inherit</option><option value="accept-new">Accept new</option><option value="strict">Strict</option></select></label>
+          <label>SSH connect timeout<input v-model.number="infoOverride.ssh_connect_timeout" type="number" min="1" max="300" placeholder="15" /></label>
+          <label>SSH command timeout<input v-model.number="infoOverride.ssh_command_timeout" type="number" min="1" max="300" placeholder="30" /></label>
+          <fieldset class="config-fieldset info-command-editor"><legend>Ordered SSH commands</legend>
+            <label class="check"><input type="checkbox" :checked="infoOverride.ssh_commands !== null" @change="toggleDeviceInfoSshCommands(($event.target as HTMLInputElement).checked)" />Override commands for this device</label>
+            <div v-for="(command, commandIndex) in (infoOverride.ssh_commands || [])" :key="commandIndex" class="info-command-row">
+              <input class="command-input" v-model="command.command" placeholder="show version" />
+              <div class="command-yields">
+                <label v-for="item in DISCOVERY_ROLE_OPTIONS" :key="item.value" class="check"><input v-model="command.yields" type="checkbox" :value="item.value" />{{ item.label }}</label>
+              </div>
+              <button type="button" class="btn btn-danger" @click="infoOverride.ssh_commands!.splice(commandIndex, 1)">Remove</button>
+            </div>
+            <button v-if="infoOverride.ssh_commands !== null" type="button" class="btn" @click="addDeviceInfoSshCommand">+ Add command</button>
+          </fieldset>
+          <fieldset class="config-fieldset">
+            <legend>Information to gather</legend>
+            <label class="check">
+              <input type="checkbox" :checked="infoOverride.discovery_roles !== null"
+                @change="toggleInfoDiscoveryOverride(($event.target as HTMLInputElement).checked)" />
+              Override requested fields for this device
+            </label>
+            <label v-for="item in DISCOVERY_ROLE_OPTIONS" :key="item.value" class="check">
+              <input v-model="infoOverride.discovery_roles" type="checkbox" :value="item.value"
+                :disabled="infoOverride.discovery_roles === null" /> {{ item.label }}
+            </label>
+            <small class="muted">Existing MAC addresses are still protected from replacement.</small>
+          </fieldset>
+          <label>Prompt guidance for this device
+            <textarea v-model="infoOverride.prompt_addendum" maxlength="8000"
+              placeholder="Inherit; e.g. Firmware is under Administration → Status."></textarea>
           </label>
         </div>
         <div class="plugin-step-actions">
@@ -854,7 +975,6 @@ watch(() => detail.value?.device_type_id, () => {
                     <table class="data-list compat-claims">
                       <thead>
                         <tr>
-                          <th>Vendor</th>
                           <th>Make</th>
                           <th>Model</th>
                           <th>Firmware</th>
@@ -867,7 +987,6 @@ watch(() => detail.value?.device_type_id, () => {
                       </thead>
                       <tbody>
                         <tr v-for="vd in item.vendor_devices" :key="vd.id">
-                          <td data-label="Vendor">{{ vd.vendor || '—' }}</td>
                           <td data-label="Make">{{ vd.make || 'any' }}</td>
                           <td data-label="Model">{{ vd.model || 'any' }}</td>
                           <td data-label="Firmware">{{ vd.firmware_version || 'any' }}</td>
@@ -1006,10 +1125,22 @@ watch(() => detail.value?.device_type_id, () => {
 .plugin-step-head p { margin: 4px 0 10px; font-size: 12px; }
 .plugin-step-editor { width: 100%; min-height: 280px; resize: vertical; font: 12px/1.5 ui-monospace, monospace; }
 .plugin-step-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
-.device-plugin-config { margin-bottom: 14px; }
-.device-config-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.device-plugin-config { margin-bottom: 18px; }
+.device-plugin-config > h3 { margin: 0 0 6px; }
+.device-plugin-config > p { margin: 0 0 16px; }
+.device-config-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
 .device-config-fields label { display: grid; gap: 5px; }
-.device-config-fields select, .device-config-fields input { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: inherit; }
+.device-config-fields label.check { display: flex; align-items: center; gap: 7px; }
+.device-config-fields select, .device-config-fields input, .device-config-fields textarea { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); color: inherit; }
+.device-config-fields textarea { min-height: 90px; resize: vertical; }
+.device-config-fields > .config-fieldset { grid-column: 1 / -1; }
+.config-fieldset { min-width: 0; display: grid; gap: 12px; margin: 2px 0; padding: 14px; border: 1px solid var(--border-soft); border-radius: var(--r-md); }
+.config-fieldset legend { padding: 0 6px; font-weight: 600; }
+.info-command-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--border-soft); border-radius: var(--r-md); background: var(--surface); }
+.info-command-row .command-input { grid-column: 1 / -1; width: 100%; }
+.command-yields { display: flex; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.command-yields label.check { display: flex; }
+.info-command-row > .btn { justify-self: end; min-width: 88px; }
 
 .compat-intro {
   margin: 0 0 12px;
@@ -1058,6 +1189,9 @@ watch(() => detail.value?.device_type_id, () => {
  * Mirrors STACK in src/breakpoints.ts.
  */
 @media (max-width: 639px) {
+  .device-config-fields { grid-template-columns: minmax(0, 1fr); }
+  .info-command-row { grid-template-columns: minmax(0, 1fr); }
+  .info-command-row > .btn { justify-self: start; }
   .data-list thead {
     display: none;
   }

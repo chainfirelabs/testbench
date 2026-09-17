@@ -3,7 +3,9 @@ from .api_key import ApiKey
 from .device import Device
 from .device_type import DeviceType
 from .software import Software
+from .software_component import SoftwareComponent
 from .vendor_device import VendorDevice
+from .vendor_device_field_override import VendorDeviceFieldOverride
 from .test import Test
 from .saved_filter import SavedFilter
 from .audit import AuditLog
@@ -17,6 +19,7 @@ from .device_schema import (
     DeviceTypePlugin,
 )
 from .plugin_artifact import PluginArtifact, PluginResultReceipt
+from .ai_provider import AiProviderProfile, AiPluginDefault
 
 __all__ = [
     "User",
@@ -24,7 +27,9 @@ __all__ = [
     "Device",
     "DeviceType",
     "Software",
+    "SoftwareComponent",
     "VendorDevice",
+    "VendorDeviceFieldOverride",
     "Test",
     "SavedFilter",
     "AuditLog",
@@ -37,4 +42,6 @@ __all__ = [
     "DeviceFieldIndex",
     "PluginArtifact",
     "PluginResultReceipt",
+    "AiProviderProfile",
+    "AiPluginDefault",
 ]
