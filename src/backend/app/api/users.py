@@ -1,7 +1,7 @@
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -9,8 +9,9 @@ from ..config import settings
 from ..core.security import hash_password
 from ..db import as_utc, get_db, utcnow
 from ..models import User
-from ..schemas import PasswordReset, UserCreate, UserOut, UserUpdate
+from ..schemas import Page, PasswordReset, UserCreate, UserOut, UserUpdate
 from ..services.audit import field_diff, log_action
+from ..services.list_filters import exclude_clause, excluded_values
 from .deps import require_admin, require_admin_session
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -27,6 +28,65 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(require_admin
         o.is_online = u.last_login_at is not None and (now - as_utc(u.last_login_at)) < ttl
         out.append(o)
     return out
+
+
+@router.get("/paged", response_model=Page[UserOut])
+def list_users_paged(
+    request: Request,
+    search: str | None = None,
+    sort: str = "username",
+    order: str = "asc",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    q = select(User)
+    if search:
+        like = f"%{search}%"
+        q = q.where(or_(User.username.ilike(like), User.email.ilike(like),
+                        User.role.ilike(like), User.auth_provider.ilike(like)))
+    filter_columns = {
+        "username": User.username, "email": User.email, "role": User.role,
+        "auth_provider": User.auth_provider, "created_at": User.created_at,
+        "last_login_at": User.last_login_at,
+    }
+    for key, value in request.query_params.items():
+        if not key.startswith("exclude__"):
+            continue
+        field = key.removeprefix("exclude__")
+        values = excluded_values(value)
+        if field == "is_online":
+            excluded = {str(item).lower() for item in values}
+            cutoff = utcnow() - timedelta(hours=settings.jwt_expires_hours)
+            if "true" in excluded and "false" in excluded:
+                q = q.where(User.id.is_(None))
+            elif "true" in excluded:
+                q = q.where(or_(User.last_login_at.is_(None), User.last_login_at < cutoff))
+            elif "false" in excluded:
+                q = q.where(User.last_login_at >= cutoff)
+            continue
+        expression = filter_columns.get(field)
+        clause = exclude_clause(expression, values) if expression is not None else None
+        if clause is not None:
+            q = q.where(clause)
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    columns = {
+        "username": User.username, "email": User.email, "role": User.role,
+        "auth_provider": User.auth_provider, "created_at": User.created_at,
+        "last_login_at": User.last_login_at,
+    }
+    column = columns.get(sort, User.username)
+    q = q.order_by(column.desc() if order == "desc" else column.asc(), User.id)
+    users = db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all()
+    now = utcnow()
+    ttl = timedelta(hours=settings.jwt_expires_hours)
+    items = []
+    for item in users:
+        output = UserOut.model_validate(item)
+        output.is_online = item.last_login_at is not None and (now - as_utc(item.last_login_at)) < ttl
+        items.append(output)
+    return Page(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.post("", response_model=UserOut, status_code=201)

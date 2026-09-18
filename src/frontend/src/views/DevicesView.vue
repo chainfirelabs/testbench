@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import DataTable, { type RowAction } from '../components/DataTable.vue'
+import DataTable, { type RemoteTableRequest, type RowAction } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
@@ -10,6 +10,7 @@ import DetailModal from '../components/DetailModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import CheckoutDialog from '../components/CheckoutDialog.vue'
 import PluginRunModal from '../components/PluginRunModal.vue'
+import DeviceFieldsModal from '../components/DeviceFieldsModal.vue'
 import { daysFromToday, daysUntil } from '../dates'
 import { api, downloadFile } from '../api/client'
 import { useImportProgress } from '../importProgress'
@@ -32,7 +33,8 @@ import {
 import { invokePluginAction, usePluginActions, type PluginAction } from '../pluginActions'
 import { actionConfirmation } from '../pluginActionConfirmation'
 import { deviceTypes, loadDeviceTypes } from '../deviceTypes'
-import { deviceActionUnavailableReason, deviceDownloadFilename, loadDevicePages } from '../deviceInventory'
+import { deviceActionUnavailableReason, deviceDownloadFilename } from '../deviceInventory'
+import { remoteTableParams } from '../remoteTable'
 
 const auth = useAuthStore()
 const route = useRoute()
@@ -42,6 +44,7 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
+const customizingFields = ref(false)
 const { importState, runImport, closeImport } = useImportProgress()
 
 /*
@@ -170,10 +173,7 @@ function rowClass(row: any): string | null {
  * of replacing what they are showing.
  */
 const showOverdueOnly = ref(false)
-const overdueCount = computed(() => rows.value.filter(isOverdue).length)
-const visibleRows = computed(() =>
-  showOverdueOnly.value ? rows.value.filter(isOverdue) : rows.value,
-)
+const overdueCount = ref(0)
 
 const scanAll = ref<{ running: boolean; scanned: number; total: number }>({
   running: false,
@@ -235,26 +235,21 @@ function isRowDirty(row: any): boolean {
 }
 
 async function load() {
-  loadController?.abort()
-  const controller = new AbortController()
-  loadController = controller
-  const typeFilter = activeTypeKey.value ? `&device_type=${encodeURIComponent(activeTypeKey.value)}` : ''
-  loadProgress.value = { loaded: 0, total: 0 }
-  loadError.value = ''
-  try {
-    const loaded = await loadDevicePages<any>(
-      (offset) => api(`/devices?page_size=500&offset=${offset}&sort=unique_id&order=asc${typeFilter}`,
-        { signal: controller.signal }),
-      (loaded, total) => {
-        if (!controller.signal.aborted) loadProgress.value = { loaded, total }
-      },
-    )
-    if (!controller.signal.aborted) rows.value = loaded
-  } catch (error: any) {
-    if (!controller.signal.aborted) loadError.value = error.message || 'Could not load devices'
-  } finally {
-    if (loadController === controller) loadProgress.value = null
+  table.value?.reapplyView()
+}
+
+async function loadRemoteDevices(request: RemoteTableRequest) {
+  const params = remoteTableParams(request, {
+    device_type: activeTypeKey.value || undefined,
+    overdue: showOverdueOnly.value || undefined,
+  })
+  if (!request.sortModel.length) {
+    params.set('sort', 'unique_id')
+    params.set('order', 'asc')
   }
+  const page = await api<any>(`/devices?${params}`)
+  rows.value = page.items
+  return { rows: page.items, total: page.total }
 }
 
 /**
@@ -494,7 +489,7 @@ async function createDevice(values: Record<string, any>) {
   try {
     const created = await api<any>('/devices', { method: 'POST', body: JSON.stringify(devicePayload(values)) })
     // Newest first, so the row you just made is where you are looking.
-    rows.value.unshift(created)
+    await load()
     // The values just written are the ones the next device is most likely to
     // want offered.
     invalidateSuggestions('devices')
@@ -607,6 +602,7 @@ async function deleteRow(row: any) {
     await api(`/devices/${row.id}`, { method: 'DELETE' })
     rows.value = rows.value.filter((r) => toRaw(r) !== toRaw(row))
     dirty.value.delete(row.id)
+    await load()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -621,6 +617,7 @@ async function deleteSelected() {
     rows.value = rows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) dirty.value.delete(id)
     selected.value = []
+    await load()
     showToast(`Deleted ${ids.length} device${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -815,91 +812,11 @@ function pollScanStatus() {
   }, 2000)
 }
 
-/* ---------- keeping the fleet fresh ----------
- *
- * The grid is loaded once and then only ever hears about changes this browser
- * made. A device checked back in by whoever had it, or marked broken from the
- * device page in another tab, sat here as it was until someone reloaded — and
- * a filtered view kept showing it, because a filter is applied to the data as
- * it stood when it arrived.
- *
- * So the fleet is re-read on a slow interval and merged into the rows already
- * on screen, field by field. Merging rather than replacing is the point: the
- * row objects survive, so selection, unsaved edits and the grid's own state
- * survive with them, and only the cells that actually changed are repainted —
- * after which the filter and sort are re-run, so a row that no longer belongs
- * in the view leaves it.
- */
-const FLEET_POLL_MS = 15000
-let fleetPollTimer: any = null
+/* Refresh when the user returns, without continually repainting visible rows. */
 let fleetInFlight = false
 
-/** Value equality that also holds for the JSON columns, which are new objects
- * on every response and so are never `===` to the ones already in the row. */
-function sameValue(a: any, b: any): boolean {
-  if (a === b) return true
-  if (a && b && typeof a === 'object' && typeof b === 'object') {
-    return JSON.stringify(a) === JSON.stringify(b)
-  }
-  return false
-}
-
 async function patchFleet() {
-  const typeFilter = activeTypeKey.value ? `&device_type=${encodeURIComponent(activeTypeKey.value)}` : ''
-  const page = await api<any>(`/devices?page_size=500${typeFilter}`)
-  const items: any[] = page.items
-  const byId = new Map(items.map((d: any) => [d.id, d]))
-
-  const changed: string[] = []
-  for (const row of rows.value) {
-    const server = byId.get(row.id)
-    if (!server) continue
-    const pending = dirty.value.get(row.id)
-    let differs = false
-    for (const [field, value] of Object.entries(server)) {
-      // The document is merged key by key rather than replaced wholesale.
-      // Every installation-defined value lives inside it, so replacing it
-      // would throw away exactly the edits the check below exists to protect.
-      if (field === 'data') {
-        const merged = { ...(row.data || {}) }
-        for (const [key, item] of Object.entries((value || {}) as Record<string, any>)) {
-          if (pending?.has(key)) continue
-          if (sameValue(merged[key], item)) continue
-          merged[key] = item
-          differs = true
-        }
-        // A key the server no longer has was cleared elsewhere; drop it unless
-        // this browser is part-way through editing it.
-        for (const key of Object.keys(merged)) {
-          if (pending?.has(key) || key in ((value || {}) as Record<string, any>)) continue
-          delete merged[key]
-          differs = true
-        }
-        if (differs) row.data = merged
-        continue
-      }
-      // An unsaved edit is the user's work in progress and outranks the
-      // server's copy of that field; every other field is fair game.
-      if (pending?.has(field)) continue
-      if (sameValue(row[field], value)) continue
-      row[field] = value
-      differs = true
-    }
-    if (differs) changed.push(row.id)
-  }
-
-  // Devices created or deleted elsewhere. The array is rebuilt for those —
-  // that is the change the grid watches — and rows keep their identity across
-  // it because the grid keys them by id.
-  const known = new Set(rows.value.map((r) => r.id))
-  const added = items.filter((d: any) => !known.has(d.id))
-  const dropped = rows.value.filter((r) => r.id && !byId.has(r.id))
-  if (added.length || dropped.length) {
-    for (const r of dropped) dirty.value.delete(r.id)
-    rows.value = [...rows.value.filter((r) => !r.id || byId.has(r.id)), ...added]
-  } else if (changed.length) {
-    table.value?.refreshRows(changed)
-  }
+  table.value?.reapplyView()
 }
 
 async function refreshFleet() {
@@ -925,14 +842,10 @@ function onVisibilityChange() {
 }
 
 function startFleetPoll() {
-  if (fleetPollTimer) return
-  fleetPollTimer = setInterval(refreshFleet, FLEET_POLL_MS)
   document.addEventListener('visibilitychange', onVisibilityChange)
 }
 
 function stopFleetPoll() {
-  if (fleetPollTimer) clearInterval(fleetPollTimer)
-  fleetPollTimer = null
   document.removeEventListener('visibilitychange', onVisibilityChange)
 }
 
@@ -1203,6 +1116,10 @@ onMounted(async () => {
     loadPluginActions(activeTypeKey.value === UNCATEGORIZED ? undefined : activeTypeKey.value),
   ])
   await load()
+  try {
+    const overdue = await api<any>('/devices/overdue?page_size=1')
+    overdueCount.value = overdue.total
+  } catch { /* the overdue shortcut is optional */ }
   await restoreActivePluginRuns()
   startFleetPoll()
   /*
@@ -1233,6 +1150,8 @@ watch(activeTypeKey, async () => {
   profiles.value?.applyDefault()
 })
 
+watch(showOverdueOnly, () => load())
+
 // Leaving the page ends the polling with it; nothing here outlives the view.
 onBeforeUnmount(() => {
   loadController?.abort()
@@ -1250,6 +1169,9 @@ onBeforeUnmount(() => {
         <!-- The primary action stays outside the overflow: it is the one thing
              on this page you most often want, and it should be one tap. -->
         <button v-if="auth.canWrite" class="btn btn-primary" @click="openNew">+ New device</button>
+        <button v-if="auth.isAdmin" class="btn" @click="customizingFields = true">
+          Customize fields
+        </button>
         <!-- Only offered when there is something to see: a button reading
              "Overdue (0)" is a permanent reminder of nothing. -->
         <button
@@ -1306,13 +1228,6 @@ onBeforeUnmount(() => {
             Export CSV (raw)
           </button>
         </OverflowMenu>
-        <FilterProfilesMenu
-          ref="profiles"
-          :key="layoutScope"
-          :entity="layoutScope"
-          :get-state="() => table?.getState()"
-          :apply-state="(s) => table?.applyState(s)"
-        />
       </div>
     </div>
     <p v-if="loadProgress" role="status">
@@ -1322,7 +1237,8 @@ onBeforeUnmount(() => {
     <DataTable
       ref="table"
       :columns="columns"
-      :rows="visibleRows"
+      :rows="rows"
+      :remote-loader="loadRemoteDevices"
       :editable="auth.canWrite"
       :selectable="auth.canWrite"
       :dirty-ids="dirtyIds"
@@ -1340,6 +1256,15 @@ onBeforeUnmount(() => {
       @selection-change="(r: any[]) => (selected = r)"
       @grid-ready="onGridReady"
     >
+      <template #table-actions>
+        <FilterProfilesMenu
+          ref="profiles"
+          :key="layoutScope"
+          :entity="layoutScope"
+          :get-state="() => table?.getState()"
+          :apply-state="(s) => table?.applyState(s)"
+        />
+      </template>
       <template #selection-actions>
         <button
           v-if="auth.canWrite && selected.length"
@@ -1360,6 +1285,13 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </DataTable>
+    <DeviceFieldsModal
+      v-if="customizingFields"
+      :type-key="activeTypeKey && activeTypeKey !== UNCATEGORIZED ? activeTypeKey : undefined"
+      :title="`${pageTitle} Fields`"
+      @close="customizingFields = false"
+      @saved="loadSchema"
+    />
     <FormModal
       v-if="bulkEditing"
       :title="`Edit ${selected.length} selected devices`"

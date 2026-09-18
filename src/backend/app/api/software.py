@@ -1,7 +1,7 @@
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
@@ -28,6 +28,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import download_response, export_response, parse_import, strip_nulls, template_csv
+from ..services.list_filters import exclude_clause, excluded_values
 from ..services.query import row_error, row_scope
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
 from .devices import device_out
@@ -317,10 +318,17 @@ def _query_software(db: Session, search: str | None, latest_only: bool = False, 
         ]
         q = q.where(or_(*searchable) if searchable else Software.id.ilike(like))
     for key, value in (filters or {}).items():
-        field = catalog.get(key)
+        excluded = key.startswith("exclude__")
+        field = catalog.get(key.removeprefix("exclude__") if excluded else key)
         if not field or field.key in {"vendor_device_count", "version_count"}:
             continue
         expression = entity_field_expression(Software, field)
+        if excluded:
+            values = [coerce_query_value(field, item) for item in excluded_values(value)]
+            clause = exclude_clause(expression, values)
+            if clause is not None:
+                q = q.where(clause)
+            continue
         value = coerce_query_value(field, value)
         q = q.where(expression == value if field.indexed else expression.ilike(f"%{value}%"))
     if latest_only:
@@ -420,46 +428,97 @@ def get_software(software_id: str, db: Session = Depends(get_db), user: User = D
 
 
 @router.get("/{software_id}/tested-devices", response_model=SoftwareTestedDevicesOut)
-def get_tested_devices(software_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def get_tested_devices(
+    software_id: str,
+    search: str | None = None,
+    sort: str = "unique_id",
+    order: str = "asc",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """Devices this software has actually been tested against (from the tests table)."""
     software = _get_software(db, software_id)
     if software is None:
         raise HTTPException(status_code=404, detail="Software not found")
+    q = select(
+        Test.component_id, Test.device_id,
+        func.count(Test.id).label("test_count"),
+        func.max(Test.run_at).label("last_test_at"),
+        func.sum(case((Test.outcome == "pass", 1), else_=0)).label("passes"),
+        func.sum(case((Test.outcome == "warn", 1), else_=0)).label("warnings"),
+        func.sum(case((Test.outcome == "fail", 1), else_=0)).label("failures"),
+    ).join(Device, Test.device_id == Device.id).outerjoin(
+        SoftwareComponent, Test.component_id == SoftwareComponent.id,
+    ).where(Test.software_id == software.id)
+    if search:
+        like = f"%{search}%"
+        q = q.where(or_(
+            Device.unique_id.ilike(like), Device.make.ilike(like), Device.model.ilike(like),
+            SoftwareComponent.name.ilike(like), SoftwareComponent.version.ilike(like),
+        ))
+    device_filters = {
+        "unique_id": Device.unique_id, "make": Device.make, "model": Device.model,
+        "firmware_version": Device.firmware_version,
+        "hardware_version": Device.hardware_version, "architecture": Device.architecture,
+    }
+    component_filters = {
+        "component_name": SoftwareComponent.name,
+        "component_version": SoftwareComponent.version,
+    }
+    for key, value in request.query_params.items():
+        if key in {"search", "sort", "order", "page", "page_size"} or not value:
+            continue
+        excluded = key.startswith("exclude__")
+        field = key.removeprefix("exclude__") if excluded else key
+        expression = device_filters.get(field)
+        if expression is None:
+            expression = component_filters.get(field)
+        if expression is not None:
+            if excluded:
+                clause = exclude_clause(expression, excluded_values(value))
+                if clause is not None:
+                    q = q.where(clause)
+            else:
+                q = q.where(expression.ilike(f"%{value}%"))
+    q = q.group_by(
+        Test.component_id, Test.device_id,
+        Device.unique_id, Device.make, Device.model, Device.firmware_version,
+        Device.hardware_version, Device.architecture,
+        SoftwareComponent.name, SoftwareComponent.version,
+    )
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    sort_columns = {
+        "unique_id": Device.unique_id, "make": Device.make, "model": Device.model,
+        "component_name": SoftwareComponent.name, "test_count": func.count(Test.id),
+        "last_test_at": func.max(Test.run_at),
+    }
+    column = sort_columns.get(sort, Device.unique_id)
+    q = q.order_by(column.desc() if order == "desc" else column.asc(), Test.device_id)
+    grouped = db.execute(q.offset((page - 1) * page_size).limit(page_size)).all()
     components = _bundle_components(db, {software.id}).get(software.id, [])
     component_by_id = {item.id: item for item in components}
-    tests = list(db.scalars(select(Test).where(Test.software_id == software.id)).all())
-    # Tests always belong to the suite. component_id optionally places one
-    # beneath a suite-scoped component; it never points at standalone software.
-    by_device: dict[tuple[str | None, str], dict] = {}
-    for test in tests:
-        component = component_by_id.get(test.component_id)
-        key = (component.id if component else None, test.device_id)
-        entry = by_device.setdefault(key, {
-            "count": 0, "last": None, "outcomes": {}, "component": component,
-        })
-        entry["count"] += 1
-        if test.run_at and (entry["last"] is None or test.run_at > entry["last"]):
-            entry["last"] = test.run_at
-        entry["outcomes"][test.outcome] = entry["outcomes"].get(test.outcome, 0) + 1
-    devices = list(
-        db.scalars(select(Device).where(Device.id.in_({key[1] for key in by_device}))).all()
-    ) if by_device else []
+    devices = list(db.scalars(select(Device).where(
+        Device.id.in_({row.device_id for row in grouped})
+    )).all()) if grouped else []
     device_by_id = {device.id: device for device in devices}
     cache: dict = {}
-    ordered = sorted(by_device.items(), key=lambda pair: (
-        pair[1]["component"].position if pair[1]["component"] else -1,
-        device_by_id[pair[0][1]].unique_id,
-    ))
     return SoftwareTestedDevicesOut(
         software_id=software.id,
         devices=[
             SoftwareTestedDeviceOut(
-                device=device_out(db, device_by_id[device_id], cache),
-                test_count=entry["count"], last_test_at=entry["last"],
-                outcomes=entry["outcomes"], component=entry["component"],
+                device=device_out(db, device_by_id[row.device_id], cache),
+                test_count=row.test_count, last_test_at=row.last_test_at,
+                outcomes={key: value for key, value in {
+                    "pass": row.passes, "warn": row.warnings, "fail": row.failures,
+                }.items() if value},
+                component=component_by_id.get(row.component_id),
             )
-            for (_component_id, device_id), entry in ordered
+            for row in grouped
         ],
+        total=total, page=page, page_size=page_size,
     )
 
 

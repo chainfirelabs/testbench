@@ -7,17 +7,20 @@ inventory, so most claims here point at make/model combos we actually own (that
 is what makes them comparable against test history) and a minority point at
 hardware nobody here has.
 
-Run: python3 seed_vendor_devices.py [--force]
+Run: python3 seed_vendor_devices.py [--force] [--count N]
 """
 import json
+import argparse
+import os
 import random
 import sys
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-BASE = "http://localhost:8001/api/v1"
+BASE = os.environ.get("TB_SEED_API_BASE", "http://localhost:8001/api/v1")
 random.seed(1337)  # reproducible dataset
+DEFAULT_COUNT = 300
 
 
 def req(method, path, token=None, body=None):
@@ -81,7 +84,7 @@ NOTES = {
                 "vendor roadmap item"],
 }
 
-IDENTITY_FIELDS = ("vendor", "make", "model", "firmware_version",
+IDENTITY_FIELDS = ("make", "model", "firmware_version",
                    "hardware_version", "architecture")
 
 
@@ -90,19 +93,16 @@ def match_key(v):
     return "|".join((v.get(f) or "").strip().lower() for f in IDENTITY_FIELDS)
 
 
-def make_claim(name, make, model, firmware):
+def make_claim(name, make, model, firmware, hardware=None, architecture=None):
     status = random.choice(SUPPORT_MIX)
     claim = {
-        "vendor": make,
         "make": make,
         "model": model,
         # Claims often lag or lead the firmware actually on the shelf.
         "firmware_version": firmware if random.random() < 0.6 else
             f"{random.randint(1, 12)}.{random.randint(0, 9)}.{random.randint(0, 9)}",
-        "hardware_version": (f"Rev {random.choice('ABC')}"
-                             if random.random() < 0.7 else None),
-        "architecture": (random.choice(ARCH_BY_MAKE.get(make, ["x86_64"]))
-                         if random.random() < 0.8 else None),
+        "hardware_version": hardware if hardware is not None else f"Rev {random.choice('ABC')}",
+        "architecture": architecture or random.choice(ARCH_BY_MAKE.get(make, ["x86_64"])),
         "support_status": status,
         "source": random.choice(SOURCES).format(name=name, vendor=make),
         "misc_data": {
@@ -117,44 +117,97 @@ def make_claim(name, make, model, firmware):
     return claim
 
 
-def main():
-    force = "--force" in sys.argv
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Seed vendor compatibility with collapsed firmware groups and unique devices."
+    )
+    parser.add_argument("--url", default=BASE, help="TestBench API base URL (env: TB_SEED_API_BASE)")
+    parser.add_argument("--api-key", default=os.environ.get("TB_SEED_API_KEY"),
+                        help="API token (env: TB_SEED_API_KEY)")
+    parser.add_argument("--force", action="store_true", help="add claims when claims already exist")
+    parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="vendor-device records to create")
+    args = parser.parse_args()
+    if args.count < 1:
+        parser.error("--count must be at least 1")
+    return args
 
-    s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
-    if s != 200:
-        sys.exit(f"login failed: {s} {login}")
-    tok = login["access_token"]
+
+def firmware_variant(value, offset):
+    parts = str(value or "1.0.0").split(".")
+    try:
+        parts[-1] = str(int(parts[-1]) + offset)
+        return ".".join(parts)
+    except ValueError:
+        return f"{value or '1.0'}-{offset}"
+
+
+def main():
+    global BASE
+    args = parse_args()
+    BASE = args.url.rstrip("/")
+    if not BASE.endswith("/api/v1"):
+        BASE += "/api/v1"
+
+    if args.api_key:
+        tok = args.api_key
+    else:
+        s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
+        if s != 200:
+            sys.exit(f"login failed: {s} {login}")
+        tok = login["access_token"]
 
     s, softs = req("GET", "/software?page_size=500", tok)
     if s != 200:
         sys.exit(f"software fetch failed: {s} {softs}")
     software = softs["items"]
     existing = sum(sw.get("vendor_device_count") or 0 for sw in software)
-    if existing and not force:
+    if existing and not args.force:
         sys.exit(f"DB already has {existing} vendor devices — pass --force to add more")
 
     s, devs = req("GET", "/devices?page_size=500", tok)
     if s != 200:
         sys.exit(f"device fetch failed: {s} {devs}")
     # Distinct hardware we actually own, so claims line up with test evidence.
-    owned = sorted({(d["make"], d["model"], d.get("firmware_version") or "")
+    owned = sorted({(d["make"], d["model"], d.get("firmware_version") or "",
+                     d.get("hardware_version") or "Rev A", d.get("architecture") or "x86_64")
                     for d in devs["items"] if d.get("make") and d.get("model")})
     print(f"software: {len(software)}   owned make/model combos: {len(owned)}")
 
-    bodies = []
-    for sw in software:
-        k = random.randint(4, 12)
-        seen = set()
-        for _ in range(k):
-            # 70/30 split: mostly hardware we own, some the vendor lists but we do not have.
-            make, model, fw = (random.choice(owned) if random.random() < 0.7
-                               else random.choice(UNOWNED))
-            claim = make_claim(sw["name"], make, model, fw)
-            key = match_key(claim)
-            if key in seen:
-                continue
-            seen.add(key)
-            bodies.append((sw["id"], claim))
+    if not software:
+        sys.exit("no software to attach vendor devices to — run seed_software.py first")
+    if not owned:
+        sys.exit("no inventory hardware to mirror — run seed_dev_data.py first")
+
+    # Alternate grouped firmware records with unique hardware. Each grouped
+    # pair shares make/model/hardware/architecture and differs only by firmware,
+    # exactly the shape the Vendor Devices table collapses.
+    bodies, seen_by_software, group_by_software = [], {}, {}
+    attempts = 0
+    while len(bodies) < args.count and attempts < args.count * 20:
+        attempts += 1
+        sw = software[len(bodies) % len(software)]
+        seen = seen_by_software.setdefault(sw["id"], set())
+        grouped_variant = (len(bodies) // len(software)) % 3 == 1 and sw["id"] in group_by_software
+        if grouped_variant:
+            make, model, fw, hardware, architecture = group_by_software[sw["id"]]
+            fw = firmware_variant(fw, 1 + attempts % 3)
+        elif random.random() < 0.7:
+            make, model, fw, hardware, architecture = random.choice(owned)
+            group_by_software[sw["id"]] = (make, model, fw, hardware, architecture)
+        else:
+            make, model, fw = random.choice(UNOWNED)
+            hardware = f"Rev {random.choice('ABC')}"
+            architecture = random.choice(ARCH_BY_MAKE.get(make, ["x86_64"]))
+            group_by_software[sw["id"]] = (make, model, fw, hardware, architecture)
+        claim = make_claim(sw["name"], make, model, fw, hardware, architecture)
+        key = match_key(claim)
+        if key in seen:
+            continue
+        seen.add(key)
+        bodies.append((sw["id"], claim))
+
+    if len(bodies) < args.count:
+        sys.exit(f"could only build {len(bodies)} unique vendor devices out of {args.count} requested")
 
     print(f"posting {len(bodies)} vendor devices...")
 

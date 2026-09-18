@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { collapseVendorDevices } from '../src/vendorDeviceGroups.ts'
+import { collapseVendorDevices, selectedVendorDeviceIds } from '../src/vendorDeviceGroups.ts'
 
 test('collapses make, model, and hardware while retaining every firmware record', () => {
   const rows = [
@@ -26,4 +26,14 @@ test('a selected older firmware becomes the visible underlying record', () => {
 
   assert.equal(collapsed[0].id, 'old')
   assert.equal(collapsed[0].firmware_version, '1.0')
+})
+
+test('expands selected collapsed groups to every firmware record id', () => {
+  const grouped = collapseVendorDevices([
+    { id: 'new', make: 'Acme', model: 'Router', hardware_version: '1', firmware_version: '2.0' },
+    { id: 'old', make: 'Acme', model: 'Router', hardware_version: '1', firmware_version: '1.0' },
+  ])[0]
+  const single = { id: 'single', make: 'Acme', model: 'Switch' }
+
+  assert.deepEqual(selectedVendorDeviceIds([grouped, single]), ['new', 'old', 'single'])
 })

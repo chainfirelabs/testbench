@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Seed TestBench with correlated dev data:
-~100 devices, 50 software (with device targets), 500 tests.
+100 devices, 50 component software suites, 300 vendor devices, and 500 tests.
 
-Every test references real software AND a device it actually targets,
-so Expected Software / Verified Tests tabs are meaningful.
-Run: python3 seed_dev_data.py [--force]
+Tests reference real software, optional suite components, and inventory devices.
+Vendor compatibility includes matching inventory hardware, collapsed firmware
+groups, and vendor-only devices.
+Run: python3 seed_dev_data.py [--force] [--devices N] [--software N]
+       [--tests N] [--vendor-devices N] [--components N]
 """
 import json
+import argparse
+import os
 import random
 import sys
 import urllib.error
@@ -14,8 +18,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-BASE = "http://localhost:8001/api/v1"
+BASE = os.environ.get("TB_SEED_API_BASE", "http://localhost:8001/api/v1")
 random.seed(42)  # reproducible dataset
+DEFAULT_DEVICES = 100
+DEFAULT_SOFTWARE = 50
+DEFAULT_TESTS = 500
+DEFAULT_VENDOR_DEVICES = 300
 
 # ---------------------------------------------------------------- helpers
 
@@ -43,6 +51,20 @@ def parallel(method, path_fn, bodies, token, workers=8):
     with ThreadPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(one, enumerate(bodies)))
 
+
+def load_all(path, token, page_size=1000):
+    """Read a complete paginated collection without imposing a seed-size cap."""
+    items, page = [], 1
+    while True:
+        separator = "&" if "?" in path else "?"
+        status, result = req("GET", f"{path}{separator}page={page}&page_size={page_size}", token)
+        if status != 200:
+            sys.exit(f"fetch failed for {path}: {status} {result}")
+        items.extend(result["items"])
+        if len(items) >= result["total"]:
+            return items
+        page += 1
+
 # ---------------------------------------------------------------- devices
 
 VENDORS = {
@@ -69,17 +91,14 @@ LOCATIONS = ["Lab A", "Lab B", "Rack R1", "Rack R2", "Rack R3", "Rack R4",
 ARCH_MIX = (["x86_64"] * 22 + ["arm64"] * 16 + ["aarch64"] * 10 + ["arm"] * 14 +
             ["mipsbe"] * 12 + ["mipsel"] * 10 + ["x86"] * 8 + ["ppc"] * 5 +
             ["tilegx"] * 2 + ["lexra_mips"] * 1)
-STATUS_MIX = (["available"] * 55 + ["checked_out"] * 12 + ["in_testing"] * 12 +
-              ["maintenance"] * 12 + ["retired"] * 9)
-
-
-CHECKOUT_USERS = ["tester1", "tester2", "tester3"]
+STATUS_MIX = (["available"] * 55 + ["checked_out"] * 12 + ["inventory"] * 18 +
+              ["missing"] * 7 + ["broken"] * 8)
 
 
 def make_device(i):
     make = random.choice(list(VENDORS))
     models, fw = VENDORS[make]
-    status = STATUS_MIX[i]
+    status = STATUS_MIX[i % len(STATUS_MIX)]
     n = i + 1
     d = {
         "unique_id": f"dev-{n:04d}",
@@ -93,7 +112,7 @@ def make_device(i):
         "architecture": random.choice(ARCH_MIX),
         "hardware_version": f"Rev {random.choice(['A', 'B', 'C'])}",
         "lan_ip": f"10.0.{random.randint(0, 3)}.{random.randint(2, 250)}",
-        "online_status": status in ("available", "in_testing") and random.random() < 0.9,
+        "online_status": status in ("available", "checked_out") and random.random() < 0.9,
         "misc_data": {
             "serial_number": f"SN{random.randint(10**9, 10**10 - 1)}",
             "asset_tag": f"AST-{n:05d}",
@@ -106,6 +125,36 @@ def make_device(i):
     if d["online_status"]:
         d["last_seen_online"] = (datetime.now(timezone.utc) - timedelta(hours=random.randint(0, 72))).isoformat()
     return d
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Seed correlated devices, component suites, and tests.")
+    parser.add_argument("--url", default=BASE, help="TestBench API base URL (env: TB_SEED_API_BASE)")
+    parser.add_argument("--api-key", default=os.environ.get("TB_SEED_API_KEY"),
+                        help="API token (env: TB_SEED_API_KEY)")
+    parser.add_argument("--force", action="store_true", help="add data when devices already exist")
+    parser.add_argument("--devices", type=int, default=DEFAULT_DEVICES)
+    parser.add_argument("--software", type=int, default=DEFAULT_SOFTWARE)
+    parser.add_argument("--tests", type=int, default=DEFAULT_TESTS)
+    parser.add_argument("--vendor-devices", type=int, default=DEFAULT_VENDOR_DEVICES)
+    parser.add_argument("--components", type=int, default=3, help="components per software suite")
+    args = parser.parse_args()
+    if args.devices < 1 or args.tests < 1 or args.vendor_devices < 1:
+        parser.error("--devices, --tests, and --vendor-devices must be at least 1")
+    if args.software < 1:
+        parser.error("--software must be at least 1")
+    if args.components < 0:
+        parser.error("--components cannot be negative")
+    return args
+
+
+def software_catalogue(count):
+    """Use realistic fixtures first, then deterministic synthetic suites."""
+    entries = list(SOFTWARE[:count])
+    while len(entries) < count:
+        number = len(entries) + 1
+        entries.append((f"validation-suite-{number:04d}", "software", 2))
+    return entries
 
 # ---------------------------------------------------------------- software
 
@@ -184,93 +233,155 @@ def test_data(category, outcome):
 
 
 def main():
-    force = "--force" in sys.argv
+    global BASE
+    args = parse_args()
+    BASE = args.url.rstrip("/")
+    if not BASE.endswith("/api/v1"):
+        BASE += "/api/v1"
 
-    s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
-    if s != 200:
-        sys.exit(f"login failed: {s} {login}")
-    tok = login["access_token"]
-
-    s, existing = req("GET", "/devices?page_size=1", tok)
-    if existing.get("total", 0) > 0 and not force:
-        sys.exit(f"DB already has {existing['total']} devices — pass --force to seed anyway")
-
-    # ---- 0. a few tester users (so checkouts/tests have varied actors)
-    print("creating tester users...")
-    for u in CHECKOUT_USERS:
-        s2, r2 = req("POST", "/users", tok,
-                     {"username": u, "password": f"{u}-pass", "role": "tester"})
-        if s2 not in (200, 201):
-            print(f"  WARN user {u}: {s2} {r2}")
-    tester_toks = {}
-    for u in CHECKOUT_USERS:
-        s2, r2 = req("POST", "/auth/login", body={"username": u, "password": f"{u}-pass"})
-        if s2 == 200:
-            tester_toks[u] = r2["access_token"]
-    print(f"  testers: {len(tester_toks)}")
+    if args.api_key:
+        tok = args.api_key
+    else:
+        s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
+        if s != 200:
+            sys.exit(f"login failed: {s} {login}")
+        tok = login["access_token"]
 
     # ---- 1. devices
-    print("creating 100 devices...")
-    bodies = [make_device(i) for i in range(100)]
+    existing_devices = load_all("/devices", tok)
+    existing_by_uid = {item["unique_id"].casefold(): item for item in existing_devices}
+    planned = [make_device(i) for i in range(args.devices)]
+    bodies = [body for body in planned if body["unique_id"].casefold() not in existing_by_uid]
+    print(f"ensuring {args.devices} devices ({len(bodies)} to create, {args.devices - len(bodies)} reused)...")
     results = parallel("POST", lambda i: "/devices", bodies, tok)
     ok = [r for r in results if r[1] == 201]
     bad = [r for r in results if r[1] != 201]
     if bad:
         sys.exit(f"device failures: {bad[:3]}")
-    devices = [r[2] for r in sorted(results, key=lambda r: r[0])]
-    print(f"  devices: {len(devices)} created")
+    created_devices = [r[2] for r in sorted(results, key=lambda r: r[0])]
+    by_uid = {**existing_by_uid, **{item["unique_id"].casefold(): item for item in created_devices}}
+    devices = [by_uid[body["unique_id"].casefold()] for body in planned]
+    print(f"  devices: {len(created_devices)} created, {len(devices) - len(created_devices)} reused")
 
     # ---- 1b. transition checked_out devices (stamps checked_out_by/at)
-    checkout_ids = [i for i in range(100) if STATUS_MIX[i] == "checked_out"]
-    for n, i in enumerate(checkout_ids):
-        tok_n = list(tester_toks.values())[n % len(tester_toks)]
-        req("PATCH", f"/devices/{devices[i]['id']}", tok_n, {"status": "checked_out"})
+    checkout_ids = [i for i in range(args.devices) if STATUS_MIX[i % len(STATUS_MIX)] == "checked_out"]
+    for i in checkout_ids:
+        req("PATCH", f"/devices/{devices[i]['id']}", tok, {"status": "checked_out"})
     print(f"  checkouts: {len(checkout_ids)} stamped")
 
     # ---- 2. software
-    print("creating 50 software...")
+    selected_software = software_catalogue(args.software)
+    print(f"ensuring {args.software} software suites...")
     software_bodies = [
         {"name": name, "version": f"{random.randint(1, 3)}.{random.randint(0, 9)}.{random.randint(0, 9)}",
          "docs": f"https://software.example.com/{name}",
-         "misc_data": {"category": cat, "description": f"{name} verification suite"}}
-        for name, cat, _w in SOFTWARE
+         "misc_data": {"category": cat, "description": f"{name} verification suite"},
+         "bundle_components": [
+             {"name": f"{name} {label}", "version": "1.0"}
+             for label in ["Core", "Agent", "CLI", "API", "Reporting"][:args.components]
+         ]}
+        for name, cat, _w in selected_software
     ]
-    results = parallel("POST", lambda i: "/software", software_bodies, tok)
+    existing_software = load_all("/software", tok)
+    latest_by_name = {}
+    for item in existing_software:
+        key = item["name"].casefold()
+        if item.get("is_latest") or key not in latest_by_name:
+            latest_by_name[key] = item
+    missing_software = [body for body in software_bodies if body["name"].casefold() not in latest_by_name]
+    results = parallel("POST", lambda i: "/software", missing_software, tok)
     bad = [r for r in results if r[1] != 201]
     if bad:
         sys.exit(f"software failures: {bad[:3]}")
-    software = [r[2] for r in sorted(results, key=lambda r: r[0])]
-    print(f"  software: {len(software)} created")
+    created_software = [r[2] for r in sorted(results, key=lambda r: r[0])]
+    latest_by_name.update({item["name"].casefold(): item for item in created_software})
+    software = []
+    for body in software_bodies:
+        suite = latest_by_name[body["name"].casefold()]
+        existing_components = suite.get("bundle_components") or []
+        known = {(item["name"].casefold(), str(item.get("version") or "")) for item in existing_components}
+        additions = [item for item in body["bundle_components"]
+                     if (item["name"].casefold(), str(item.get("version") or "")) not in known]
+        if additions:
+            status, updated = req("PATCH", f"/software/{suite['id']}", tok, {
+                "bundle_components": [*existing_components, *additions],
+            })
+            if status != 200:
+                sys.exit(f"component update failed for {suite['name']}: {status} {updated}")
+            suite = updated
+        software.append(suite)
+    print(f"  software: {len(created_software)} created, {len(software) - len(created_software)} reused")
 
-    # ---- 3. software -> device targets (correlation core)
-    print("assigning software targets...")
-    eligible = [d for d in devices if d["status"] != "retired"]
+    # ---- 3. vendor compatibility (correlation core)
+    print(f"creating {args.vendor_devices} vendor devices...")
+    eligible = [d for d in devices if d["status"] not in ("missing", "broken")]
     targets_by_software = {}
-    target_bodies = []
-    for software, (name, cat, _w) in zip(software, SOFTWARE):
-        k = random.randint(5, 15)
+    for suite, (name, cat, _w) in zip(software, selected_software):
+        k = min(len(eligible), random.randint(5, 15))
         picked = random.sample(eligible, k)
-        targets_by_software[software["id"]] = picked
-        target_bodies.append((software["id"], {"device_ids": [d["id"] for d in picked]}))
+        targets_by_software[suite["id"]] = picked
 
-    def put_targets(i_id):
-        tid, body = i_id
-        return req("PUT", f"/software/{tid}/targets", tok, body)
+    vendor_bodies = []
+    group_by_software = {}
+    seen_by_software = {}
+    while len(vendor_bodies) < args.vendor_devices:
+        suite = software[len(vendor_bodies) % len(software)]
+        suite_id = suite["id"]
+        seen = seen_by_software.setdefault(suite_id, set())
+        cycle = (len(vendor_bodies) // len(software)) % 3
+        if cycle == 1 and suite_id in group_by_software:
+            device = group_by_software[suite_id]
+            firmware = f"{device.get('firmware_version') or '1.0'}.{1 + len(vendor_bodies) % 4}"
+            make, model = device["make"], device["model"]
+        elif cycle == 2:
+            device = random.choice(targets_by_software[suite_id])
+            make = device["make"]
+            model = f"{device['model']} Vendor-Only-{len(vendor_bodies) + 1}"
+            firmware = device.get("firmware_version") or "1.0"
+        else:
+            device = random.choice(targets_by_software[suite_id])
+            group_by_software[suite_id] = device
+            make, model = device["make"], device["model"]
+            firmware = device.get("firmware_version") or "1.0"
+        key = (make.casefold(), model.casefold(), str(device.get("hardware_version") or "").casefold(), firmware.casefold())
+        if key in seen:
+            firmware = f"{firmware}.{len(seen) + 1}"
+            key = (*key[:-1], firmware.casefold())
+        seen.add(key)
+        vendor_bodies.append((suite_id, {
+            "make": make,
+            "model": model,
+            "firmware_version": firmware,
+            "hardware_version": device.get("hardware_version"),
+            "architecture": device.get("architecture"),
+            "support_status": random.choices(
+                ["supported", "partial", "unsupported", "planned"],
+                weights=[65, 20, 10, 5], k=1,
+            )[0],
+            "source": f"Seeded compatibility matrix for {suite['name']}",
+        }))
+
+    def post_vendor(item):
+        suite_id, body = item
+        return req("POST", f"/software/{suite_id}/vendor-devices", tok, body)
     with ThreadPoolExecutor(max_workers=8) as ex:
-        tresults = list(ex.map(put_targets, target_bodies))
-    bad = [r for r in tresults if r[0] != 200]
+        tresults = list(ex.map(post_vendor, vendor_bodies))
+    bad = [r for r in tresults if r[0] not in (201, 409)]
     if bad:
-        sys.exit(f"target failures: {bad[:3]}")
-    print(f"  targets: {sum(len(v) for v in targets_by_software.values())} software-device links")
+        sys.exit(f"vendor-device failures: {bad[:3]}")
+    created_vendor = sum(1 for status, _ in tresults if status == 201)
+    skipped_vendor = sum(1 for status, _ in tresults if status == 409)
+    print(f"  vendor devices: {created_vendor} created, {skipped_vendor} already present")
 
     # ---- 4. tests (each references software + one of ITS target devices)
-    print("creating 500 tests...")
+    print(f"creating {args.tests} tests...")
     software_ids = [t["id"] for t in software]
-    weights = [w for _n, _c, w in SOFTWARE]
-    software_cat = {t["id"]: cat for t, (_n, cat, _w) in zip(software, SOFTWARE)}
+    weights = [w for _n, _c, w in selected_software]
+    software_cat = {t["id"]: cat for t, (_n, cat, _w) in zip(software, selected_software)}
+    software_by_id = {t["id"]: t for t in software}
     now = datetime.now(timezone.utc)
     test_bodies = []
-    for _ in range(500):
+    for _ in range(args.tests):
         software_id = random.choices(software_ids, weights=weights, k=1)[0]
         dev = random.choice(targets_by_software[software_id])
         outcome = random.choices(["pass", "fail", "warn"], weights=[70, 20, 10], k=1)[0]
@@ -278,7 +389,7 @@ def main():
         days_ago = int(random.expovariate(1 / 30))
         run_at = now - timedelta(days=min(days_ago, 180), hours=random.randint(0, 23),
                                  minutes=random.randint(0, 59))
-        test_bodies.append({
+        body = {
             "software_id": software_id,
             "device_id": dev["id"],
             "outcome": outcome,
@@ -286,18 +397,13 @@ def main():
                                   weights=[40, 40, 20, 30], k=1)[0],
             "misc_data": test_data(software_cat[software_id], outcome),
             "notes": random.choice(NOTES) if random.random() < 0.35 else None,
-            "run_at": run_at.isoformat(),
-        })
-    # rotate the acting user so created_by varies (admin + testers)
-    actor_toks = [tok] + list(tester_toks.values())
-    n_chunks = len(actor_toks)
-    chunk = (len(test_bodies) + n_chunks - 1) // n_chunks
-    all_results = []
-    for c in range(n_chunks):
-        part = test_bodies[c * chunk:(c + 1) * chunk]
-        if not part:
-            continue
-        all_results += parallel("POST", lambda i: "/tests", part, actor_toks[c])
+            "run_at": run_at.date().isoformat(),
+        }
+        components = software_by_id[software_id].get("bundle_components") or []
+        if components and random.random() < 0.75:
+            body["component_id"] = random.choice(components)["id"]
+        test_bodies.append(body)
+    all_results = parallel("POST", lambda i: "/tests", test_bodies, tok)
     ok = [r for r in all_results if r[1] == 201]
     bad = [r for r in all_results if r[1] != 201]
     if bad:

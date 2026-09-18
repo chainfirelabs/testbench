@@ -117,10 +117,25 @@ export interface RowBadge {
   spinner?: boolean
 }
 
+export interface RemoteTableRequest {
+  startRow: number
+  endRow: number
+  search: string
+  sortModel: any[]
+  filterModel: Record<string, any>
+}
+
+export interface RemoteTableResult {
+  rows: any[]
+  total: number
+}
+
 const props = withDefaults(
   defineProps<{
     columns: any[]
-    rows: any[]
+    rows?: any[]
+    /** Load only the requested window instead of retaining the full list. */
+    remoteLoader?: (request: RemoteTableRequest) => Promise<RemoteTableResult>
     editable?: boolean
     /** Rows that have unsaved (dirty) changes, keyed by row id. */
     dirtyIds?: Set<string>
@@ -158,6 +173,8 @@ const props = withDefaults(
     rowEditable?: boolean
   }>(),
   {
+    rows: () => [],
+    remoteLoader: undefined,
     editable: false,
     dirtyIds: () => new Set<string>(),
     isRowDirty: null,
@@ -188,6 +205,37 @@ const emit = defineEmits<{
 const quickFilter = ref('')
 const gridApi = ref<GridApi | null>(null)
 const selectedCount = ref(0)
+const isRemote = computed(() => !!props.remoteLoader)
+let remoteSearchTimer: ReturnType<typeof setTimeout> | null = null
+
+const remoteDatasource = {
+  async getRows(params: any) {
+    if (!props.remoteLoader) return
+    try {
+      const result = await props.remoteLoader({
+        startRow: params.startRow,
+        endRow: params.endRow,
+        search: quickFilter.value.trim(),
+        sortModel: params.sortModel || [],
+        filterModel: params.filterModel || {},
+      })
+      if (typeof params.success === 'function') {
+        params.success({ rowData: result.rows, rowCount: result.total })
+      } else {
+        params.successCallback(result.rows, result.total)
+      }
+    } catch {
+      if (typeof params.fail === 'function') params.fail()
+      else params.failCallback?.()
+    }
+  },
+}
+
+watch(quickFilter, () => {
+  if (!isRemote.value) return
+  if (remoteSearchTimer) clearTimeout(remoteSearchTimer)
+  remoteSearchTimer = setTimeout(() => gridApi.value?.purgeInfiniteCache?.(), 250)
+})
 
 function rowIsDirty(row: any): boolean {
   if (props.isRowDirty) return props.isRowDirty(row)
@@ -512,6 +560,10 @@ class ValueChecklistFilter {
       const value = this.params.getValue(node)
       next.set(this.key(value), { value, label: this.label(value) })
     })
+    // Infinite-row tables only have the currently cached windows in the row
+    // model. Keep values seen on earlier windows so opening a filter after
+    // paging does not make those choices disappear.
+    for (const [key, item] of this.values) if (!next.has(key)) next.set(key, item)
     this.values = new Map([...next].sort((a, b) => a[1].label.localeCompare(b[1].label)))
     this.renderList()
   }
@@ -796,13 +848,69 @@ const rowSelection = computed<any>(() =>
     ? {
         mode: 'multiRow',
         checkboxes: true,
-        headerCheckbox: true,
+        // AG Grid disables its own select-all feature for the infinite row
+        // model. Remote tables get an equivalent current-page header below.
+        headerCheckbox: !isRemote.value,
         // Row clicks stay free for cell editing; selection is checkbox-driven
         // (shift-click a checkbox to select a range).
         enableClickSelection: false,
       }
     : { mode: 'singleRow', checkboxes: false, enableClickSelection: false },
 )
+
+/** Header checkbox for remote tables, where AG Grid's built-in one is unsupported. */
+class RemoteSelectAllHeader {
+  private params: any
+  private input!: HTMLInputElement
+  private changed = () => this.refresh()
+
+  init(params: any) {
+    this.params = params
+    this.input = document.createElement('input')
+    this.input.type = 'checkbox'
+    this.input.title = 'Select all rows on this page'
+    this.input.setAttribute('aria-label', 'Select all rows on this page')
+    this.input.addEventListener('change', () => this.setPageSelected(this.input.checked))
+    params.api.addEventListener('selectionChanged', this.changed)
+    params.api.addEventListener('modelUpdated', this.changed)
+    params.api.addEventListener('paginationChanged', this.changed)
+    this.refresh()
+  }
+
+  getGui() { return this.input }
+
+  destroy() {
+    this.params.api.removeEventListener('selectionChanged', this.changed)
+    this.params.api.removeEventListener('modelUpdated', this.changed)
+    this.params.api.removeEventListener('paginationChanged', this.changed)
+  }
+
+  private pageNodes(): any[] {
+    const api = this.params.api
+    const size = api.paginationGetPageSize?.() || props.defaultPageSize
+    const first = (api.paginationGetCurrentPage?.() || 0) * size
+    const last = Math.min(first + size, api.getDisplayedRowCount?.() || 0)
+    const nodes = []
+    for (let index = first; index < last; index++) {
+      const node = api.getDisplayedRowAtIndex(index)
+      if (node?.data && node.selectable !== false) nodes.push(node)
+    }
+    return nodes
+  }
+
+  private setPageSelected(selected: boolean) {
+    for (const node of this.pageNodes()) node.setSelected(selected, false, 'uiSelectAllCurrentPage')
+    this.refresh()
+  }
+
+  private refresh() {
+    const nodes = this.pageNodes()
+    const selected = nodes.filter((node) => node.isSelected()).length
+    this.input.checked = nodes.length > 0 && selected === nodes.length
+    this.input.indeterminate = selected > 0 && selected < nodes.length
+    this.input.disabled = nodes.length === 0
+  }
+}
 
 /*
  * Toggle the row from anywhere in the selection cell, not just the 16px
@@ -829,7 +937,7 @@ function toggleRowFromCell(p: any) {
 
 // A little wider than the 50px default so the checkbox is comfortable to hit,
 // and pinned so it stays put when a wide grid is scrolled sideways.
-const selectionColumnDef: SelectionColumnDef = {
+const selectionColumnDef = computed<SelectionColumnDef>(() => ({
   width: 52,
   minWidth: 52,
   maxWidth: 52,
@@ -838,8 +946,9 @@ const selectionColumnDef: SelectionColumnDef = {
   suppressMovable: true,
   cellClass: 'tb-select-cell',
   headerClass: 'tb-select-header',
+  headerComponent: isRemote.value && selectionEnabled.value ? RemoteSelectAllHeader : undefined,
   onCellClicked: toggleRowFromCell,
-}
+}))
 
 /*
  * Rows currently flashing "Saved" (see "Enter saves the row" below), by row id.
@@ -953,6 +1062,7 @@ function onValueChanged(e: any) {
 
 function onGridReady(e: any) {
   gridApi.value = e.api
+  if (isRemote.value) e.api.setGridOption('datasource', remoteDatasource)
   if (isCardList.value) applyCardFallback()
   syncCards()
   syncCardSort()
@@ -1098,6 +1208,7 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') closeColPicker()
 }
 onBeforeUnmount(() => {
+  if (remoteSearchTimer) clearTimeout(remoteSearchTimer)
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('touchstart', onDocClick)
   document.removeEventListener('keydown', onKeydown)
@@ -1197,6 +1308,14 @@ function refreshRows(ids: string[]) {
 function reapplyView() {
   const api = gridApi.value
   if (!api) return
+  if (isRemote.value) {
+    // Keep the current block painted while its replacement is fetched. Purging
+    // here made periodic fleet refreshes blank the table every 15 seconds.
+    // Search changes still purge above because they represent a different row
+    // set; an ordinary refresh is the same window with fresher values.
+    api.refreshInfiniteCache?.()
+    return
+  }
   api.refreshClientSideRowModel('filter')
   // The cards read the row model rather than the grid, so they have to be
   // re-read after it has been rebuilt.
@@ -1255,23 +1374,27 @@ defineExpose({
           {{ cardSort.dir === 'asc' ? '↑' : '↓' }}
         </button>
       </div>
-      <div class="col-picker">
-        <button class="btn btn-mini" @click="openColPicker">
-          {{ isCardList ? 'Fields' : 'Columns' }}
-        </button>
-        <div v-if="showColPicker" class="col-picker-panel">
-          <div class="col-picker-header">
-            <span>{{ isCardList ? 'Fields on each card' : 'Visible columns' }}</span>
-            <button class="btn btn-mini" @click="showAllColumns">Show all</button>
+      <!-- Views and Columns are one right-aligned cluster on every list. -->
+      <div class="table-view-controls">
+        <slot name="table-actions" />
+        <div class="col-picker">
+          <button class="btn btn-mini" @click="openColPicker">
+            {{ isCardList ? 'Fields' : 'Columns' }}
+          </button>
+          <div v-if="showColPicker" class="col-picker-panel">
+            <div class="col-picker-header">
+              <span>{{ isCardList ? 'Fields on each card' : 'Visible columns' }}</span>
+              <button class="btn btn-mini" @click="showAllColumns">Show all</button>
+            </div>
+            <label v-for="c in columnChoices" :key="c.colId" class="col-picker-item">
+              <input
+                type="checkbox"
+                :checked="colVisible[c.colId] !== false"
+                @change="toggleColumn(c.colId, ($event.target as HTMLInputElement).checked)"
+              />
+              <span>{{ c.label }}</span>
+            </label>
           </div>
-          <label v-for="c in columnChoices" :key="c.colId" class="col-picker-item">
-            <input
-              type="checkbox"
-              :checked="colVisible[c.colId] !== false"
-              @change="toggleColumn(c.colId, ($event.target as HTMLInputElement).checked)"
-            />
-            <span>{{ c.label }}</span>
-          </label>
         </div>
       </div>
     </div>
@@ -1290,14 +1413,16 @@ defineExpose({
         style="width: 100%; height: 100%"
         :modules="modules"
         :columnDefs="columnDefs"
-        :rowData="rows"
-        rowModelType="clientSide"
+        :rowData="isRemote ? undefined : rows"
+        :rowModelType="isRemote ? 'infinite' : 'clientSide'"
+        :cacheBlockSize="defaultPageSize"
+        :maxBlocksInCache="isRemote ? 2 : undefined"
         :theme="theme"
         :loadThemeGoogleFonts="false"
         :defaultColDef="defaultColDef"
         :getRowId="getRowId"
         :getRowClass="getRowClass"
-        :quickFilterText="quickFilter"
+        :quickFilterText="isRemote ? undefined : quickFilter"
         :pagination="true"
         :paginationPageSize="defaultPageSize"
         :paginationPageSizeSelector="PAGE_SIZES"

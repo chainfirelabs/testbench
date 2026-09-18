@@ -22,7 +22,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.9.0`.
+`chainfirelabs/testbench` and tag `1.9.1`.
 
 | Image repository | Purpose |
 |---|---|

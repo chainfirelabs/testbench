@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, toRaw } from 'vue'
-import DataTable from '../components/DataTable.vue'
+import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
+import EntityFieldsModal from '../components/EntityFieldsModal.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
@@ -14,6 +15,7 @@ import { useImportProgress } from '../importProgress'
 import { useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityFields } from '../entityFields'
+import { remoteTableParams } from '../remoteTable'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -22,6 +24,7 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
+const customizingFields = ref(false)
 const { importState, runImport, closeImport } = useImportProgress()
 const { fields: softwareFields, loadFields } = useEntityFields('software')
 
@@ -200,10 +203,14 @@ function isRowDirty(row: any): boolean {
 const showAllVersions = ref(false)
 
 async function load() {
-  const page = await api<any>(
-    `/software?page_size=500${showAllVersions.value ? '' : '&latest_only=true'}`,
-  )
+  table.value?.reapplyView()
+}
+
+async function loadRemoteSoftware(request: RemoteTableRequest) {
+  const params = remoteTableParams(request, { latest_only: !showAllVersions.value })
+  const page = await api<any>(`/software?${params}`)
   rows.value = page.items
+  return { rows: page.items, total: page.total }
 }
 
 function toggleAllVersions() {
@@ -240,6 +247,7 @@ const showNew = ref(false)
 const creating = ref(false)
 const newSoftware = ref<Record<string, any>>({})
 const newBundleComponents = ref<any[]>([])
+const matchedSoftwareLookup = ref<any | null>(null)
 // Versions of the matched software, for the "inherit from" picker.
 const matchVersions = ref<any[]>([])
 
@@ -263,7 +271,9 @@ const nameKey = (v: any) => String(v ?? '').trim().toLowerCase()
 /** The existing software the typed name refers to, if any. */
 const matchedSoftware = computed(() => {
   const key = nameKey(newSoftware.value.name)
-  return key ? rows.value.find((t) => nameKey(t.name) === key) || null : null
+  if (!key) return null
+  return rows.value.find((t) => nameKey(t.name) === key)
+    || (nameKey(matchedSoftwareLookup.value?.name) === key ? matchedSoftwareLookup.value : null)
 })
 
 // One entry per software name, for the name field's autocomplete. The grid may be
@@ -346,12 +356,23 @@ function openNew() {
   newSoftware.value = { name: '', version: '', inherit_from: '', misc_data: '{}' }
   newBundleComponents.value = []
   matchVersions.value = []
+  matchedSoftwareLookup.value = null
   showNew.value = true
 }
 
 /** Load the matched software's versions so "inherit from" can list them. */
 async function onNewSoftwareChange(key: string) {
   if (key !== 'name') return
+  const name = String(newSoftware.value.name || '').trim()
+  if (name && !rows.value.some((item) => nameKey(item.name) === nameKey(name))) {
+    try {
+      matchedSoftwareLookup.value = await api<any>(
+        `/software/lookup/by-name?name=${encodeURIComponent(name)}`,
+      )
+    } catch {
+      matchedSoftwareLookup.value = null
+    }
+  }
   const match = matchedSoftware.value
   if (!match) {
     matchVersions.value = []
@@ -397,7 +418,7 @@ async function createSoftware(values: Record<string, any>) {
     merged.bundle_components = bundlePayload(newBundleComponents.value)
     const created = await api<any>('/software', { method: 'POST', body: JSON.stringify(merged) })
     // Newest first, so the row you just made is where you are looking.
-    rows.value.unshift(created)
+    await load()
     showNew.value = false
     showToast(`Software ${created.name} created`)
   } catch (e: any) {
@@ -512,6 +533,7 @@ async function deleteRow(row: any) {
     await api(`/software/${row.id}`, { method: 'DELETE' })
     rows.value = rows.value.filter((r) => toRaw(r) !== toRaw(row))
     dirty.value.delete(row.id)
+    await load()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -526,6 +548,7 @@ async function deleteSelected() {
     rows.value = rows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) dirty.value.delete(id)
     selected.value = []
+    await load()
     showToast(`Deleted ${ids.length} software record${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -616,6 +639,9 @@ onMounted(() => Promise.all([load(), loadFields()]))
       <h2>Software</h2>
       <div class="toolbar">
         <button v-if="auth.canWrite" class="btn btn-primary" @click="openNew">+ New software</button>
+        <button v-if="auth.isAdmin" class="btn" @click="customizingFields = true">
+          Customize fields
+        </button>
         <!-- Outside the menu: the panel closes on click, and a file input
              unmounted mid-picker never fires `change`. -->
         <input ref="fileInput" type="file" accept=".json,.csv" style="display: none" @change="onImportFile" />
@@ -661,18 +687,13 @@ onMounted(() => Promise.all([load(), loadFields()]))
             Export CSV
           </button>
         </OverflowMenu>
-        <FilterProfilesMenu
-          ref="profiles"
-          entity="software"
-          :get-state="() => table?.getState()"
-          :apply-state="(s) => table?.applyState(s)"
-        />
       </div>
     </div>
     <DataTable
       ref="table"
       :columns="columns"
       :rows="rows"
+      :remote-loader="loadRemoteSoftware"
       :editable="auth.canWrite"
       :selectable="auth.canWrite"
       :dirty-ids="dirtyIds"
@@ -685,6 +706,14 @@ onMounted(() => Promise.all([load(), loadFields()]))
       @selection-change="(r: any[]) => (selected = r)"
       @grid-ready="onGridReady"
     >
+      <template #table-actions>
+        <FilterProfilesMenu
+          ref="profiles"
+          entity="software"
+          :get-state="() => table?.getState()"
+          :apply-state="(s) => table?.applyState(s)"
+        />
+      </template>
       <template #selection-actions>
         <button
           v-if="auth.canWrite && selected.length"
@@ -704,6 +733,13 @@ onMounted(() => Promise.all([load(), loadFields()]))
         </button>
       </template>
     </DataTable>
+    <EntityFieldsModal
+      v-if="customizingFields"
+      entity="software"
+      title="Software Fields"
+      @close="customizingFields = false"
+      @saved="loadFields"
+    />
     <FormModal
       v-if="bulkEditing"
       :title="`Edit ${selected.length} selected software records`"

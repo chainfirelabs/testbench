@@ -22,6 +22,7 @@ Every test is created by `admin`: local user creation was removed from the API
 Run: python3 seed_tests.py [--force] [--count N]
 """
 import json
+import argparse
 import os
 import random
 import sys
@@ -112,29 +113,39 @@ def test_data(category, outcome):
     return d
 
 
-def main():
-    force = "--force" in sys.argv
-    count = DEFAULT_COUNT
-    if "--count" in sys.argv:
-        i = sys.argv.index("--count")
-        if i + 1 >= len(sys.argv):
-            sys.exit("--count needs a number")
-        try:
-            count = int(sys.argv[i + 1])
-        except ValueError:
-            sys.exit(f"--count needs a number, got {sys.argv[i + 1]!r}")
-        if count < 1:
-            sys.exit("--count must be at least 1")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Seed component-aware test history.")
+    parser.add_argument("--url", default=BASE, help="TestBench API base URL (env: TB_SEED_API_BASE)")
+    parser.add_argument("--api-key", default=os.environ.get("TB_SEED_API_KEY"),
+                        help="API token (env: TB_SEED_API_KEY)")
+    parser.add_argument("--force", action="store_true", help="add tests when tests already exist")
+    parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="test records to create")
+    args = parser.parse_args()
+    if args.count < 1:
+        parser.error("--count must be at least 1")
+    return args
 
-    s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
-    if s != 200:
-        sys.exit(f"login failed: {s} {login}")
-    tok = login["access_token"]
+
+def main():
+    global BASE
+    args = parse_args()
+    BASE = args.url.rstrip("/")
+    if not BASE.endswith("/api/v1"):
+        BASE += "/api/v1"
+    count = args.count
+
+    if args.api_key:
+        tok = args.api_key
+    else:
+        s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
+        if s != 200:
+            sys.exit(f"login failed: {s} {login}")
+        tok = login["access_token"]
 
     s, page = req("GET", "/tests?page_size=1", tok)
     if s != 200:
         sys.exit(f"test fetch failed: {s} {page}")
-    if page.get("total") and not force:
+    if page.get("total") and not args.force:
         sys.exit(f"DB already has {page['total']} tests — pass --force to add more")
 
     s, devs = req("GET", "/devices?page_size=500", tok)
@@ -225,7 +236,7 @@ def main():
         elif random.random() < 0.20:
             notes = random.choice(NOTES_PASS)
 
-        bodies.append({
+        body = {
             "software_id": sw["id"],
             "device_id": device["id"],
             # Left unset on purpose: the API snapshots the software row's own
@@ -235,8 +246,13 @@ def main():
                                   weights=[40, 40, 20, 30], k=1)[0],
             "misc_data": test_data((sw.get("misc_data") or {}).get("category"), outcome),
             "notes": notes,
-            "run_at": run_at.isoformat(),
-        })
+            "run_at": run_at.date().isoformat(),
+        }
+        components = sw.get("bundle_components") or []
+        if components and random.random() < 0.75:
+            component = random.choice(components)
+            body["component_id"] = component["id"]
+        bodies.append(body)
 
     print(f"creating {len(bodies)} tests...")
     with ThreadPoolExecutor(max_workers=8) as ex:

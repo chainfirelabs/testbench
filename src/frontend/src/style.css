@@ -597,6 +597,14 @@ label {
   flex-shrink: 0;
 }
 
+.data-table .table-view-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .data-table .selection-count {
   display: inline-flex;
   align-items: center;

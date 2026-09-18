@@ -12,9 +12,10 @@ Rows sharing a name are the versions of one software (unique on
 lower(name) + version), so this creates the first version with POST /software
 and every later one with POST /software/{id}/versions.
 
-Run: python3 seed_software.py [--force] [--count N]
+Run: python3 seed_software.py [--force] [--count N] [--components N]
 """
 import json
+import argparse
 import os
 import random
 import sys
@@ -115,42 +116,76 @@ def version_history(name):
     return out
 
 
-def main():
-    force = "--force" in sys.argv
-    count = None
-    if "--count" in sys.argv:
-        i = sys.argv.index("--count")
-        if i + 1 >= len(sys.argv):
-            sys.exit("--count needs a number")
-        try:
-            count = int(sys.argv[i + 1])
-        except ValueError:
-            sys.exit(f"--count needs a number, got {sys.argv[i + 1]!r}")
-        if count < 1:
-            sys.exit("--count must be at least 1")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Seed versioned software suites with components.")
+    parser.add_argument("--url", default=BASE, help="TestBench API base URL (env: TB_SEED_API_BASE)")
+    parser.add_argument("--api-key", default=os.environ.get("TB_SEED_API_KEY"),
+                        help="API token (env: TB_SEED_API_KEY)")
+    parser.add_argument("--force", action="store_true", help="add data when software already exists")
+    parser.add_argument("--count", type=int, default=len(CATALOGUE), help="software suites to create")
+    parser.add_argument("--components", type=int, default=3, help="components per software suite")
+    args = parser.parse_args()
+    if args.count < 1:
+        parser.error("--count must be at least 1")
+    if args.components < 0:
+        parser.error("--components cannot be negative")
+    return args
 
-    s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
-    if s != 200:
-        sys.exit(f"login failed: {s} {login}")
-    tok = login["access_token"]
+
+def catalogue_entries(count):
+    """Use named real-world fixtures first, then deterministic unique suites."""
+    entries = list(CATALOGUE[:count])
+    while len(entries) < count:
+        number = len(entries) + 1
+        entries.append((
+            f"TestBench Validation Suite {number:04d}",
+            "ChainFire Labs",
+            "validation",
+            "MIT",
+            f"Generated validation suite {number:04d}",
+        ))
+    return entries
+
+
+def components_for(name, version, count):
+    labels = ["Core", "Agent", "CLI", "Web Console", "API", "Reporting"]
+    return [
+        {"name": f"{name} {labels[i] if i < len(labels) else f'Component {i + 1}'}", "version": version}
+        for i in range(count)
+    ]
+
+
+def main():
+    global BASE
+    args = parse_args()
+    BASE = args.url.rstrip("/")
+    if not BASE.endswith("/api/v1"):
+        BASE += "/api/v1"
+
+    if args.api_key:
+        tok = args.api_key
+    else:
+        s, login = req("POST", "/auth/login", body={"username": "admin", "password": "admin"})
+        if s != 200:
+            sys.exit(f"login failed: {s} {login}")
+        tok = login["access_token"]
 
     s, page = req("GET", "/software?page_size=500", tok)
     if s != 200:
         sys.exit(f"software fetch failed: {s} {page}")
     before = page["items"]
-    if before and not force:
+    if before and not args.force:
         sys.exit(f"DB already has {len(before)} software rows — pass --force to add more")
 
     # Names are unique case-insensitively. Skipping here keeps a second --force
     # run from failing on every row it already created, so the script is
     # re-runnable rather than one-shot.
     taken = {sw["name"].casefold() for sw in before}
-    catalogue = [c for c in CATALOGUE if c[0].casefold() not in taken]
-    skipped = len(CATALOGUE) - len(catalogue)
-    if count is not None:
-        catalogue = catalogue[:count]
+    requested = catalogue_entries(args.count)
+    catalogue = [c for c in requested if c[0].casefold() not in taken]
+    skipped = len(requested) - len(catalogue)
     if not catalogue:
-        print(f"nothing to do: all {len(CATALOGUE)} catalogue entries already exist")
+        print(f"nothing to do: all {len(requested)} requested catalogue entries already exist")
         return
     if skipped:
         print(f"skipping {skipped} already present")
@@ -166,7 +201,12 @@ def main():
         # The first version is a new software; the rest branch off it. Versions
         # of one software have to go in sequence — they share a uniqueness rule
         # — so the parallelism is across software, not within one.
-        s, first = req("POST", "/software", tok, {"name": name, "version": versions[0], "misc_data": misc})
+        s, first = req("POST", "/software", tok, {
+            "name": name,
+            "version": versions[0],
+            "misc_data": misc,
+            "bundle_components": components_for(name, versions[0], args.components),
+        })
         if s != 201:
             return name, 0, [f"{versions[0]}: {s} {first}"]
 

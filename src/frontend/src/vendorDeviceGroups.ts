@@ -60,3 +60,15 @@ export function collapseVendorDevices(
     return { ...selected, _groupKey: key, _firmwareMembers: members }
   })
 }
+
+/** Expand collapsed selections before bulk operations include hidden firmware records. */
+export function selectedVendorDeviceIds(rows: VendorDeviceRow[]): string[] {
+  const ids = new Set<string>()
+  for (const row of rows) {
+    const members = (row as Partial<CollapsedVendorDeviceRow>)._firmwareMembers
+    for (const member of members?.length ? members : [row]) {
+      if (member.id) ids.add(member.id)
+    }
+  }
+  return [...ids]
+}

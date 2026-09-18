@@ -19,6 +19,7 @@ from ..schemas import (
     DeviceInfoLaunchOut,
     DeviceOut,
     DeviceOverdueOut,
+    DeviceRelatedCountsOut,
     DeviceScanResult,
     DeviceScanState,
     DeviceUpdate,
@@ -34,6 +35,7 @@ from ..services.checkout import overdue_clause, today
 from ..services.compat import compatible_software
 from ..services.hooks import emit_status_change
 from ..services.io import download_response, export_response, parse_import, strip_nulls, template_csv
+from ..services.list_filters import exclude_clause, excluded_values
 from ..services.query import row_error, row_scope
 from ..services.device_info import DockerError, launch_device_info, missing_required_fields
 from ..services.device_schema import (
@@ -370,6 +372,21 @@ def _query_devices(db: Session, filters: dict, search: str | None = None) -> sel
         )
     for name, value in filters.items():
         if value is None:
+            continue
+        if name.startswith("exclude__"):
+            field_name = name.removeprefix("exclude__")
+            if field_name == "device_type_id":
+                clause = exclude_clause(Device.device_type_id, excluded_values(value))
+                if clause is not None:
+                    q = q.where(clause)
+                continue
+            field = catalog.get(field_name)
+            if field and field.storage in {"data", "column"}:
+                expression = device_field_expression(field)
+                values = [coerce_filter_value(field, item) for item in excluded_values(value)]
+                clause = exclude_clause(expression, values)
+                if clause is not None:
+                    q = q.where(clause)
             continue
         if name == "device_type":
             if value == "uncategorized":
@@ -882,6 +899,27 @@ def get_compatible_software(
             )
             for item in compatible_software(db, device)
         ],
+    )
+
+
+@router.get("/{device_id}/related-counts", response_model=DeviceRelatedCountsOut)
+def get_related_counts(
+    device_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Totals for the device's Vendor Claims and Tests tabs.
+
+    Vendor claims deliberately run through the same reverse compatibility
+    matcher as the tab itself; this is not a looser make/model-only count.
+    """
+    device = _get_device(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    matches = compatible_software(db, device)
+    return DeviceRelatedCountsOut(
+        vendor_claims=sum(len(item["vendor_devices"]) for item in matches),
+        tests=db.scalar(select(func.count(Test.id)).where(Test.device_id == device.id)) or 0,
     )
 
 

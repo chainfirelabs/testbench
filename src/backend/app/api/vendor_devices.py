@@ -6,9 +6,11 @@ the software has actually been run against comes from `tests` instead
 (see `/software/{software_id}/tested-devices`).
 """
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
@@ -31,6 +33,7 @@ from ..services.io import (
     strip_nulls,
     template_csv,
 )
+from ..services.list_filters import exclude_clause, excluded_values
 from ..services.query import order_by, row_error
 from ..services.entity_fields import (
     field_payload, get_entity_fields, merge_extra_columns, project_fields,
@@ -205,6 +208,88 @@ def _query(db: Session, software: Software, search: str | None):
             *custom,
         ))
     return q
+
+
+def _group_value(column):
+    return func.lower(func.trim(func.coalesce(column, "")))
+
+
+def _firmware_key(item: dict):
+    version = str(item.get("firmware_version") or "")
+    natural = tuple((1, int(part)) if part.isdigit() else (0, part.casefold())
+                    for part in re.findall(r"\d+|\D+", version))
+    return natural, str(item.get("updated_at") or item.get("created_at") or "")
+
+
+@router.get("/grouped")
+def list_grouped_vendor_devices(
+    software_id: str,
+    search: str | None = None,
+    sort: str = "make",
+    order: str = "asc",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Page the presentation groups while retaining every firmware member."""
+    software = _get_software(db, software_id)
+    source_query = _query(db, software, search)
+    standard = {key for key in EDITABLE_FIELDS if key != "misc_data"}
+    custom = {field.key for field, _payload in _effective_fields(db, software) if field.storage == "data"}
+    for key, value in request.query_params.items():
+        if key in {"search", "sort", "order", "page", "page_size"} or not value:
+            continue
+        excluded = key.startswith("exclude__")
+        field = key.removeprefix("exclude__") if excluded else key
+        expression = (getattr(VendorDevice, field) if field in standard else
+                      VendorDevice.misc_data[field].astext if field in custom else None)
+        if expression is None:
+            continue
+        if excluded:
+            clause = exclude_clause(expression, excluded_values(value))
+            if clause is not None:
+                source_query = source_query.where(clause)
+        else:
+            source_query = source_query.where(expression.ilike(f"%{value}%"))
+    source = source_query.subquery()
+    keys = [
+        _group_value(source.c.make).label("make_key"),
+        _group_value(source.c.model).label("model_key"),
+        _group_value(source.c.hardware_version).label("hardware_key"),
+    ]
+    grouped = select(*keys).group_by(*keys)
+    total = db.scalar(select(func.count()).select_from(grouped.subquery())) or 0
+    sort_index = {"make": 0, "model": 1, "hardware_version": 2}.get(sort, 0)
+    primary = keys[sort_index].desc() if order == "desc" else keys[sort_index].asc()
+    group_rows = db.execute(
+        grouped.order_by(primary, *keys).offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    if not group_rows:
+        return {"items": [], "total": total, "page": page, "page_size": page_size}
+    clauses = [and_(
+        _group_value(VendorDevice.make) == row.make_key,
+        _group_value(VendorDevice.model) == row.model_key,
+        _group_value(VendorDevice.hardware_version) == row.hardware_key,
+    ) for row in group_rows]
+    members = db.scalars(select(VendorDevice).where(
+        VendorDevice.software_id == software.id, or_(*clauses),
+    )).all()
+    by_key: dict[tuple[str, str, str], list[dict]] = {}
+    for member in members:
+        payload = _vd_dict(member)
+        key = tuple(str(payload.get(name) or "").strip().lower()
+                    for name in ("make", "model", "hardware_version"))
+        by_key.setdefault(key, []).append(payload)
+    items = []
+    for row in group_rows:
+        key = (row.make_key, row.model_key, row.hardware_key)
+        firmware = sorted(by_key.get(key, []), key=_firmware_key, reverse=True)
+        if not firmware:
+            continue
+        items.append({**firmware[0], "_groupKey": "\0".join(key), "_firmwareMembers": firmware})
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/schema")

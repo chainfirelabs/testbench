@@ -138,6 +138,14 @@ REQUIRED_FIELDS = {
     "vendor_devices": (),
 }
 
+# These relationship fields are optional values, but they are part of the
+# application's suite/component model rather than deployment-defined metadata.
+# Keeping them catalog-visible lets the Tests page honor list visibility on
+# both new and upgraded installations.
+CORE_VISIBLE_FIELDS = {
+    "tests": {"component_name", "component_version"},
+}
+
 
 def _configured_fields() -> dict[str, list[dict]]:
     if not settings.entity_fields_json.strip():
@@ -180,8 +188,8 @@ def _configured_fields() -> dict[str, list[dict]]:
             raise RuntimeError(f"TB_ENTITY_FIELDS_JSON.{entity}.custom_fields must be a list of field objects")
 
         fields = []
-        seen = set(REQUIRED_FIELDS[entity])
-        selected = set(REQUIRED_FIELDS[entity])
+        selected = set(REQUIRED_FIELDS[entity]) | CORE_VISIBLE_FIELDS.get(entity, set())
+        seen = set(selected)
         # These fields predate the configurable catalog. Preserve the existing
         # vendor-device form and table on both new installs and upgrades.
         if entity == "vendor_devices" and not section:
@@ -193,6 +201,8 @@ def _configured_fields() -> dict[str, list[dict]]:
                 raise RuntimeError(
                     f"{entity}.{key} is required and added automatically; do not list it under optional_fields"
                 )
+            if key in CORE_VISIBLE_FIELDS.get(entity, set()):
+                continue
             if key not in BUILTINS[entity]:
                 raise RuntimeError(
                     f"Unknown optional {entity} field {key!r}. To create it, place a field object under custom_fields"
@@ -205,7 +215,14 @@ def _configured_fields() -> dict[str, list[dict]]:
 
         # Every predefined field is a database catalog entry. Configuration
         # controls presentation and validation, not whether the field exists.
-        ordered_keys = [*REQUIRED_FIELDS[entity], *ordered_selected]
+        ordered_keys = [
+            *REQUIRED_FIELDS[entity],
+            *(key for key in BUILTINS[entity] if key in CORE_VISIBLE_FIELDS.get(entity, set())),
+            *ordered_selected,
+        ]
+        ordered_keys.extend(
+            key for key in BUILTINS[entity] if key in selected and key not in ordered_keys
+        )
         ordered_keys.extend(
             key for key in BUILTINS[entity]
             if key not in selected and not (entity == "devices" and key in ON_DEMAND_DEVICE_FIELDS)
@@ -279,6 +296,11 @@ def initialize_entity_fields() -> None:
                         candidate.update(visible=False, required=False)
                     db.add(EntityField(entity=entity, position=position, **candidate))
                     position += 1
+            for entity, keys in CORE_VISIBLE_FIELDS.items():
+                for item in db.scalars(select(EntityField).where(
+                    EntityField.entity == entity, EntityField.key.in_(keys),
+                )).all():
+                    item.visible = True
             db.commit()
             ensure_entity_field_indexes(db)
             return

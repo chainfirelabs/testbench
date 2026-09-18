@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, toRaw, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import DataTable from '../components/DataTable.vue'
+import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
@@ -20,8 +20,8 @@ import {
   customColumn, customFormField, dataValue, mergeCustomValues,
   type EntityField, useEntityFields,
 } from '../entityFields'
-import { loadAllPages } from '../pagination'
-import { collapseVendorDevices } from '../vendorDeviceGroups'
+import { collapseVendorDevices, selectedVendorDeviceIds } from '../vendorDeviceGroups'
+import { remoteTableParams } from '../remoteTable'
 
 const route = useRoute()
 const router = useRouter()
@@ -486,13 +486,16 @@ function hasAnyIdentity(row: any): boolean {
 }
 
 async function loadVendorDevices() {
-  const result = await loadAllPages<any>((page) => api<any>(
-    `/software/${software.value.id}/vendor-devices?page=${page}&page_size=1000`,
-  ))
-  vendorRows.value = result.items
-  // The server total is unpaginated. Using the first page's length here made
-  // a successful 1,030-row import appear capped at exactly 1,000.
-  if (software.value) software.value.vendor_device_count = result.total
+  vendorTable.value?.reapplyView()
+}
+
+async function loadRemoteVendorDevices(request: RemoteTableRequest) {
+  const params = remoteTableParams(request)
+  const result = await api<any>(
+    `/software/${software.value.id}/vendor-devices/grouped?${params}`,
+  )
+  vendorRows.value = result.items.flatMap((row: any) => row._firmwareMembers || [row])
+  return { rows: vendorDisplayRows.value, total: result.total }
 }
 
 async function loadVendorSchema() {
@@ -679,13 +682,14 @@ async function deleteVendorRow(row: any) {
     vendorRows.value = vendorRows.value.filter((r) => toRaw(r) !== toRaw(row))
     vendorDirty.value.delete(row.id)
     bumpVendorCount(-1)
+    await loadVendorDevices()
   } catch (e: any) {
     showToast(e.message, true)
   }
 }
 
 async function deleteSelectedVendorRows() {
-  const ids = vendorSelected.value.filter((r) => r.id).map((r) => r.id)
+  const ids = selectedVendorDeviceIds(vendorSelected.value)
   if (!ids.length) return
   if (!confirm(`Remove ${ids.length} vendor device${ids.length > 1 ? 's' : ''}?`)) return
   try {
@@ -697,6 +701,7 @@ async function deleteSelectedVendorRows() {
     for (const id of ids) vendorDirty.value.delete(id)
     vendorSelected.value = []
     bumpVendorCount(-ids.length)
+    await loadVendorDevices()
     showToast(`Removed ${ids.length} vendor device${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -750,7 +755,10 @@ async function onImportFile(e: Event) {
  */
 
 const testedRows = ref<any[]>([])
-const testedLoading = ref(false)
+// The grid only exists while its tab is open, and its rows are only the
+// current server-paged window. Keep the API's total separately so the Details
+// and tab labels are correct before the grid mounts (and beyond page one).
+const testedDeviceCount = ref<number | null>(null)
 
 const testedColumns = [
   {
@@ -819,12 +827,17 @@ const testedColumns = [
   },
 ]
 
-async function loadTestedDevices() {
-  testedLoading.value = true
-  try {
-    const res = await api<any>(`/software/${software.value.id}/tested-devices`)
-    // Flattened so the grid can sort and filter on the device fields directly.
-    testedRows.value = (res.devices || []).map((t: any) => ({
+async function loadTestedDeviceCount(softwareId: string) {
+  testedDeviceCount.value = null
+  const res = await api<any>(`/software/${softwareId}/tested-devices?page=1&page_size=1`)
+  // A route change can finish an older request after the new software loaded.
+  if (software.value?.id === softwareId) testedDeviceCount.value = res.total
+}
+
+async function loadRemoteTestedDevices(request: RemoteTableRequest) {
+  const params = remoteTableParams(request)
+  const res = await api<any>(`/software/${software.value.id}/tested-devices?${params}`)
+  const rows = (res.devices || []).map((t: any) => ({
       id: `${t.component?.id || software.value.id}:${t.device.id}`,
       component_name: t.component?.name || '',
       component_version: t.component?.version || '',
@@ -838,11 +851,9 @@ async function loadTestedDevices() {
       last_test_at: t.last_test_at,
       outcomes: t.outcomes,
     }))
-  } catch (e: any) {
-    showToast(e.message, true)
-  } finally {
-    testedLoading.value = false
-  }
+  testedRows.value = rows
+  testedDeviceCount.value = res.total
+  return { rows, total: res.total }
 }
 
 /* ---------------- Load ---------------- */
@@ -870,8 +881,13 @@ async function load() {
           : `/software/${name}/${encodeURIComponent(software.value.version)}`,
       )
     }
-    // Both tabs load up front so their counts are correct before they are opened.
-    await Promise.all([loadVendorSchema(), loadVendorDevices(), loadTestedDevices()])
+    // The tested grid is not mounted until its tab opens. Fetch its total
+    // independently so both count labels are correct on the Details tab.
+    await Promise.all([
+      loadVendorSchema(),
+      loadVendorDevices(),
+      loadTestedDeviceCount(software.value.id),
+    ])
   } catch (e: any) {
     error.value = e.message
   }
@@ -927,7 +943,7 @@ onMounted(load)
       <button v-for="t in tabs" :key="t.id" :class="{ active: tab === t.id }" @click="tab = t.id">
         {{ t.label
         }}<span v-if="t.id === 'vendor'"> ({{ software.vendor_device_count ?? vendorRows.length }})</span
-        ><span v-else-if="t.id === 'tested'"> ({{ testedRows.length }})</span>
+        ><span v-else-if="t.id === 'tested'"> ({{ testedDeviceCount ?? '…' }})</span>
       </button>
     </div>
 
@@ -979,7 +995,7 @@ onMounted(load)
           </dd>
           <dt>Tested Devices</dt>
           <dd>
-            {{ testedRows.length }}
+            {{ testedDeviceCount ?? '…' }}
             <span class="muted">— inventory devices this software has been run against</span>
           </dd>
           <dt>Software ID</dt><dd>{{ software.id }}</dd>
@@ -1030,18 +1046,13 @@ onMounted(load)
             <button class="btn" @click="exportVendorAs('json')">Export JSON</button>
             <button class="btn" @click="exportVendorAs('csv')">Export CSV</button>
           </OverflowMenu>
-          <FilterProfilesMenu
-            ref="vendorProfiles"
-            :entity="vendorViewEntity"
-            :get-state="() => vendorTable?.getState()"
-            :apply-state="(state) => vendorTable?.applyState(state)"
-          />
         </div>
       </div>
       <DataTable
         ref="vendorTable"
         :columns="vendorColumns"
         :rows="vendorDisplayRows"
+        :remote-loader="loadRemoteVendorDevices"
         :editable="auth.canWrite"
         :row-editable="auth.canWrite"
         :selectable="auth.canWrite"
@@ -1054,6 +1065,14 @@ onMounted(load)
         @selection-change="(r: any[]) => (vendorSelected = r)"
         @grid-ready="onVendorGridReady"
       >
+        <template #table-actions>
+          <FilterProfilesMenu
+            ref="vendorProfiles"
+            :entity="vendorViewEntity"
+            :get-state="() => vendorTable?.getState()"
+            :apply-state="(state) => vendorTable?.applyState(state)"
+          />
+        </template>
         <template #selection-actions>
           <button
             v-if="auth.canWrite && vendorSelected.length"
@@ -1091,23 +1110,23 @@ onMounted(load)
           Inventory devices {{ software.name }} has actually been run against, summarised from
           recorded tests. Read-only — edit the underlying runs on the Tests page.
         </p>
-        <div class="toolbar">
+      </div>
+      <DataTable
+        ref="testedTable"
+        :columns="testedColumns"
+        :rows="testedRows"
+        :remote-loader="loadRemoteTestedDevices"
+        @grid-ready="onTestedGridReady"
+      >
+        <template #table-actions>
           <FilterProfilesMenu
             ref="testedProfiles"
             :entity="testedViewEntity"
             :get-state="() => testedTable?.getState()"
             :apply-state="(state) => testedTable?.applyState(state)"
           />
-        </div>
-      </div>
-      <p v-if="testedLoading" class="muted">Loading…</p>
-      <DataTable
-        v-else
-        ref="testedTable"
-        :columns="testedColumns"
-        :rows="testedRows"
-        @grid-ready="onTestedGridReady"
-      />
+        </template>
+      </DataTable>
     </div>
 
     <FormModal

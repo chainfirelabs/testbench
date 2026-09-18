@@ -1,5 +1,22 @@
 # Release notes
 
+## 1.9.1
+
+- Large Devices, Software, Tests, Audit Log, Vendor Devices, and Tested Devices
+  lists now page, search, filter, and sort through the API instead of downloading
+  the complete collection before rendering.
+- Vendor-device pagination preserves make/model/hardware grouping and retains all
+  firmware versions in each collapsed row. Bulk deletion expands selected groups
+  to their complete set of firmware records.
+- Saved Views now sit consistently beside the Columns/Fields picker. Administrators
+  can reach field customization directly from schema-backed list pages.
+- Test component fields remain available on upgraded installations and honor the
+  configured list visibility.
+- Development seed scripts accept a TestBench URL and API key, support configurable
+  record counts and component suites, create grouped and unique vendor devices,
+  and generate component-aware tests. The combined seeder reuses existing records
+  and no longer attempts to create local users.
+
 ## 1.9.0
 
 - Administrators can manage AI provider endpoints, encrypted credentials, and

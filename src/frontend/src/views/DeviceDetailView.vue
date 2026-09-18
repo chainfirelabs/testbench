@@ -102,6 +102,8 @@ const lastScan = ref<any>(null)
 const compat = ref<any>(null)
 const compatLoading = ref(false)
 const compatError = ref('')
+const vendorClaimCount = ref<number | null>(null)
+const testCount = ref<number | null>(null)
 // Vendors also publish "this will not work" rows. They match the device the
 // same way, but they are not an answer to "what can I run", so they are folded
 // away behind a count.
@@ -375,10 +377,31 @@ async function loadCompat() {
   compatError.value = ''
   try {
     compat.value = await api<any>(`/devices/${detail.value.id}/compatible-software`)
+    vendorClaimCount.value = (compat.value.items || []).reduce(
+      (total: number, item: any) => total + (item.vendor_devices?.length || 0),
+      0,
+    )
   } catch (e: any) {
     compatError.value = e.message
   } finally {
     compatLoading.value = false
+  }
+}
+
+async function loadRelatedCounts() {
+  if (!detail.value?.id) return
+  const deviceId = detail.value.id
+  vendorClaimCount.value = null
+  testCount.value = null
+  try {
+    const counts = await api<any>(`/devices/${deviceId}/related-counts`)
+    // Do not land a slow response on a different device after navigation.
+    if (detail.value?.id !== deviceId) return
+    vendorClaimCount.value = counts.vendor_claims
+    testCount.value = counts.tests
+  } catch {
+    // The tabs remain usable and load their own data; an unavailable count is
+    // represented honestly as pending rather than as a false zero.
   }
 }
 
@@ -401,7 +424,9 @@ function toggleExpanded(id: string) {
 // any of them changes the answer. Drop what we have and refetch if shown.
 function invalidateCompat() {
   compat.value = null
+  vendorClaimCount.value = null
   expanded.value = []
+  void loadRelatedCounts()
   if (tab.value === 'software') loadCompat()
 }
 
@@ -622,7 +647,7 @@ onMounted(async () => {
   await Promise.all([load(), loadDeviceTypes()])
   // The schema depends on the device's type, so it is fetched once the device
   // is in hand rather than alongside it.
-  await Promise.all([loadSchema(), loadActions()])
+  await Promise.all([loadSchema(), loadActions(), loadRelatedCounts()])
 })
 
 // Changing a device's type changes what this page is: different columns,
@@ -672,7 +697,9 @@ watch(() => detail.value?.device_type_id, () => {
         :class="{ active: tab === t.id }"
         @click="tab = t.id"
       >
-        {{ t.label }}
+        {{ t.label
+        }}<span v-if="t.id === 'software'"> ({{ vendorClaimCount ?? '…' }})</span
+        ><span v-else-if="t.id === 'tests'"> ({{ testCount ?? '…' }})</span>
       </button>
     </div>
 

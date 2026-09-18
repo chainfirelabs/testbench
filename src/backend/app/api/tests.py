@@ -17,6 +17,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import download_response, export_response, parse_import, strip_nulls, template_csv
+from ..services.list_filters import exclude_clause, excluded_values
 from ..services.query import row_error, row_scope
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
 from .deps import get_current_user, require_write
@@ -157,6 +158,8 @@ def _query_tests(
     catalog = {field.key: field for field in get_entity_fields(db, "tests")}
     joined_component = False
     for key, value in (filters or {}).items():
+        excluded = key.startswith("exclude__")
+        key = key.removeprefix("exclude__") if excluded else key
         field = catalog.get(key)
         if not field or field.key in {"device_unique_id", "software_name", "created_by_username", "created_at"}:
             continue
@@ -167,6 +170,12 @@ def _query_tests(
             expression = getattr(SoftwareComponent, "name" if key == "component_name" else "version")
         else:
             expression = entity_field_expression(Test, field)
+        if excluded:
+            values = [coerce_query_value(field, item) for item in excluded_values(value)]
+            clause = exclude_clause(expression, values)
+            if clause is not None:
+                q = q.where(clause)
+            continue
         value = coerce_query_value(field, value)
         q = q.where(expression == value if field.indexed else expression.ilike(f"%{value}%"))
     if search:

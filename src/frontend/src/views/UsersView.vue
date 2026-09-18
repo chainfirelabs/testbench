@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import DataTable, { type RowAction } from '../components/DataTable.vue'
+import DataTable, { type RemoteTableRequest, type RowAction } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import { api } from '../api/client'
 import { MIN_PASSWORD_LENGTH, rolesUpTo } from '../constants'
 import { useAuthStore } from '../stores/auth'
+import { remoteTableParams } from '../remoteTable'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -67,7 +68,14 @@ function showToast(msg: string, isError = false) {
 }
 
 async function load() {
-  rows.value = await api<any[]>('/users')
+  table.value?.reapplyView()
+}
+
+async function loadRemoteUsers(request: RemoteTableRequest) {
+  const params = remoteTableParams(request)
+  const page = await api<any>(`/users/paged?${params}`)
+  rows.value = page.items
+  return { rows: page.items, total: page.total }
 }
 
 function onGridReady() {
@@ -305,12 +313,6 @@ onMounted(load)
       <h2>Users</h2>
       <div class="toolbar">
         <button v-if="auth.isAdmin" class="btn btn-primary" @click="openNew">+ New user</button>
-        <FilterProfilesMenu
-          ref="profiles"
-          entity="users"
-          :get-state="() => table?.getState()"
-          :apply-state="(s) => table?.applyState(s)"
-        />
       </div>
     </div>
     <p class="muted" style="margin-top: 0; max-width: 90ch">
@@ -326,9 +328,19 @@ onMounted(load)
       ref="table"
       :columns="columns"
       :rows="rows"
+      :remote-loader="loadRemoteUsers"
       :extra-row-actions="extraActions"
       @grid-ready="onGridReady"
-    />
+    >
+      <template #table-actions>
+        <FilterProfilesMenu
+          ref="profiles"
+          entity="users"
+          :get-state="() => table?.getState()"
+          :apply-state="(s) => table?.applyState(s)"
+        />
+      </template>
+    </DataTable>
 
     <FormModal
       v-if="showNew"

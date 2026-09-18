@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, toRaw } from 'vue'
-import DataTable from '../components/DataTable.vue'
+import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
+import EntityFieldsModal from '../components/EntityFieldsModal.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
@@ -14,6 +15,8 @@ import { useImportProgress } from '../importProgress'
 import { useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityFields } from '../entityFields'
+import { loadAllPages } from '../pagination'
+import { remoteTableParams } from '../remoteTable'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -24,6 +27,7 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
+const customizingFields = ref(false)
 const { fields: testFields, loadFields } = useEntityFields('tests')
 const { importState, runImport, closeImport } = useImportProgress()
 
@@ -208,7 +212,8 @@ const NEW_TEST_FIELDS = computed<FormField[]>(() => {
   return fields
 })
 
-function openNew() {
+async function openNew() {
+  if (!devices.value.length || !software.value.length) await loadReferences()
   newTest.value = {
     device_unique_id: '',
     software_name: '',
@@ -343,15 +348,22 @@ function isRowDirty(row: any): boolean {
   return !!row.id && dirty.value.has(row.id)
 }
 
-async function load() {
-  const [tests, devPage, softwarePage] = await Promise.all([
-    api<any>('/tests?page_size=500'),
-    api<any>('/devices?page_size=1000'),
-    api<any>('/software?page_size=1000'),
+async function loadReferences() {
+  const [devPage, softwarePage] = await Promise.all([
+    loadAllPages<any>((page) => api(`/devices?page=${page}&page_size=1000`)),
+    loadAllPages<any>((page) => api(`/software?page=${page}&page_size=1000`)),
   ])
-  rows.value = tests.items
   devices.value = devPage.items
   software.value = softwarePage.items
+}
+
+async function load() { table.value?.reapplyView() }
+
+async function loadRemoteTests(request: RemoteTableRequest) {
+  const params = remoteTableParams(request)
+  const page = await api<any>(`/tests?${params}`)
+  rows.value = page.items
+  return { rows: page.items, total: page.total }
 }
 
 function onGridReady() {
@@ -488,6 +500,7 @@ async function deleteRow(row: any) {
     await api(`/tests/${row.id}`, { method: 'DELETE' })
     rows.value = rows.value.filter((r) => toRaw(r) !== toRaw(row))
     dirty.value.delete(row.id)
+    await load()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -502,6 +515,7 @@ async function deleteSelected() {
     rows.value = rows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) dirty.value.delete(id)
     selected.value = []
+    await load()
     showToast(`Deleted ${ids.length} test${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -591,7 +605,7 @@ async function saveNewTest(values: Record<string, any>) {
   try {
     const created = await api<any>('/tests', { method: 'POST', body: JSON.stringify(payload) })
     // Newest first, so the row you just made is where you are looking.
-    rows.value.unshift(created)
+    await load()
     showNew.value = false
     showToast('Test recorded')
   } catch (e: any) {
@@ -621,7 +635,7 @@ async function onImportFile(e: Event) {
   }
 }
 
-onMounted(() => Promise.all([load(), loadFields()]))
+onMounted(loadFields)
 </script>
 
 <template>
@@ -630,6 +644,9 @@ onMounted(() => Promise.all([load(), loadFields()]))
       <h2>Tests</h2>
       <div class="toolbar">
         <button v-if="auth.canWrite" class="btn btn-primary" @click="openNew">+ New test</button>
+        <button v-if="auth.isAdmin" class="btn" @click="customizingFields = true">
+          Customize fields
+        </button>
         <!-- Outside the menu: the panel closes on click, and a file input
              unmounted mid-picker never fires `change`. -->
         <input ref="fileInput" type="file" accept=".json,.csv" style="display: none" @change="onImportFile" />
@@ -647,18 +664,13 @@ onMounted(() => Promise.all([load(), loadFields()]))
           <button class="btn" @click="exportAs('json')">Export JSON</button>
           <button class="btn" @click="exportAs('csv')">Export CSV</button>
         </OverflowMenu>
-        <FilterProfilesMenu
-          ref="profiles"
-          entity="tests"
-          :get-state="() => table?.getState()"
-          :apply-state="(s) => table?.applyState(s)"
-        />
       </div>
     </div>
     <DataTable
       ref="table"
       :columns="columns"
       :rows="rows"
+      :remote-loader="loadRemoteTests"
       :editable="auth.canWrite"
       :selectable="auth.canWrite"
       :dirty-ids="dirtyIds"
@@ -671,6 +683,14 @@ onMounted(() => Promise.all([load(), loadFields()]))
       @selection-change="(r: any[]) => (selected = r)"
       @grid-ready="onGridReady"
     >
+      <template #table-actions>
+        <FilterProfilesMenu
+          ref="profiles"
+          entity="tests"
+          :get-state="() => table?.getState()"
+          :apply-state="(s) => table?.applyState(s)"
+        />
+      </template>
       <template #selection-actions>
         <button
           v-if="auth.canWrite && selected.length"
@@ -690,6 +710,13 @@ onMounted(() => Promise.all([load(), loadFields()]))
         </button>
       </template>
     </DataTable>
+    <EntityFieldsModal
+      v-if="customizingFields"
+      entity="tests"
+      title="Test Fields"
+      @close="customizingFields = false"
+      @saved="loadFields"
+    />
 
     <FormModal
       v-if="bulkEditing"

@@ -260,6 +260,16 @@ class SoftwareTestedDevicesOut(BaseModel):
     devices: list[SoftwareTestedDeviceOut]
 
 
+class DeviceRelatedCountsOut(BaseModel):
+    """Independent totals shown on a device detail's related-data tabs."""
+
+    vendor_claims: int
+    tests: int
+    total: int = 0
+    page: int = 1
+    page_size: int = 100
+
+
 class DeviceCompatibleSoftwareOut(BaseModel):
     """One software version the vendor claims runs on a given device."""
 

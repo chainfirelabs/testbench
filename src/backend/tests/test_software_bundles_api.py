@@ -54,6 +54,11 @@ class SoftwareBundleApiTests(SchemaCase):
             {(item["software_name"], item["component_name"]) for item in tests},
             {("Microsoft 365", "Microsoft Outlook"), ("Microsoft 365", "Microsoft Word")},
         )
+        tested_page = self.get(
+            f"/api/v1/software/{software['id']}/tested-devices?page=1&page_size=1"
+        ).json()
+        self.assertEqual(tested_page["total"], 2)
+        self.assertEqual(len(tested_page["devices"]), 1)
         tested = self.get(f"/api/v1/software/{software['id']}/tested-devices").json()["devices"]
         self.assertEqual(
             {item["component"]["name"] for item in tested},
@@ -75,6 +80,28 @@ class SoftwareBundleApiTests(SchemaCase):
 
 
 class VendorDeviceSchemaApiTests(SchemaCase):
+    def test_grouped_vendor_devices_page_without_splitting_firmware(self):
+        software = self.post("/api/v1/software", {
+            "name": "Grouped Matrix", "version": "1.0",
+        }).json()
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        for firmware in ("9.12", "10.2", "10.3"):
+            response = self.post(endpoint, {
+                "make": "Acme", "model": "R1", "hardware_version": "A",
+                "firmware_version": firmware,
+            })
+            self.assertEqual(response.status_code, 201, response.text)
+        self.post(endpoint, {
+            "make": "Acme", "model": "R2", "hardware_version": "B",
+            "firmware_version": "1.0",
+        })
+
+        page = self.get(f"{endpoint}/grouped?page=1&page_size=1").json()
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertEqual(page["items"][0]["firmware_version"], "10.3")
+        self.assertEqual(len(page["items"][0]["_firmwareMembers"]), 3)
+
     def test_custom_field_can_be_required_for_one_software(self):
         software = self.post("/api/v1/software", {
             "name": "Router Manager", "version": "1.0",

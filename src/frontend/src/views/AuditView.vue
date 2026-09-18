@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import DataTable from '../components/DataTable.vue'
+import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import DetailModal from '../components/DetailModal.vue'
 import { detailCellRenderer } from '../detail'
 import { api, downloadFile } from '../api/client'
+import { remoteTableParams } from '../remoteTable'
 
 const rows = ref<any[]>([])
 const toast = ref('')
@@ -46,8 +47,14 @@ const columns = [
 ]
 
 async function load() {
-  const page = await api<any>('/audit_logs?page_size=500')
+  table.value?.reapplyView()
+}
+
+async function loadRemoteAudit(request: RemoteTableRequest) {
+  const params = remoteTableParams(request)
+  const page = await api<any>(`/audit_logs?${params}`)
   rows.value = page.items
+  return { rows: page.items, total: page.total }
 }
 
 function onGridReady() {
@@ -68,20 +75,24 @@ onMounted(load)
       <div class="toolbar">
         <button class="btn" @click="exportAs('json')">Export JSON</button>
         <button class="btn" @click="exportAs('csv')">Export CSV</button>
-        <FilterProfilesMenu
-          ref="profiles"
-          entity="audit"
-          :get-state="() => table?.getState()"
-          :apply-state="(s) => table?.applyState(s)"
-        />
       </div>
     </div>
     <DataTable
       ref="table"
       :columns="columns"
       :rows="rows"
+      :remote-loader="loadRemoteAudit"
       @grid-ready="onGridReady"
-    />
+    >
+      <template #table-actions>
+        <FilterProfilesMenu
+          ref="profiles"
+          entity="audit"
+          :get-state="() => table?.getState()"
+          :apply-state="(s) => table?.applyState(s)"
+        />
+      </template>
+    </DataTable>
     <DetailModal
       v-if="detailEntry"
       :title="detailEntry.title"

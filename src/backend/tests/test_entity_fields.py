@@ -89,6 +89,9 @@ class EntityFieldConfigurationTests(unittest.TestCase):
         self.assertTrue(devices["unique_id"]["visible"])
         self.assertNotIn("username", devices)
         self.assertNotIn("password", devices)
+        tests = {field["key"]: field for field in configured["tests"]}
+        self.assertTrue(tests["component_name"]["visible"])
+        self.assertTrue(tests["component_version"]["visible"])
 
     def test_minimal_catalog_and_custom_json_field(self):
         configured = self.configured({
