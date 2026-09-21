@@ -8,17 +8,66 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..core.security import hash_password
 from ..db import as_utc, get_db, utcnow
-from ..models import User
+from ..models import Role, User
 from ..schemas import Page, PasswordReset, UserCreate, UserOut, UserUpdate
 from ..services.audit import field_diff, log_action
-from ..services.list_filters import exclude_clause, excluded_values
-from .deps import require_admin, require_admin_session
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from .deps import require_users_manage, require_users_manage_session
+from ..services.permissions import USERS_MANAGE, role_permissions
+
+
+def _known_role(db: Session, slug: str) -> None:
+    """Refuse a role this installation has not defined.
+
+    Roles are rows now, so "readonly, tester or admin" is no longer the answer —
+    but neither is "anything". A user carries a role by slug, and one naming a
+    role that does not exist grants nothing at all: an account that cannot use
+    the app, created without a word of complaint.
+    """
+    if db.scalar(select(Role.id).where(Role.slug == slug)):
+        return
+    available = sorted(db.scalars(select(Role.slug)))
+    raise HTTPException(
+        status_code=422,
+        detail=f"No role '{slug}'. Available roles: {', '.join(available)}.",
+    )
+
+
+def _guard_last_manager(db: Session, target: User, new_role: str) -> None:
+    """Refuse a change that would leave nobody able to manage accounts.
+
+    The mirror of the rule in `api/roles.py`: that one stops the permission
+    being edited off the last role that has it, this one stops the last account
+    holding such a role being moved off it. Either way the failure is the same
+    — a deployment whose only way back in is a database console.
+    """
+    if USERS_MANAGE not in role_permissions(db, target.role):
+        return
+    if USERS_MANAGE in role_permissions(db, new_role):
+        return
+    managing = {
+        slug for slug in db.scalars(select(Role.slug))
+        if USERS_MANAGE in role_permissions(db, slug)
+    }
+    others = db.scalar(
+        select(func.count(User.id)).where(
+            User.role.in_(managing), User.is_active.is_(True), User.id != target.id,
+        )
+    ) or 0
+    if not others:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{target.username}' is the only active account that can manage "
+                "users and roles. Give another account such a role first."
+            ),
+        )
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("", response_model=list[UserOut])
-def list_users(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def list_users(db: Session = Depends(get_db), user: User = Depends(require_users_manage)):
     users = db.scalars(select(User).order_by(User.username)).all()
     now = utcnow()
     ttl = timedelta(hours=settings.jwt_expires_hours)
@@ -39,7 +88,7 @@ def list_users_paged(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_users_manage),
 ):
     q = select(User)
     if search:
@@ -52,22 +101,28 @@ def list_users_paged(
         "last_login_at": User.last_login_at,
     }
     for key, value in request.query_params.items():
-        if not key.startswith("exclude__"):
+        if not key.startswith(("exclude__", "include__")):
             continue
-        field = key.removeprefix("exclude__")
+        keeping = key.startswith("include__")
+        field = key.removeprefix("include__" if keeping else "exclude__")
         values = excluded_values(value)
         if field == "is_online":
-            excluded = {str(item).lower() for item in values}
+            # Two values, so the ticked and unticked sides say the same thing
+            # from opposite ends: what is kept is what is not dropped.
+            dropped = {str(item).lower() for item in values}
+            if keeping:
+                dropped = {"true", "false"} - dropped
             cutoff = utcnow() - timedelta(hours=settings.jwt_expires_hours)
-            if "true" in excluded and "false" in excluded:
+            if "true" in dropped and "false" in dropped:
                 q = q.where(User.id.is_(None))
-            elif "true" in excluded:
+            elif "true" in dropped:
                 q = q.where(or_(User.last_login_at.is_(None), User.last_login_at < cutoff))
-            elif "false" in excluded:
+            elif "false" in dropped:
                 q = q.where(User.last_login_at >= cutoff)
             continue
         expression = filter_columns.get(field)
-        clause = exclude_clause(expression, values) if expression is not None else None
+        pick = include_clause if keeping else exclude_clause
+        clause = pick(expression, values) if expression is not None else None
         if clause is not None:
             q = q.where(clause)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
@@ -94,7 +149,7 @@ def create_user(
     body: UserCreate,
     request: Request,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_admin_session),
+    actor: User = Depends(require_users_manage_session),
 ):
     """Create a local account.
 
@@ -110,6 +165,7 @@ def create_user(
     )
     if taken:
         raise HTTPException(status_code=409, detail=f"Username '{body.username}' is already taken")
+    _known_role(db, body.role)
 
     user = User(
         username=body.username,
@@ -142,13 +198,17 @@ def update_user(
     body: UserUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_admin_session),
+    actor: User = Depends(require_users_manage_session),
 ):
     target = db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     if target.id == actor.id and body.is_active is False:
         raise HTTPException(status_code=400, detail="Cannot deactivate yourself")
+    if body.is_active is False:
+        # Deactivating the last account that can manage roles locks the
+        # installation out just as thoroughly as demoting it.
+        _guard_last_manager(db, target, "")
 
     updates = body.model_dump(exclude_unset=True)
     if "role" in updates and updates["role"] != target.role:
@@ -162,6 +222,8 @@ def update_user(
             # The same trap as deactivating yourself, one step quieter: demote
             # your own account and the page you did it from is now forbidden.
             raise HTTPException(status_code=400, detail="Cannot change your own role")
+        _known_role(db, updates["role"])
+        _guard_last_manager(db, target, updates["role"])
 
     tracked = ("is_active", "email", "role")
     old = {f: getattr(target, f) for f in tracked}
@@ -180,7 +242,7 @@ def reset_password(
     body: PasswordReset,
     request: Request,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_admin_session),
+    actor: User = Depends(require_users_manage_session),
 ):
     """Set a local account's password, without needing the old one.
 

@@ -5,17 +5,18 @@ import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
-import EntityFieldsModal from '../components/EntityFieldsModal.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
-import { api, downloadFile } from '../api/client'
+import { api } from '../api/client'
+import { useDownload } from '../downloads'
 import { useImportProgress } from '../importProgress'
-import { useAuthStore } from '../stores/auth'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityFields } from '../entityFields'
 import { remoteTableParams } from '../remoteTable'
+import { makeFilterValues } from '../suggestions'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -24,7 +25,6 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
-const customizingFields = ref(false)
 const { importState, runImport, closeImport } = useImportProgress()
 const { fields: softwareFields, loadFields } = useEntityFields('software')
 
@@ -110,7 +110,7 @@ const baseColumns = [
       return el
     },
   },
-  { field: 'vendor_device_count', headerName: 'Vendor Devices', editable: false },
+  { field: 'vendor_device_count', headerName: 'Vendor Claims', editable: false },
   {
     field: 'misc_data',
     headerName: 'Misc Data',
@@ -189,6 +189,10 @@ function showToast(msg: string, isError = false) {
   setTimeout(() => (toast.value = ''), 4000)
 }
 
+// An export of every software version with its vendor devices is not a quick
+// request; without this the button looks broken while it builds.
+const { downloading, download } = useDownload(showToast)
+
 // A computed (not a function called from the template): a fresh Set on every
 // render would look like a change to the grid and trigger needless refreshes.
 const dirtyIds = computed(() => new Set(dirty.value.keys()))
@@ -197,26 +201,56 @@ function isRowDirty(row: any): boolean {
   return !!row.id && dirty.value.has(row.id)
 }
 
-// Rows sharing a name are versions of the same software. The grid shows only the
-// current version of each by default, so it reads as a list of software rather
-// than a changelog.
-const showAllVersions = ref(false)
+/*
+ * Rows sharing a name are versions of the same software, and this list shows
+ * only the current one of each — always, not by default.
+ *
+ * There used to be a toggle for the other view. It answered a question this
+ * page is the wrong place to ask: a list of every version of everything is a
+ * changelog, and reading it meant scanning past four rows of the same name to
+ * find the next piece of software. The versions of one piece of software
+ * belong to that software, and are one click away on its own page.
+ */
 
+/** Re-run filter and sort over rows whose values changed underneath them. */
 async function load() {
   table.value?.reapplyView()
 }
 
+/**
+ * Re-read the list from the server, row count and all.
+ *
+ * For software created, deleted, renamed or imported. A server-paged grid
+ * keeps the row count it was last given, so refreshing the blocks it holds
+ * cannot show a row that did not exist when it was told how many there were.
+ */
+async function reloadRows() {
+  table.value?.reload()
+}
+
+/*
+ * Values for the column filters' checklists. The grid is server-paged, so the
+ * distinct values of a column are the server's to answer.
+ */
+const filterValues = makeFilterValues({
+  entity: 'software',
+  local: (colId) => {
+    const field = softwareFields.value.find((f: any) => f.key === colId)
+    if (field?.type === 'select') return field.options
+    if (field?.type === 'boolean') return [true, false]
+    return undefined
+  },
+  // Counts and the rest-of-the-document cell: nothing anyone picks off a list.
+  skip: ['misc_data', 'vendor_device_count', 'version_count', 'created_at', 'updated_at'],
+})
+
 async function loadRemoteSoftware(request: RemoteTableRequest) {
-  const params = remoteTableParams(request, { latest_only: !showAllVersions.value })
+  const params = remoteTableParams(request, { latest_only: true })
   const page = await api<any>(`/software?${params}`)
   rows.value = page.items
   return { rows: page.items, total: page.total }
 }
 
-function toggleAllVersions() {
-  showAllVersions.value = !showAllVersions.value
-  load()
-}
 
 function onGridReady() {
   profiles.value?.applyDefault()
@@ -411,14 +445,15 @@ async function createSoftware(values: Record<string, any>) {
         `${created.name} ${created.version} created with ${created.vendor_device_count} vendor device${created.vendor_device_count === 1 ? '' : 's'}`,
       )
       // A new version changes which row represents the software, so reload.
-      await load()
+      await reloadRows()
       return
     }
     delete merged.inherit_from
     merged.bundle_components = bundlePayload(newBundleComponents.value)
     const created = await api<any>('/software', { method: 'POST', body: JSON.stringify(merged) })
-    // Newest first, so the row you just made is where you are looking.
-    await load()
+    // A row that did not exist a moment ago: re-read the list rather than
+    // refresh the window the grid is already holding.
+    await reloadRows()
     showNew.value = false
     showToast(`Software ${created.name} created`)
   } catch (e: any) {
@@ -495,9 +530,9 @@ async function saveEdit(values: Record<string, any>) {
     dirty.value.delete(row.id)
     editTarget.value = null
     showToast(`Software ${updated.name} saved`)
-    // A rename moves the software's other versions too, and they may be on
-    // screen; only a reload shows them under the new name.
-    if (updated.name !== row.name || showAllVersions.value) await load()
+    // A rename moves the software's other versions too, and the row on screen
+    // is only the current one; only a reload shows it under the new name.
+    if (updated.name !== row.name) await reloadRows()
   } catch (e: any) {
     showToast(e.message, true)
   } finally {
@@ -533,7 +568,10 @@ async function deleteRow(row: any) {
     await api(`/software/${row.id}`, { method: 'DELETE' })
     rows.value = rows.value.filter((r) => toRaw(r) !== toRaw(row))
     dirty.value.delete(row.id)
-    await load()
+    // The selection lives in the grid, and a deleted row stays ticked in it
+    // until told otherwise.
+    table.value?.clearSelection()
+    await reloadRows()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -547,8 +585,12 @@ async function deleteSelected() {
     await api('/software/delete', { method: 'POST', body: JSON.stringify({ ids }) })
     rows.value = rows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) dirty.value.delete(id)
+    // Emptying this page's copy leaves the rows ticked in the grid, which then
+    // adds them to whatever is ticked next — deleting 100 and selecting 100
+    // more read as 200.
+    table.value?.clearSelection()
     selected.value = []
-    await load()
+    await reloadRows()
     showToast(`Deleted ${ids.length} software record${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -609,13 +651,13 @@ async function saveBulkEdit(values: Record<string, any>) {
 }
 
 function exportAs(format: string) {
-  downloadFile(`/software/export?format=${format}`, `software.${format}`)
+  download(`/software/export?format=${format}`, `software.${format}`, 'export')
 }
 
 /** A blank CSV carrying exactly the columns /software/import accepts —
  * `vendor_devices` included, as a JSON array in one cell. */
 function downloadTemplate() {
-  downloadFile('/software/template', 'software-template.csv')
+  download('/software/template', 'software-template.csv', 'template')
 }
 
 async function onImportFile(e: Event) {
@@ -623,8 +665,8 @@ async function onImportFile(e: Event) {
   if (!file) return
   try {
     const result = await runImport('/software/import', file)
-    // Vendor device counts change with the import too; the grid shows them.
-    if (result) await load()
+    // An import adds rows and moves the vendor device counts the grid shows.
+    if (result) await reloadRows()
   } finally {
     if (fileInput.value) fileInput.value.value = ''
   }
@@ -638,25 +680,12 @@ onMounted(() => Promise.all([load(), loadFields()]))
     <div class="page-header">
       <h2>Software</h2>
       <div class="toolbar">
-        <button v-if="auth.canWrite" class="btn btn-primary" @click="openNew">+ New software</button>
-        <button v-if="auth.isAdmin" class="btn" @click="customizingFields = true">
-          Customize fields
-        </button>
+        <button v-if="auth.can(PERMISSION.softwareEdit)" class="btn btn-primary" @click="openNew">+ New software</button>
         <!-- Outside the menu: the panel closes on click, and a file input
              unmounted mid-picker never fires `change`. -->
         <input ref="fileInput" type="file" accept=".json,.csv" style="display: none" @change="onImportFile" />
-        <!-- Stays visible even on a phone: its label is the only thing saying
-             which of the two sets you are currently looking at. -->
-        <button
-          class="btn"
-          :class="{ 'btn-on': showAllVersions }"
-          :title="showAllVersions ? 'Show only the current version of each' : 'Show every version of every name'"
-          @click="toggleAllVersions"
-        >
-          {{ showAllVersions ? 'All versions' : 'Latest only' }}
-        </button>
         <OverflowMenu>
-          <template v-if="auth.canWrite">
+          <template v-if="auth.can(PERMISSION.softwareEdit)">
             <button
               class="btn"
               title="Software and, where a row carries one, its vendor device list"
@@ -667,6 +696,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
             <button
               class="btn"
               title="Download a blank CSV with the columns an import accepts"
+              :disabled="downloading"
               @click="downloadTemplate"
             >
               Template
@@ -675,16 +705,18 @@ onMounted(() => Promise.all([load(), loadFields()]))
           <button
             class="btn"
             title="Every software version, each with its vendor device list"
+            :disabled="downloading"
             @click="exportAs('json')"
           >
-            Export JSON
+            {{ downloading ? 'Preparing…' : 'Export JSON' }}
           </button>
           <button
             class="btn"
             title="Every software version, each with its vendor device list (one JSON cell per row)"
+            :disabled="downloading"
             @click="exportAs('csv')"
           >
-            Export CSV
+            {{ downloading ? 'Preparing…' : 'Export CSV' }}
           </button>
         </OverflowMenu>
       </div>
@@ -694,11 +726,12 @@ onMounted(() => Promise.all([load(), loadFields()]))
       :columns="columns"
       :rows="rows"
       :remote-loader="loadRemoteSoftware"
-      :editable="auth.canWrite"
-      :selectable="auth.canWrite"
+      :filter-values="filterValues"
+      :editable="auth.can(PERMISSION.softwareEdit)"
+      :selectable="auth.can(PERMISSION.softwareEdit)"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
-      :row-editable="auth.canWrite"
+      :row-editable="auth.can(PERMISSION.softwareEdit)"
       @cell-edit="onCellEdit"
       @edit-row="openEdit"
       @save-row="saveRow"
@@ -716,7 +749,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
       </template>
       <template #selection-actions>
         <button
-          v-if="auth.canWrite && selected.length"
+          v-if="auth.can(PERMISSION.softwareEdit) && selected.length"
           class="btn"
           title="Edit common values on the selected software"
           @click="openBulkEdit"
@@ -724,7 +757,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
           Edit
         </button>
         <button
-          v-if="auth.canWrite && selected.length"
+          v-if="auth.can(PERMISSION.softwareEdit) && selected.length"
           class="btn btn-danger"
           title="Delete the selected software"
           @click="deleteSelected"
@@ -733,13 +766,6 @@ onMounted(() => Promise.all([load(), loadFields()]))
         </button>
       </template>
     </DataTable>
-    <EntityFieldsModal
-      v-if="customizingFields"
-      entity="software"
-      title="Software Fields"
-      @close="customizingFields = false"
-      @saved="loadFields"
-    />
     <FormModal
       v-if="bulkEditing"
       :title="`Edit ${selected.length} selected software records`"

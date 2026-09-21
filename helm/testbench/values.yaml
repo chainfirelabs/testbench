@@ -34,7 +34,7 @@ frontend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/frontend
-    tag: "1.9.1"
+    tag: "1.9.3"
     digest: "" # Example: sha256:...
     pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
   service:
@@ -56,7 +56,7 @@ backend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/backend
-    tag: "1.9.1"
+    tag: "1.9.3"
     digest: ""
     pullPolicy: ""
   # Scheduler requests and container limits for each backend Pod.
@@ -73,7 +73,7 @@ mcp:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/mcp
-    tag: "1.9.1"
+    tag: "1.9.3"
     digest: ""
     pullPolicy: ""
   service:
@@ -260,7 +260,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/network-scan
-      tag: "1.9.1"
+      tag: "1.9.3"
       digest: "" # Optional immutable digest; overrides tag.
       pullPolicy: ""
     # Per-port TCP connection timeout.
@@ -304,7 +304,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/device-info
-      tag: "1.9.1"
+      tag: "1.9.3"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -383,7 +383,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/reboot
-      tag: "1.9.1"
+      tag: "1.9.3"
       digest: ""
       pullPolicy: ""
     researchImage:

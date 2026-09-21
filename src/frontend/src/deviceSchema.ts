@@ -33,6 +33,12 @@ export interface SchemaField {
   role?: string | null
   indexed: boolean
   unique: boolean
+  /** The value is a web address, so the UI offers it as a link. */
+  opens_web_page: boolean
+  /** The scheme that link uses unless the device overrides it. */
+  link_scheme: 'http' | 'https'
+  /** The port it opens on, or null for the scheme's own. */
+  link_port: number | null
   validation: Record<string, any>
   default?: any
   position: number
@@ -87,6 +93,9 @@ export interface FieldDefinition {
   sensitive: boolean
   indexed: boolean
   unique_value: boolean
+  opens_web_page: boolean
+  link_scheme: 'http' | 'https'
+  link_port: number | null
   plugin_role: string | null
   protected_system_field: boolean
   enabled: boolean

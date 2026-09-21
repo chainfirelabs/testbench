@@ -21,21 +21,28 @@ export const ARCHITECTURES = [
 ]
 
 /**
- * Mirrors ROLE_RANK in backend/app/models/user.py.
+ * Mirrors VENDOR_SUPPORT_STATUSES in backend/app/models/vendor_device.py.
  *
- * Roles are a ladder: an API key may carry any role at or below its owner's,
- * and the backend rejects anything higher. The dropdown offers exactly the
- * roles the API would accept, so a user is never shown a choice that 403s.
+ * Shared by the software page's own vendor list and the cross-software
+ * catalogue, which have to label the same claim the same way.
  */
-export const ROLE_RANK: Record<string, number> = { readonly: 0, tester: 1, admin: 2 }
+export const SUPPORT_VALUES = ['supported', 'partial', 'unsupported', 'planned']
 
-export function rolesUpTo(role: string | undefined): string[] {
-  const ceiling = ROLE_RANK[role ?? '']
-  if (ceiling === undefined) return []
-  return Object.keys(ROLE_RANK)
-    .filter((r) => ROLE_RANK[r] <= ceiling)
-    .sort((a, b) => ROLE_RANK[a] - ROLE_RANK[b])
+export const SUPPORT_LABELS: Record<string, string> = {
+  supported: 'Supported',
+  partial: 'Partial',
+  unsupported: 'Unsupported',
+  planned: 'Planned',
 }
+
+/*
+ * Roles used to be mirrored here as a ladder of three. They are rows in the
+ * database now, an installation can define its own, and which of them a given
+ * user may grant depends on comparing permission sets rather than ranks — so
+ * the lists come from the API (`/roles`, `/auth/api-key-roles`) and there is
+ * nothing left to mirror. The permission KEYS are still a fixed property of the
+ * build; they live in stores/auth.ts, next to the getter that checks them.
+ */
 
 /**
  * Mirrors MIN_PASSWORD_LENGTH in backend/app/schemas.py.

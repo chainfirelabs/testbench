@@ -12,16 +12,18 @@ import ImportProgressModal from '../components/ImportProgressModal.vue'
 import DetailValue from '../components/DetailValue.vue'
 import SuggestCellEditor from '../components/SuggestCellEditor.vue'
 import { detailCellRenderer } from '../detail'
-import { invalidateSuggestions, useSuggestions } from '../suggestions'
-import { api, downloadFile } from '../api/client'
+import { invalidateSuggestions, makeFilterValues, useSuggestions } from '../suggestions'
+import { api } from '../api/client'
+import { useDownload } from '../downloads'
 import { useImportProgress } from '../importProgress'
-import { useAuthStore } from '../stores/auth'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 import {
   customColumn, customFormField, dataValue, mergeCustomValues,
   type EntityField, useEntityFields,
 } from '../entityFields'
 import { collapseVendorDevices, selectedVendorDeviceIds } from '../vendorDeviceGroups'
 import { remoteTableParams } from '../remoteTable'
+import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 
 const route = useRoute()
 const router = useRouter()
@@ -199,7 +201,9 @@ function goToVersion(v: any) {
 
 const tabs = [
   { id: 'details', label: 'Details' },
-  { id: 'vendor', label: 'Vendor Devices' },
+  // Claimed, then tested. The pair is the distinction the page exists to
+  // draw, so the labels carry it rather than leaving it to the two intros.
+  { id: 'vendor', label: 'Vendor Claims' },
   { id: 'tested', label: 'Tested Devices' },
 ]
 const tab = ref('details')
@@ -211,6 +215,10 @@ function showToast(msg: string, isError = false) {
   toastError.value = isError
   setTimeout(() => (toast.value = ''), 4000)
 }
+
+// One version's claim list is the smallest of these exports, but it fails the
+// same silent way when the request does not come back.
+const { downloading, download } = useDownload(showToast)
 
 /* ---------------- Details tab ---------------- */
 
@@ -306,7 +314,7 @@ async function saveEdit() {
   }
 }
 
-/* ---------------- Vendor Devices tab ---------------- */
+/* ---------------- Vendor Claims tab ---------------- */
 /*
  * Devices the vendor claims this software works against — imported from a
  * compatibility list, not picked from the inventory. They deliberately have no
@@ -354,14 +362,6 @@ async function saveVendorSchema() {
   } finally {
     savingVendorSchema.value = false
   }
-}
-
-const SUPPORT_VALUES = ['supported', 'partial', 'unsupported', 'planned']
-const SUPPORT_LABELS: Record<string, string> = {
-  supported: 'Supported',
-  partial: 'Partial',
-  unsupported: 'Unsupported',
-  planned: 'Planned',
 }
 
 /** A text column that autocompletes over the values it already holds. */
@@ -485,9 +485,47 @@ function hasAnyIdentity(row: any): boolean {
   )
 }
 
+/** Re-run filter and sort over rows whose values changed underneath them. */
 async function loadVendorDevices() {
   vendorTable.value?.reapplyView()
 }
+
+/**
+ * Re-read the vendor device list from the server, row count and all.
+ *
+ * For a claim added, removed or imported. The grid is server-paged, so it
+ * keeps the row count it was last given: refreshing the blocks it holds cannot
+ * show a row that did not exist when it was told how many there were.
+ */
+async function reloadVendorRows() {
+  vendorTable.value?.reload()
+}
+
+/*
+ * Values for the vendor-device column filters' checklists — the server's to
+ * answer, since the grid only ever holds the window on screen.
+ */
+const vendorFilterValues = makeFilterValues({
+  entity: 'vendor-devices',
+  local: (colId) => {
+    const field = vendorFields.value.find((item) => item.key === colId)
+    if (field?.type === 'select') return field.options
+    if (field?.type === 'boolean') return [true, false]
+    return undefined
+  },
+  skip: ['misc_data', 'created_at', 'updated_at'],
+})
+
+/*
+ * The tested list is inventory devices, so its device columns are the device
+ * columns — same values, same endpoint. What the grid derives from the tests
+ * (the component, the outcome tallies, the counts) has no distinct-value list
+ * to fetch and falls back to the rows on screen.
+ */
+const testedFilterValues = makeFilterValues({
+  entity: 'devices',
+  skip: ['component_name', 'component_version', 'outcomes', 'test_count', 'last_test_at'],
+})
 
 async function loadRemoteVendorDevices(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
@@ -590,15 +628,18 @@ async function createVendorDevice(values: Record<string, any>) {
   creatingVendor.value = true
   try {
     const payload = mergeCustomValues(values, vendorFields.value, 'misc_data')
-    const created = await api<any>(`/software/${software.value.id}/vendor-devices`, {
+    await api<any>(`/software/${software.value.id}/vendor-devices`, {
       method: 'POST',
       body: JSON.stringify(payload),
     })
-    // Newest first, so the row you just made is where you are looking.
-    vendorRows.value.unshift(created)
     // The spellings just written are the ones the next claim should be offered.
     invalidateSuggestions('vendor-devices')
     bumpVendorCount(1)
+    // A row that did not exist a moment ago is not in the window the grid is
+    // holding, and its row count has moved: re-read rather than refresh. The
+    // grid's rows come back from the server collapsed by make/model, so there
+    // is nothing useful to splice in locally.
+    await reloadVendorRows()
     showNewVendor.value = false
     showToast('Vendor device added')
   } catch (e: any) {
@@ -682,7 +723,10 @@ async function deleteVendorRow(row: any) {
     vendorRows.value = vendorRows.value.filter((r) => toRaw(r) !== toRaw(row))
     vendorDirty.value.delete(row.id)
     bumpVendorCount(-1)
-    await loadVendorDevices()
+    // The selection lives in the grid, and a deleted row stays ticked in it
+    // until told otherwise.
+    vendorTable.value?.clearSelection()
+    await reloadVendorRows()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -699,9 +743,13 @@ async function deleteSelectedVendorRows() {
     })
     vendorRows.value = vendorRows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) vendorDirty.value.delete(id)
+    // Emptying this page's copy leaves the rows ticked in the grid, which then
+    // adds them to whatever is ticked next — removing 100 and selecting 100
+    // more read as 200.
+    vendorTable.value?.clearSelection()
     vendorSelected.value = []
     bumpVendorCount(-ids.length)
-    await loadVendorDevices()
+    await reloadVendorRows()
     showToast(`Removed ${ids.length} vendor device${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -720,17 +768,19 @@ function bumpVendorCount(by: number) {
 /** A blank CSV carrying exactly the columns a vendor-device import accepts. */
 function downloadVendorTemplate() {
   const stem = software.value.name.replace(/\s+/g, '_')
-  downloadFile(
+  download(
     `/software/${software.value.id}/vendor-devices/template`,
     `${stem}-vendor-devices-template.csv`,
+    'template',
   )
 }
 
 function exportVendorAs(format: string) {
   const stem = software.value.name.replace(/\s+/g, '_')
-  downloadFile(
+  download(
     `/software/${software.value.id}/vendor-devices/export?format=${format}`,
     `${stem}-vendor-devices.${format}`,
+    'export',
   )
 }
 
@@ -740,7 +790,10 @@ async function onImportFile(e: Event) {
   try {
     const result = await runImport(`/software/${software.value.id}/vendor-devices/import`, file)
     if (result) {
-      await loadVendorDevices()
+      // An import adds rows, so the row count has moved.
+      await reloadVendorRows()
+      // The claim counts on the Details tab came from the software record.
+      software.value = await api<any>(`/software/${software.value.id}`)
     }
   } finally {
     if (fileInput.value) fileInput.value.value = ''
@@ -749,7 +802,7 @@ async function onImportFile(e: Event) {
 
 /* ---------------- Tested Devices tab ---------------- */
 /*
- * Same grid as Vendor Devices, but read-only and derived: every row is an
+ * Same grid as Vendor Claims, but read-only and derived: every row is an
  * inventory device this software has actually been run against, summarised from
  * the tests table. Nothing here is editable — the source of truth is `tests`.
  */
@@ -920,7 +973,7 @@ onMounted(load)
         </span>
       </div>
       <div class="toolbar">
-        <template v-if="auth.canWrite">
+        <template v-if="auth.can(PERMISSION.softwareEdit)">
           <button v-if="!editing" class="btn" @click="startEdit">Edit</button>
           <button v-if="!editing" class="btn" title="Add a version, inheriting this one's vendor devices" @click="openNewVersion">
             + New version
@@ -988,7 +1041,7 @@ onMounted(load)
             </span>
           </dd>
           <dd v-else>—</dd>
-          <dt>Vendor Devices</dt>
+          <dt>Vendor Claims</dt>
           <dd>
             {{ software.vendor_device_count ?? vendorRows.length }}
             <span class="muted">— devices the vendor says this software works against</span>
@@ -1005,7 +1058,7 @@ onMounted(load)
       </template>
     </div>
 
-    <!-- Vendor Devices -->
+    <!-- Vendor Claims -->
     <div v-else-if="tab === 'vendor'" class="tab-panel">
       <div class="panel-header">
         <p class="muted panel-intro">
@@ -1017,10 +1070,10 @@ onMounted(load)
           searches and exports.
         </p>
         <div class="toolbar">
-          <button v-if="auth.canWrite" class="btn btn-primary" @click="openNewVendor">
+          <button v-if="auth.can(PERMISSION.softwareEdit)" class="btn btn-primary" @click="openNewVendor">
             + New vendor device
           </button>
-          <button v-if="auth.isAdmin" class="btn" @click="openVendorSchema">
+          <button v-if="auth.can(PERMISSION.schemaManage)" class="btn" @click="openVendorSchema">
             Customize fields
           </button>
           <!-- Outside the menu: the panel closes on click, and a file input
@@ -1033,18 +1086,23 @@ onMounted(load)
             @change="onImportFile"
           />
           <OverflowMenu>
-            <template v-if="auth.canWrite">
+            <template v-if="auth.can(PERMISSION.softwareEdit)">
               <button class="btn" @click="fileInput?.click()">Import</button>
               <button
                 class="btn"
                 title="Download a blank CSV with the columns an import accepts"
+                :disabled="downloading"
                 @click="downloadVendorTemplate"
               >
                 Template
               </button>
             </template>
-            <button class="btn" @click="exportVendorAs('json')">Export JSON</button>
-            <button class="btn" @click="exportVendorAs('csv')">Export CSV</button>
+            <button class="btn" :disabled="downloading" @click="exportVendorAs('json')">
+              {{ downloading ? 'Preparing…' : 'Export JSON' }}
+            </button>
+            <button class="btn" :disabled="downloading" @click="exportVendorAs('csv')">
+              {{ downloading ? 'Preparing…' : 'Export CSV' }}
+            </button>
           </OverflowMenu>
         </div>
       </div>
@@ -1053,9 +1111,10 @@ onMounted(load)
         :columns="vendorColumns"
         :rows="vendorDisplayRows"
         :remote-loader="loadRemoteVendorDevices"
-        :editable="auth.canWrite"
-        :row-editable="auth.canWrite"
-        :selectable="auth.canWrite"
+        :filter-values="vendorFilterValues"
+        :editable="auth.can(PERMISSION.softwareEdit)"
+        :row-editable="auth.can(PERMISSION.softwareEdit)"
+        :selectable="auth.can(PERMISSION.softwareEdit)"
         :dirty-ids="vendorDirtyIds"
         :is-row-dirty="isVendorRowDirty"
         @cell-edit="onVendorCellEdit"
@@ -1075,7 +1134,7 @@ onMounted(load)
         </template>
         <template #selection-actions>
           <button
-            v-if="auth.canWrite && vendorSelected.length"
+            v-if="auth.can(PERMISSION.softwareEdit) && vendorSelected.length"
             class="btn btn-danger"
             title="Remove the selected vendor devices"
             @click="deleteSelectedVendorRows"
@@ -1087,7 +1146,7 @@ onMounted(load)
       <div v-if="editingVendorSchema" class="modal-backdrop">
         <form class="modal-card modal-wide" @submit.prevent="saveVendorSchema">
           <h3 class="modal-title">Vendor Device Fields — {{ software.name }} {{ versionLabel(software) }}</h3>
-          <p class="muted">These overrides apply to this software version. Field definitions are managed under Schema → Vendor Devices.</p>
+          <p class="muted">These overrides apply to this software version. Field definitions are managed under Schema → Vendor Claims.</p>
           <div class="schema-field-list">
             <div v-for="field in vendorSchemaDraft" :key="field.id" class="schema-field-row">
               <div><strong>{{ field.label }}</strong><br /><code>{{ field.key }}</code></div>
@@ -1116,6 +1175,7 @@ onMounted(load)
         :columns="testedColumns"
         :rows="testedRows"
         :remote-loader="loadRemoteTestedDevices"
+        :filter-values="testedFilterValues"
         @grid-ready="onTestedGridReady"
       >
         <template #table-actions>

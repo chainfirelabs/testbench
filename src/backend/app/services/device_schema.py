@@ -35,7 +35,8 @@ from sqlalchemy import Boolean, Numeric, cast, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..db import engine, utcnow
+from ..db import engine, jsonable, utcnow
+from .permissions import DEVICES_EDIT, caller_permissions, satisfies_role
 from ..models import (
     Device,
     DeviceFieldAssignment,
@@ -67,6 +68,16 @@ PROTECTED_SYSTEM_FIELDS = {
 # device with no identity cannot be addressed at all.
 LOCKED_VISIBLE = {"unique_id"}
 
+# Roles whose value is an address the device answers on, and so is a web page
+# worth offering as a link by default. Only a default: `opens_web_page` is the
+# flag the UI actually reads, and it is the administrator's to set on any field.
+WEB_ADDRESS_ROLES = {"scan_address_wan", "scan_address_lan"}
+
+# The schemes a link may use. Nothing else is offered and nothing else is
+# accepted: a `javascript:` or `file:` link is not something an administrator
+# should be able to configure any more than an operator can store one.
+LINK_SCHEMES = ("http", "https")
+
 # Where a field's value actually lives.
 #   column   — a real devices column
 #   derived  — read-only, resolved through a relationship
@@ -76,11 +87,16 @@ COLUMN_FIELDS = {"unique_id"}
 DERIVED_FIELDS = {"checked_out_by_username"}
 VIRTUAL_FIELDS = {"misc_data"}
 
-# Keys that never belong in a device document, whatever a caller sends.
+# Keys that never belong in a device document, whatever a caller sends — and
+# so also names a field may not be given, which is where this is enforced: a
+# field whose key is one of these would have every value stripped out of the
+# document by the envelope before it reached storage, leaving a column that
+# looks writable and keeps nothing.
 RESERVED_DOCUMENT_KEYS = {"id", "unique_id", "device_type", "device_type_id",
                           "device_type_key", "device_type_label", "misc_data",
                           "created_at", "updated_at", "created_by", "updated_by",
-                          "checked_out_by", "checked_out_by_username"}
+                          "checked_out_by", "checked_out_by_username",
+                          "link_overrides"}
 
 
 def storage_for(key: str) -> str:
@@ -107,6 +123,9 @@ class EffectiveField:
     sensitive: bool
     indexed: bool
     unique_value: bool
+    opens_web_page: bool
+    link_scheme: str
+    link_port: int | None
     role: str | None
     protected: bool
     visible: bool
@@ -131,6 +150,60 @@ class SchemaError(ValueError):
 
 class DeviceValidationError(ValueError):
     """A device document that does not satisfy its type's published schema."""
+
+
+def normalize_link_overrides(value: Any) -> dict:
+    """One device's per-field link overrides, checked and tidied.
+
+    Shape: `{field_key: {"scheme": "https", "port": 8443}}`. Both members are
+    optional — an override that sets only a port keeps the field's scheme — and
+    an entry that ends up saying nothing is dropped rather than stored, so
+    clearing the controls in the UI removes the override instead of leaving an
+    empty one behind to puzzle over later.
+
+    Validated rather than trusted even though it never reaches a field value:
+    it does reach an `href`, and `scheme` is the half of a URL that decides
+    whether a link is a link or a script. Only `http` and `https` are accepted,
+    which is the same whitelist the frontend applies to a parsed value.
+
+    The field key is not checked against the published schema on purpose. An
+    override for a field that this type does not show, or does not show *yet*,
+    is the operator's data in exactly the way an unknown document key is: it
+    costs nothing to keep and is wrong to throw away on a type change.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise DeviceValidationError("link_overrides must be an object keyed by field")
+    result: dict[str, dict] = {}
+    for key, entry in value.items():
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise DeviceValidationError(f"link_overrides.{key} must be an object")
+        override: dict[str, Any] = {}
+        scheme = entry.get("scheme")
+        if scheme not in (None, ""):
+            scheme = str(scheme).lower().rstrip(":/")
+            if scheme not in LINK_SCHEMES:
+                raise DeviceValidationError(
+                    f"link_overrides.{key}.scheme must be one of {', '.join(LINK_SCHEMES)}"
+                )
+            override["scheme"] = scheme
+        port = entry.get("port")
+        if port not in (None, ""):
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                raise DeviceValidationError(f"link_overrides.{key}.port must be a number") from None
+            if not 1 <= port <= 65535:
+                raise DeviceValidationError(
+                    f"link_overrides.{key}.port must be between 1 and 65535"
+                )
+            override["port"] = port
+        if override:
+            result[str(key)] = override
+    return result
 
 
 # ---------------------------------------------------------------- revisions
@@ -191,6 +264,9 @@ def _base_field(definition: DeviceFieldDefinition, assignment: DeviceFieldAssign
         sensitive=definition.sensitive,
         indexed=definition.indexed,
         unique_value=definition.unique_value,
+        opens_web_page=definition.opens_web_page,
+        link_scheme=definition.link_scheme or "http",
+        link_port=definition.link_port,
         role=definition.plugin_role,
         protected=definition.protected_system_field,
         visible=True if assignment.visible is None else assignment.visible,
@@ -495,9 +571,15 @@ def validate_device_document(
         if field is None:
             if settings.device_schema_reject_unknown_fields:
                 raise DeviceValidationError(f"Unknown device field: {key}")
-            # Kept verbatim: a value whose field was removed from the layout is
-            # still the operator's data.
-            normalized[key] = value
+            # Kept: a value whose field was removed from the layout is still
+            # the operator's data. Made JSON-safe first, because this is the
+            # one path into the document that does not go through `_coerce`,
+            # and the API's own model parses `last_seen_online`, `checkout_due`
+            # and `last_scanned_at` into Python date objects before they get
+            # here. A device carrying one for a field this installation never
+            # configured used to fail at the flush, as a 500 with no field
+            # named — which is why nothing about the API said it was possible.
+            normalized[key] = jsonable(value)
             continue
         if not field.stored:
             continue
@@ -631,7 +713,10 @@ def plan_field_indexes(db: Session) -> list[DeviceFieldIndex]:
             key=definition.key, label=definition.label, field_type=definition.field_type,
             description=None, options=(), validation={}, default_value=None,
             sensitive=definition.sensitive, indexed=definition.indexed,
-            unique_value=definition.unique_value, role=definition.plugin_role,
+            unique_value=definition.unique_value,
+            # Presentation, and an index plan is not presentation.
+            opens_web_page=False, link_scheme="http", link_port=None,
+            role=definition.plugin_role,
             protected=definition.protected_system_field, visible=True, list_visible=True, required=False,
             writable=True, position=0, scope="global",
             configuration_source=definition.configuration_source, definition_id=definition.id,
@@ -808,11 +893,20 @@ def _action_blocker(
     fields the plugin needs), then data (are they filled in), then state.
     A person reading the tooltip should be told the thing they can fix.
     """
+    if user is None:
+        # No caller to check: the listing endpoints use this to describe an
+        # action in the abstract, and the policy checks below stand on their own.
+        held = None
+    else:
+        held = caller_permissions(db, user)
     required_user_role = action.get("required_user_role")
-    if required_user_role and (user is None or user.role != required_user_role):
-        return f"{required_user_role} permission is required"
-    if user is not None and user.role not in ("admin", "tester"):
-        return "write permission is required"
+    if held is not None:
+        if required_user_role and not satisfies_role(db, held, required_user_role):
+            return f"{required_user_role} permission is required"
+        # Running a plugin against a device writes to the device, so it needs
+        # the permission that editing a device needs.
+        if DEVICES_EDIT not in held:
+            return "permission to edit devices is required"
     roles = role_map(field for field in fields if field.visible)
     missing_roles = [role for role in action.get("required_roles", []) if role not in roles]
     if missing_roles:
@@ -926,13 +1020,15 @@ def validate_plugin_invocation(
     action = next((item for item in manifest.get("actions", []) if item.get("id") == action_id), None)
     if action is None:
         raise PluginPolicyError("Plugin action not found", status_code=404)
-    required_user_role = action.get("required_user_role")
-    if required_user_role and (user is None or user.role != required_user_role):
-        raise PluginPolicyError(
-            f"{required_user_role} permission is required", status_code=403,
-        )
-    if user is not None and user.role not in ("admin", "tester"):
-        raise PluginPolicyError("Insufficient role for write access", status_code=403)
+    if user is not None:
+        held = caller_permissions(db, user)
+        required_user_role = action.get("required_user_role")
+        if required_user_role and not satisfies_role(db, held, required_user_role):
+            raise PluginPolicyError(
+                f"{required_user_role} permission is required", status_code=403,
+            )
+        if DEVICES_EDIT not in held:
+            raise PluginPolicyError("Permission to edit devices is required", status_code=403)
 
     eligible: list[Device] = []
     rejected: list[dict] = []
@@ -1074,6 +1170,9 @@ def field_payload(field: EffectiveField) -> dict:
         "role": field.role,
         "indexed": field.indexed,
         "unique": field.unique_value,
+        "opens_web_page": field.opens_web_page,
+        "link_scheme": field.link_scheme,
+        "link_port": field.link_port,
         "validation": field.validation,
         "default": field.default_value,
         "position": field.position,
@@ -1097,6 +1196,9 @@ def definition_payload(definition: DeviceFieldDefinition, usage: dict | None = N
         "sensitive": definition.sensitive,
         "indexed": definition.indexed,
         "unique_value": definition.unique_value,
+        "opens_web_page": definition.opens_web_page,
+        "link_scheme": definition.link_scheme or "http",
+        "link_port": definition.link_port,
         "plugin_role": definition.plugin_role,
         "protected_system_field": definition.protected_system_field,
         "enabled": definition.enabled,
@@ -1156,6 +1258,15 @@ def _definition_from_entity_field(field: EntityField) -> DeviceFieldDefinition:
         sensitive=field.sensitive,
         indexed=field.indexed,
         unique_value=field.unique_value,
+        # An address the fleet reaches the device on is a web page often enough
+        # that linking it is the useful default. Any other field starts off
+        # unlinked and is opted in from the schema editor.
+        opens_web_page=field.role in WEB_ADDRESS_ROLES,
+        # Plain http by default, whatever the field: a device serving only
+        # https almost always redirects from 80, while https against a
+        # self-signed certificate warns even when the device is fine.
+        link_scheme="http",
+        link_port=None,
         plugin_role=field.role,
         protected_system_field=field.key in PROTECTED_SYSTEM_FIELDS,
         enabled=True,
@@ -1223,6 +1334,8 @@ def seed_device_schema(db: Session) -> None:
                 description=candidate.get("description"), options=list(candidate.get("options") or []),
                 validation={}, sensitive=candidate.get("sensitive", False),
                 indexed=candidate.get("indexed", False), unique_value=candidate.get("unique_value", False),
+                opens_web_page=candidate.get("role") in WEB_ADDRESS_ROLES,
+                link_scheme="http", link_port=None,
                 plugin_role=candidate.get("role"),
                 protected_system_field=candidate["key"] in PROTECTED_SYSTEM_FIELDS,
                 enabled=True, configuration_source="system",

@@ -46,6 +46,8 @@ from .device_schema import (
     PROTECTED_SYSTEM_FIELDS,
     RESERVED_DOCUMENT_KEYS,
     TYPE_KEY_RE,
+    LINK_SCHEMES,
+    WEB_ADDRESS_ROLES,
     invalidate_cache,
     publish_revision,
     refresh_managed_indexes,
@@ -133,6 +135,14 @@ def export_document(db: Session, name: str = "testbench") -> dict:
             item["indexed"] = True
         if definition.unique_value:
             item["unique"] = True
+        if definition.opens_web_page:
+            item["opensWebPage"] = True
+        # Only when they differ from the built-in default, so a document stays
+        # about the decisions somebody made.
+        if definition.opens_web_page and (definition.link_scheme or "http") != "http":
+            item["linkScheme"] = definition.link_scheme
+        if definition.opens_web_page and definition.link_port:
+            item["linkPort"] = definition.link_port
         fields.append(item)
 
     assignments = list(db.scalars(select(DeviceFieldAssignment).order_by(
@@ -228,6 +238,29 @@ def _string(value: Any, what: str) -> str:
     return value.strip()
 
 
+def _link_scheme(value: Any, key: str) -> str:
+    """The scheme a linked field opens by default. Absent means `http`."""
+    if value in (None, ""):
+        return "http"
+    scheme = str(value).lower().rstrip(":/")
+    _require(
+        scheme in LINK_SCHEMES,
+        f"field '{key}' linkScheme must be one of {', '.join(LINK_SCHEMES)}",
+    )
+    return scheme
+
+
+def _link_port(value: Any, key: str) -> int | None:
+    """The port that default opens on. Absent means the scheme's own."""
+    if value in (None, ""):
+        return None
+    _require(
+        isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535,
+        f"field '{key}' linkPort must be a number between 1 and 65535",
+    )
+    return value
+
+
 def parse_document(text: str) -> dict:
     """Validate a DeviceSchema document and return it in normalised form.
 
@@ -319,6 +352,13 @@ def parse_document(text: str) -> dict:
             "sensitive": bool(entry.get("sensitive", False)),
             "indexed": bool(entry.get("indexed", False)) or bool(entry.get("unique", False)),
             "unique_value": bool(entry.get("unique", False)),
+            # Defaults from the role, so a document written before this option
+            # existed still links its addresses.
+            "opens_web_page": bool(
+                entry.get("opensWebPage", entry.get("role") in WEB_ADDRESS_ROLES)
+            ),
+            "link_scheme": _link_scheme(entry.get("linkScheme"), key),
+            "link_port": _link_port(entry.get("linkPort"), key),
             "plugin_role": entry.get("role"),
         })
 

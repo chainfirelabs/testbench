@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from app.api import auth, users
 from app.api.deps import get_current_user
 from app.db import get_db
-from app.models import User
+from app.models import Role, User
+from app.services.permissions import PERMISSION_KEYS
 from app.services.io import parse_csv, template_csv, to_csv_rows
 
 
@@ -21,6 +22,12 @@ def account(**changes):
         'authentik_sub': 'subject', 'role': 'readonly', 'is_active': True,
         'created_at': datetime(2026, 9, 7), **changes,
     })
+
+
+def admin_role():
+    """The seeded admin role, as `role_permissions` would read it back."""
+    return Role(id='role-admin', slug='admin', name='Administrator',
+                permissions=list(PERMISSION_KEYS), is_builtin=True)
 
 
 @pytest.mark.parametrize('active', [False, True])
@@ -40,6 +47,9 @@ def test_oidc_preserves_administrative_deactivation(active):
           ]),
           patch.object(auth.urllib.request, 'urlopen', return_value=context),
           patch.object(auth, '_extract_groups', return_value=[]),
+          # Which role the groups map to is a different test; this one is about
+          # a deactivated account staying deactivated through an SSO login.
+          patch.object(auth, '_resolve_role', return_value='readonly'),
           patch.object(auth, 'create_token', return_value='session-token') as mint):
         if active:
             assert auth.oidc_callback('code', 'state', request, db, 'state').status_code == 307
@@ -62,6 +72,9 @@ def test_account_changes_require_an_admin_session(method, status, body):
     db = Mock()
     target = account(id='target', auth_provider='local', is_active=False)
     db.get.return_value = target
+    # What the caller may do is now read off the roles table, so the mock has
+    # to answer for the admin role the caller holds.
+    db.scalar.return_value = admin_role()
 
     def current_user(request: Request):
         request.state.auth_method = method

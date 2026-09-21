@@ -8,9 +8,9 @@ from ..db import get_db
 from ..models import AuditLog, User
 from ..schemas import AuditOut, Page
 from ..services.audit import log_action
-from ..services.io import export_response
-from ..services.list_filters import exclude_clause, excluded_values
-from .deps import require_admin
+from ..services.io import streaming_export_response
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from .deps import require_audit_view
 
 router = APIRouter(prefix="/audit_logs", tags=["audit_logs"])
 
@@ -70,7 +70,7 @@ def list_audit_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_audit_view),
 ):
     q = _query_logs(db, username, action, entity_type, entity_id, date_from, date_to)
     if search:
@@ -86,10 +86,12 @@ def list_audit_logs(
         "entity_id": AuditLog.entity_id, "ip_address": AuditLog.ip_address,
     }
     for key, value in request.query_params.items():
-        if not key.startswith("exclude__"):
+        if not key.startswith(("exclude__", "include__")):
             continue
-        expression = filter_columns.get(key.removeprefix("exclude__"))
-        clause = exclude_clause(expression, excluded_values(value)) if expression is not None else None
+        keeping = key.startswith("include__")
+        expression = filter_columns.get(key.removeprefix("include__" if keeping else "exclude__"))
+        pick = include_clause if keeping else exclude_clause
+        clause = pick(expression, excluded_values(value)) if expression is not None else None
         if clause is not None:
             q = q.where(clause)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
@@ -114,10 +116,10 @@ def export_audit_logs(
     date_to: str | None = None,
     request: Request = None,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_audit_view),
 ):
     items = db.scalars(_query_logs(db, username, action, entity_type, None, date_from, date_to).order_by(AuditLog.timestamp)).all()
     rows = [AuditOut.model_validate(a).model_dump(mode="json") for a in items]
     log_action(db, user, "export.audit_logs", "audit_log", None, {"format": format, "count": len(rows)}, request)
     db.commit()
-    return export_response(rows, EXPORT_COLUMNS, format, "audit_logs")
+    return streaming_export_response(rows, EXPORT_COLUMNS, format, "audit_logs")

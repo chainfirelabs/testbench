@@ -6,10 +6,13 @@ half — seeding, publishing, the endpoints — is in test_device_schema_api.py.
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.config import settings
 from app.models import DeviceFieldAssignment, DeviceFieldDefinition
+from app.services import permissions
+from app.services.permissions import DEVICES_EDIT, PERMISSION_KEYS
 from app.services.device_schema import (
     DeviceValidationError,
     EffectiveField,
@@ -29,6 +32,19 @@ from app.services.device_schema import (
     role_map,
     storage_for,
 )
+
+
+ADMIN_PERMISSIONS = frozenset(PERMISSION_KEYS)
+
+
+def caller(*permissions):
+    """A signed-in caller holding exactly these permissions.
+
+    `granted_permissions` is what an API key arrives with once `api/deps.py`
+    has capped it against its owner's role, and it is what the policy checks
+    read — so a caller built this way needs no database behind it.
+    """
+    return SimpleNamespace(role="test-role", granted_permissions=frozenset(permissions))
 
 
 def definition(key="serial_number", **kwargs) -> DeviceFieldDefinition:
@@ -54,7 +70,8 @@ def effective(key="serial_number", **kwargs) -> EffectiveField:
     base = {
         "key": key, "label": key.replace("_", " ").title(), "field_type": "text",
         "description": None, "options": (), "validation": {}, "default_value": None,
-        "sensitive": False, "indexed": False, "unique_value": False, "role": None,
+        "sensitive": False, "indexed": False, "unique_value": False,
+        "opens_web_page": False, "link_scheme": "http", "link_port": None, "role": None,
         "protected": False, "visible": True, "list_visible": True, "required": False, "writable": True,
         "position": 0, "scope": "global", "configuration_source": "gui",
         "definition_id": f"def-{key}", "storage": storage_for(key),
@@ -259,26 +276,27 @@ class PluginPolicyTests(unittest.TestCase):
         device.online_status = False
         self.assertIn("offline", _action_blocker(None, self.ACTION, device, self.FIELDS, None))
 
-    def test_a_readonly_user_cannot_run_anything(self):
-        class User:
-            role = "readonly"
-        self.assertIn("write permission", _action_blocker(None, self.ACTION, self.device(), self.FIELDS, User()))
-
-    def test_an_admin_only_action_rejects_a_tester(self):
-        class Tester:
-            role = "tester"
-        action = {**self.ACTION, "required_user_role": "admin"}
-        self.assertIn("admin permission", _action_blocker(
-            None, action, self.device(), self.FIELDS, Tester(),
+    def test_a_user_without_the_device_permission_cannot_run_anything(self):
+        # Running a plugin writes to the device, so it takes what editing a
+        # device takes. A caller carrying its own permission set is resolved
+        # without a database — which is what an API key does in production.
+        self.assertIn("permission to edit devices", _action_blocker(
+            None, self.ACTION, self.device(), self.FIELDS, caller(),
         ))
 
-    def test_an_admin_only_action_accepts_an_admin(self):
-        class Admin:
-            role = "admin"
+    def test_an_admin_only_action_rejects_a_role_that_grants_less(self):
         action = {**self.ACTION, "required_user_role": "admin"}
-        self.assertIsNone(_action_blocker(
-            None, action, self.device(), self.FIELDS, Admin(),
-        ))
+        with patch.object(permissions, "role_permissions", return_value=ADMIN_PERMISSIONS):
+            self.assertIn("admin permission", _action_blocker(
+                None, action, self.device(), self.FIELDS, caller(DEVICES_EDIT),
+            ))
+
+    def test_an_admin_only_action_accepts_a_role_that_grants_as_much(self):
+        action = {**self.ACTION, "required_user_role": "admin"}
+        with patch.object(permissions, "role_permissions", return_value=ADMIN_PERMISSIONS):
+            self.assertIsNone(_action_blocker(
+                None, action, self.device(), self.FIELDS, caller(*ADMIN_PERMISSIONS),
+            ))
 
     def test_required_any_roles_is_read_as_a_group(self):
         self.assertEqual(_role_groups({"required_any_roles": ["a", "b"]}), [["a", "b"]])

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import UUID
 
 import uuid6
@@ -31,6 +31,22 @@ def as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+def jsonable(value):
+    """A value as a JSONB column can store it.
+
+    Dates and times are the ones that reach here. They are not a formatting
+    problem: `json.dumps` has no encoder for them, so one landing in a JSONB
+    column is a 500 on the write that carried it, raised from inside the
+    flush where nothing can say which field was at fault.
+
+    Everything else the models hold is already a JSON primitive and passes
+    through untouched.
+    """
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -49,4 +65,4 @@ def get_db():
 
 
 # Re-export for models
-__all__ = ["Base", "JSONB", "new_uuid", "utcnow", "as_utc", "get_db", "UUID"]
+__all__ = ["Base", "JSONB", "jsonable", "new_uuid", "utcnow", "as_utc", "get_db", "UUID"]

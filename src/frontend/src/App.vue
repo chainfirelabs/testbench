@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from './api/client'
 import { useIsMobile } from './breakpoints'
 import NavDrawer, { type NavLink } from './components/NavDrawer.vue'
-import { useAuthStore } from './stores/auth'
+import { PERMISSION, useAuthStore } from './stores/auth'
 import { useNotificationsStore } from './stores/notifications'
 import { deviceTypes, loadDeviceTypes } from './deviceTypes'
 
@@ -83,14 +83,21 @@ const deviceLinks = computed<NavLink[]>(() => [
 const navLinks = computed<NavLink[]>(() => {
   const links: NavLink[] = [
     { to: '/software', label: 'Software' },
+    // "Claims", not "Devices": these are assertions a vendor makes, not
+    // hardware this fleet owns, and the word is what tells a reader that
+    // before they open the page. It also sets up the contrast with Tests
+    // directly below — claimed, then verified. The search results and the
+    // device page's own tab have called them claims all along.
+    { to: '/vendor-devices', label: 'Vendor Claims' },
     { to: '/tests', label: 'Tests' },
   ]
-  if (auth.isAdmin) {
-    links.push({ to: '/audit', label: 'Audit Log' })
-    links.push({ to: '/users', label: 'Users' })
-    links.push({ to: '/settings/ai', label: 'AI Providers' })
-    links.push({ to: '/settings/schema', label: 'Schema' })
-  }
+  // One link per permission rather than one block for "admin": a role that
+  // can read the audit log and nothing else gets the Audit Log link and no
+  // others, which is the whole point of roles being definable.
+  if (auth.can(PERMISSION.auditView)) links.push({ to: '/audit', label: 'Audit Log' })
+  if (auth.can(PERMISSION.usersManage)) links.push({ to: '/users', label: 'Users' })
+  if (auth.can(PERMISSION.settingsManage)) links.push({ to: '/settings/ai', label: 'AI Providers' })
+  if (auth.can(PERMISSION.schemaManage)) links.push({ to: '/settings/schema', label: 'Schema' })
   return links
 })
 
@@ -161,9 +168,11 @@ function emptyResults() {
     devices: [],
     software: [],
     tests: [],
+    vendor_devices: [],
     devices_total: 0,
     software_total: 0,
     tests_total: 0,
+    vendor_devices_total: 0,
   }
 }
 
@@ -183,8 +192,24 @@ function hasResults() {
   return (
     results.value.devices.length > 0 ||
     results.value.software.length > 0 ||
-    results.value.tests.length > 0
+    results.value.tests.length > 0 ||
+    results.value.vendor_devices.length > 0
   )
+}
+
+/**
+ * Where a vendor claim's result lands: the catalogue, pre-filtered to it.
+ *
+ * Not the software page. A make and model is what the searcher typed, and the
+ * claim they want may be one of several the same hardware appears in; the
+ * catalogue shows all of them, and each row links on to its own software.
+ */
+function vendorResultUrl(claim: any): string {
+  const params = new URLSearchParams()
+  if (claim.make) params.set('make', claim.make)
+  if (claim.model) params.set('model', claim.model)
+  const query = params.toString()
+  return `/vendor-devices${query ? `?${query}` : ''}`
 }
 
 watch(query, (q) => {
@@ -347,6 +372,22 @@ onBeforeUnmount(() => {
               >
                 <span class="search-item-title">{{ t.name }}</span>
                 <span class="search-item-sub">{{ t.version ? `v${t.version}` : '' }}</span>
+              </button>
+            </div>
+            <div v-if="results.vendor_devices.length" class="search-group">
+              <div class="search-group-label">
+                {{ groupLabel('Vendor Claims', results.vendor_devices.length, results.vendor_devices_total) }}
+              </div>
+              <button
+                v-for="v in results.vendor_devices"
+                :key="v.id"
+                class="search-item"
+                @click="openResult(vendorResultUrl(v))"
+              >
+                <span class="search-item-title">{{ [v.make, v.model].filter(Boolean).join(' ') || 'Vendor claim' }}</span>
+                <span class="search-item-sub">
+                  {{ v.software_name }}{{ v.software_version ? ` ${v.software_version}` : '' }} · {{ v.support_status }}
+                </span>
               </button>
             </div>
             <div v-if="results.tests.length" class="search-group">

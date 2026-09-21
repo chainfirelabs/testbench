@@ -4,7 +4,10 @@ import httpx
 import pytest
 
 from testbench_client import (
+    AUDIT_VIEW,
     AuthenticationError,
+    DEVICES_EDIT,
+    TESTS_EDIT,
     TestBench,
     PermissionDenied,
     ServerError,
@@ -42,11 +45,41 @@ def test_from_env_says_which_variable_is_missing(monkeypatch):
         TestBench.from_env()
 
 
-def test_whoami_reports_the_effective_role(tb, api):
-    api.me["role"] = "readonly"
+def test_whoami_reports_what_the_key_may_do(tb, api):
+    api.as_role("readonly")
     identity = tb.whoami()
     assert identity.role == "readonly"
+    assert identity.permissions == frozenset()
     assert identity.can_write is False
+    assert identity.can(TESTS_EDIT) is False
+
+
+def test_a_custom_role_is_read_by_its_permissions_not_its_name(tb, api):
+    # The whole point of installation-defined roles: "auditor" means nothing to
+    # this library, and it should not have to guess.
+    api.as_role("auditor", [AUDIT_VIEW])
+    identity = tb.whoami()
+    assert identity.can(AUDIT_VIEW) is True
+    assert identity.can(TESTS_EDIT) is False
+    assert identity.can_write is False
+
+
+def test_writing_needs_both_halves_of_a_test_run(tb, api):
+    # Checking a device out and recording the result are separate permissions,
+    # and a suite that can only do the first has not got what it needs.
+    api.as_role("recorder", [TESTS_EDIT])
+    assert tb.whoami().can_write is False
+    api.as_role("runner", [TESTS_EDIT, DEVICES_EDIT])
+    assert tb.whoami(refresh=True).can_write is True
+
+
+def test_an_older_server_without_permissions_still_answers(tb, api):
+    # Before roles were definable the API sent a role name and nothing else.
+    api.me.pop("permissions")
+    api.me["role"] = "tester"
+    identity = tb.whoami()
+    assert identity.can_write is True
+    assert identity.can(AUDIT_VIEW) is False
 
 
 def test_401_is_not_retried(tb, api):
@@ -56,9 +89,9 @@ def test_401_is_not_retried(tb, api):
     assert len(api.requests) == 1
 
 
-def test_403_explains_the_role_cap(tb, api):
-    api.failures = [(403, {"detail": "Insufficient role for write access"})]
-    with pytest.raises(PermissionDenied, match="lower of the role"):
+def test_403_explains_the_permission_cap(tb, api):
+    api.failures = [(403, {"detail": "Your role (readonly) is not allowed to edit devices."})]
+    with pytest.raises(PermissionDenied, match="never more than its owner"):
         tb.devices.list()
 
 

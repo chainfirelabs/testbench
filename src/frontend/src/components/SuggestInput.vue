@@ -16,6 +16,7 @@
  * commits, whether or not it is on the list.
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { visibleOptions } from '../suggestOptions'
 
 const props = withDefaults(
   defineProps<{
@@ -39,12 +40,16 @@ const open = ref(false)
 const activeIndex = ref(-1)
 const rect = ref({ top: 0, left: 0, width: 0 })
 
-/** Case-insensitive substring, so "r2" finds "Rack R2". */
-const matches = computed(() => {
-  const q = (props.modelValue || '').trim().toLowerCase()
-  if (!q) return props.options
-  return props.options.filter((o) => o.value.toLowerCase().includes(q))
-})
+/*
+ * What is rendered, and what the cap is holding back.
+ *
+ * Keyboard navigation, the active-index clamp and Enter all read `matches`
+ * rather than the full match set on purpose: you can only arrow to, or choose,
+ * something that is on screen. See `suggestOptions` for why there is a cap.
+ */
+const shown = computed(() => visibleOptions(props.options, props.modelValue || ''))
+const matches = computed(() => shown.value.visible)
+const hiddenCount = computed(() => shown.value.hidden)
 
 const showList = computed(() => open.value && matches.value.length > 0)
 
@@ -201,11 +206,24 @@ defineExpose({
       >
         {{ o.label }}
       </li>
+      <li v-if="hiddenCount" class="suggest-more" role="presentation">
+        and {{ hiddenCount.toLocaleString() }} more — keep typing to narrow
+      </li>
     </ul>
   </Teleport>
 </template>
 
 <style scoped>
+/* Not an option: it cannot be hovered, arrowed to or chosen, and it should not
+   invite the attempt. */
+.suggest-more {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: default;
+}
+
 .suggest-list {
   position: fixed;
   /* Above the modal backdrop (100), below the toast (1000). */

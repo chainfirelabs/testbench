@@ -11,16 +11,17 @@ distinct-values endpoint over a column like that is a disclosure, not a
 convenience. Only the columns named below can be asked for.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Device, Software, Test, User, VendorDevice
+from ..models import AuditLog, Device, Software, Test, User, VendorDevice
 from ..schemas import SuggestionsOut
 from ..services.device_schema import device_field_expression, effective_field_map
 from ..services.entity_fields import entity_field_expression, entity_field_map
 from .deps import get_current_user
+from ..services.permissions import AUDIT_VIEW, USERS_MANAGE, caller_permissions
 
 router = APIRouter(prefix="/suggestions", tags=["suggestions"])
 
@@ -32,9 +33,32 @@ SUGGESTABLE = {
         "model": VendorDevice.model,
         "firmware_version": VendorDevice.firmware_version,
         "hardware_version": VendorDevice.hardware_version,
+        "architecture": VendorDevice.architecture,
+        "support_status": VendorDevice.support_status,
         "source": VendorDevice.source,
     },
+    # The audit and user collections are listed so their grids' column filters
+    # can offer the whole column rather than the page on screen. Both are admin
+    # reading, and so is this: who has logged in and what they did is not a
+    # list a readonly account gets to enumerate.
+    "audit_logs": {
+        "username": AuditLog.username,
+        "action": AuditLog.action,
+        "entity_type": AuditLog.entity_type,
+        "ip_address": AuditLog.ip_address,
+    },
+    "users": {
+        "username": User.username,
+        "email": User.email,
+        "role": User.role,
+        "auth_provider": User.auth_provider,
+    },
 }
+
+# Collections whose distinct values need the permission their own list endpoint
+# needs: enumerating every username, or every action anyone has taken, is the
+# same disclosure as reading the list it came from.
+GATED = {"audit_logs": AUDIT_VIEW, "users": USERS_MANAGE}
 
 
 @router.get("/{entity}/{field}", response_model=SuggestionsOut)
@@ -49,6 +73,12 @@ def field_suggestions(
     fields = SUGGESTABLE.get(entity)
     if fields is None and entity not in {"devices", "software", "tests"}:
         raise HTTPException(404, f"No suggestions for {entity!r}")
+    needed = GATED.get(entity)
+    if needed and needed not in caller_permissions(db, user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"Your role ({user.role}) is not allowed to read {entity.replace('_', ' ')}.",
+        )
     if entity == "devices":
         # Devices resolve through the published schema rather than the frozen
         # catalog, and a sensitive field is never suggestible: a dropdown of

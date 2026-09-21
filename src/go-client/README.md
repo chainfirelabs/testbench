@@ -3,8 +3,8 @@
 A Go 1.22+ client for querying TestBench with an API key or bearer token. Uses
 only the Go standard library. It covers all read operations wrapped by the
 Python client: identity, inventory, overdue devices, device actions and schemas,
-software and versions, and test results. All paginated listings fetch every page
-unless a limit is set.
+software and versions, vendor compatibility claims, and test results. All
+paginated listings fetch every page unless a limit is set.
 
 ## Command-line executable
 
@@ -61,6 +61,11 @@ Common queries (from the repository root):
 ./bin/testbench --software --get curl-smoke --version 3.8.5 --json
 ./bin/testbench --software --fields
 
+./bin/testbench --vendor-devices --search 'ISR 4331'
+./bin/testbench --vendor-devices --filter 'make=Cisco' --support supported
+./bin/testbench --vendor-devices --for-software curl-smoke --version 3.8.5
+./bin/testbench --vendor-devices --for-device dev-0042 --json
+
 ./bin/testbench --tests --for-device dev-0042 --outcome fail
 ./bin/testbench --tests --for-software curl-smoke --version 3.8.5
 ./bin/testbench --tests --tag automated --search nightly --limit 20
@@ -73,6 +78,22 @@ Common queries (from the repository root):
 ./bin/testbench --tests --json > results.json
 ./bin/testbench --help
 ```
+
+`--vendor-devices` searches every software's compatibility list at once, which
+is the question no single software's list can answer: *does anything claim to
+support this hardware?* Each row names the software and version making the
+claim and reports `software_is_latest`, which is false for a claim made by a
+version that has since been superseded — still a real claim, but not current
+guidance. `--support` takes the vendor's own word (`supported`, `partial`,
+`unsupported`, `planned`); unsupported rows are listed like any other, because
+"the vendor says no" is an answer.
+
+`--for-software` narrows to one version's own list and `--for-device` to the
+claims about a device's make and model; both compose with the other filters.
+Note that a claim is not evidence: `--vendor-devices --for-device dev-0042` is
+what vendors say about that hardware, `--tests --for-device dev-0042` is what
+has actually been run against it, and the two routinely disagree. Absence of a
+test means untested, not unsupported.
 
 Select exactly one resource/action. Listings follow every page by default;
 `--limit` caps the number of returned records. Repeat `--filter COLUMN=VALUE`
@@ -182,6 +203,9 @@ them as needed (timestamps without an offset represent UTC).
 | `software.resolve(name, version)` | `Software.Resolve(ctx, name, version)` |
 | `tests.list(...)` / `tests.iter(...)` | `Tests.List(ctx, options)` / `Tests.Iterate(ctx, options, callback)` |
 | `tests.get(id)` / `tests.for_device(id)` | `Tests.Get(ctx, id)` / `Tests.ForDevice(ctx, id, limit)` |
+| `vendor_devices.list(...)` / `.iter(...)` | `VendorDevices.List(ctx, options)` / `VendorDevices.Iterate(ctx, options, callback)` |
+| `vendor_devices.for_software(name, version)` | `VendorDevices.ForSoftware(ctx, name, version, options)` |
+| `vendor_devices.for_device(id)` | `VendorDevices.ForDevice(ctx, id, options)` |
 | `request(...)` | `Request(ctx, method, path, query, body, &result)` |
 
 Devices accept unique IDs or UUIDs. Software accepts names or UUIDs, with an
@@ -193,6 +217,30 @@ Filters use API names in `url.Values`, including `search`, `sort`, `order`,
 `online`, `overdue`, `latest_only`, and arbitrary dynamic field keys. Boolean
 values are strings (`"true"` / `"false"`). The API validates filters; use valid
 schema values because some invalid filter values simply produce an empty page.
+
+Vendor claims take their own named filters, which combine with anything in
+`Query`. A filter supplied twice — once named and once raw — is refused rather
+than silently resolved, because a dropped filter reads as a narrower answer
+instead of an error:
+
+```go
+claims, err := client.VendorDevices.List(ctx, testbench.VendorDeviceListOptions{
+    Search:        "ISR 4331",
+    SupportStatus: "supported",
+    ListOptions:   testbench.ListOptions{Limit: 50},
+})
+
+// One version's own list, and the claims about one device's hardware. Both
+// take the same options, so the filters carry through the narrowing.
+own, err := client.VendorDevices.ForSoftware(ctx, "curl-smoke", "3.8.5", testbench.VendorDeviceListOptions{})
+about, err := client.VendorDevices.ForDevice(ctx, "dev-0042", testbench.VendorDeviceListOptions{
+    SupportStatus: "supported",
+})
+```
+
+`SupportStatus` is checked before the request: the list endpoints do not
+validate filter values, so an unknown one would return an empty page and read
+as "nothing supports it" rather than as an error.
 
 Test filters can resolve human-readable identifiers before listing:
 

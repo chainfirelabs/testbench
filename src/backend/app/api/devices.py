@@ -7,10 +7,11 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db, utcnow
-from ..models import Device, DeviceType, Test, User
+from ..models import AuditLog, Device, DeviceType, Test, User
 from ..schemas import (
     BulkIds,
     BulkPayload,
+    ChangelogEntry,
     DeviceCompatibilityOut,
     DeviceCompatibleSoftwareOut,
     DeviceCreate,
@@ -31,11 +32,12 @@ from ..schemas import (
     VendorDeviceOut,
 )
 from ..services.audit import field_diff, log_action
+from ..services.changelog import changelog_entries
 from ..services.checkout import overdue_clause, today
 from ..services.compat import compatible_software
 from ..services.hooks import emit_status_change
-from ..services.io import download_response, export_response, parse_import, strip_nulls, template_csv
-from ..services.list_filters import exclude_clause, excluded_values
+from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.device_info import DockerError, launch_device_info, missing_required_fields
 from ..services.device_schema import (
@@ -48,13 +50,15 @@ from ..services.device_schema import (
     get_available_actions,
     get_effective_fields,
     layout_keys,
+    normalize_link_overrides,
     REDACTED,
     redact_sensitive,
     union_field_map,
     validate_device_document,
 )
 from ..services.scan import manager, scan_device
-from .deps import get_current_user, require_write
+from ..services.permissions import AUDIT_VIEW
+from .deps import get_current_user, holds, require_devices_edit
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -69,7 +73,7 @@ ENVELOPE_KEYS = {
     "id", "data", "misc_data", "device_type", "device_type_id", "device_type_key",
     "device_type_label", "unique_id", "created_at", "updated_at", "created_by",
     "updated_by", "checked_out_by", "checked_out_by_username", "schema_revision",
-    "verified_tests", "all_tests", "days_overdue",
+    "verified_tests", "all_tests", "days_overdue", "link_overrides",
 }
 
 # Server-owned columns; an export re-imported as-is carries them.
@@ -109,6 +113,72 @@ def device_out(db: Session, device: Device, cache: dict | None = None) -> Device
 
 def _device_dict(db: Session, d: Device, cache: dict | None = None) -> dict:
     return device_out(db, d, cache).model_dump(mode="json")
+
+
+# Keys a device carries that are not values in its document. Everything else a
+# caller can ask for is an installation-defined field and is read from the
+# document by name — which is what keeps a projection dynamic: a field added
+# next week needs no entry here.
+DEVICE_STRUCTURAL_KEYS = {
+    "id", "unique_id", "device_type_id", "device_type_key", "device_type_label",
+    "checked_out_by", "checked_out_by_username", "created_at", "updated_at",
+    "link_overrides",
+}
+
+
+def _project_device(db: Session, device: Device, keys: list[str], cache: dict) -> dict:
+    """One device as just the fields a caller asked for.
+
+    The point is what it does *not* do. `device_out` builds the whole row —
+    every field of the document, plus the `misc_data` spillover, which needs
+    the device type's layout resolved to know what is left over. A picker that
+    wants four fields per device pays for all of it, and on a large fleet the
+    response is megabytes of values nobody reads.
+
+    Unknown keys resolve against the document rather than being rejected, so
+    this stays correct for fields this installation defined and this code has
+    never heard of.
+    """
+    document = device.data
+    projected: dict = {}
+    for key in keys:
+        if key == "misc_data":
+            projected[key] = device_misc_data(db, device, cache)
+        elif key in DEVICE_STRUCTURAL_KEYS:
+            projected[key] = getattr(device, key, None)
+        else:
+            projected[key] = document.get(key)
+    return projected
+
+
+def _requested_fields(db: Session, fields: str | None) -> list[str] | None:
+    """`?fields=a,b,c` as a list, or None for the whole row.
+
+    Secrets are refused rather than masked. A projection reads the document by
+    key, which is the one path that would hand back a value the full row never
+    carries: `DeviceOut` has no attribute for an installation's `password`
+    field, and `misc_data` only holds what the layout does not account for, so
+    a configured credential is not in an ordinary list response at all. Naming
+    it here must not be the way to get one — and a caller who asked for a
+    secret wants the secret, so a masked value would be a silent lie where an
+    error is the honest answer.
+    """
+    if fields is None:
+        return None
+    keys = [key.strip() for key in fields.split(",") if key.strip()]
+    if not keys:
+        raise HTTPException(status_code=422, detail="fields must name at least one field")
+    catalog = union_field_map(db)
+    secrets = sorted({
+        key for key in keys
+        if catalog.get(key) is not None and catalog[key].sensitive
+    })
+    if secrets:
+        raise HTTPException(
+            status_code=422,
+            detail=f"fields cannot include sensitive fields: {', '.join(secrets)}",
+        )
+    return keys
 
 
 def _redact_diff(db: Session, device: Device, diff: dict) -> dict:
@@ -373,10 +443,12 @@ def _query_devices(db: Session, filters: dict, search: str | None = None) -> sel
     for name, value in filters.items():
         if value is None:
             continue
-        if name.startswith("exclude__"):
-            field_name = name.removeprefix("exclude__")
+        if name.startswith(("exclude__", "include__")):
+            keeping = name.startswith("include__")
+            field_name = name.removeprefix("include__" if keeping else "exclude__")
+            pick = include_clause if keeping else exclude_clause
             if field_name == "device_type_id":
-                clause = exclude_clause(Device.device_type_id, excluded_values(value))
+                clause = pick(Device.device_type_id, excluded_values(value))
                 if clause is not None:
                     q = q.where(clause)
                 continue
@@ -384,7 +456,7 @@ def _query_devices(db: Session, filters: dict, search: str | None = None) -> sel
             if field and field.storage in {"data", "column"}:
                 expression = device_field_expression(field)
                 values = [coerce_filter_value(field, item) for item in excluded_values(value)]
-                clause = exclude_clause(expression, values)
+                clause = pick(expression, values)
                 if clause is not None:
                     q = q.where(clause)
             continue
@@ -415,10 +487,17 @@ def _query_devices(db: Session, filters: dict, search: str | None = None) -> sel
     return q
 
 
-@router.get("", response_model=Page[DeviceOut])
+# `response_model` is left off because the shape depends on `fields`: with it
+# a row is the projection the caller asked for, without it a full DeviceOut.
+# Declaring DeviceOut would make FastAPI coerce the projection back up to a
+# whole row, which is the cost this exists to avoid.
+@router.get("")
 def list_devices(
     request: Request,
     search: str | None = None,
+    # Comma-separated field keys. A picker that wants identities does not want
+    # the document behind them; see `_project_device`.
+    fields: str | None = None,
     device_type: str | None = None,
     status: str | None = None,
     location: str | None = None,
@@ -445,9 +524,10 @@ def list_devices(
     have" needs: a client that trims a response for its own reasons can resume
     at exactly the row it stopped on, which page numbers cannot express.
     """
+    requested = _requested_fields(db, fields)
     dynamic = {
         key: value for key, value in request.query_params.items()
-        if key not in {"search", "sort", "order", "page", "page_size", "offset"}
+        if key not in {"search", "sort", "order", "page", "page_size", "offset", "fields"}
     }
     dynamic.update({
         key: value for key, value in {
@@ -468,7 +548,11 @@ def list_devices(
     # One layout lookup per device type on the page, not one per row.
     cache: dict = {}
     return Page(
-        items=[device_out(db, d, cache) for d in items],
+        items=(
+            [_project_device(db, d, requested, cache) for d in items]
+            if requested is not None
+            else [device_out(db, d, cache) for d in items]
+        ),
         total=total,
         page=start // page_size + 1,
         page_size=page_size,
@@ -507,7 +591,7 @@ def scan_all_devices(
     db: Session = Depends(get_db),
     # A scan probes every device on the network and writes the result back to
     # the row; that is a write, not a read.
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     """Start a large scan of all devices in the background."""
     _require_scan_addresses(db)
@@ -543,7 +627,7 @@ def start_device_info(
     device_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     if not settings.device_info_enabled:
         raise HTTPException(status_code=409, detail="Device information lookup is disabled")
@@ -628,7 +712,7 @@ def export_devices(
                {"format": format, "count": len(rows), "columns": effective_mode,
                 "expand_misc": expand_misc}, request)
     db.commit()
-    return export_response(rows, columns, format, "devices")
+    return streaming_export_response(rows, columns, format, "devices")
 
 
 def _expand_misc_columns(rows: list[dict], columns: list[str]) -> tuple[list[dict], list[str]]:
@@ -695,14 +779,26 @@ def _export_shape(db: Session, device_type: DeviceType | None, mode: str):
     * `all` — the union of every field any type defines, so one file can carry
       a mixed fleet without losing a column.
     * `data` — the structural columns plus the whole JSON document in one
-      cell. Lossless, and the only shape that survives a schema that changes
-      between export and re-import.
+      cell. For a caller that wants the document as one object rather than
+      spread across columns.
+
+    The field-column shapes are lossless too: every value is written to its
+    field's column, whatever the layout does not account for is lifted out of
+    `misc_data` into columns of its own, and the import coerces each value back
+    to its field's type. They carry `link_overrides` for the same reason — it
+    is part of a device that no field column describes. That was not always
+    true, and while it was not, restoring a fleet from a field-column file put
+    every custom link quietly back on http.
     """
     # Shared by both projections below, and by every row they are called for.
     cache: dict = {}
 
     if mode == "data":
-        columns = [*STRUCTURAL_COLUMNS, "data", "checked_out_by_username", "created_at", "updated_at"]
+        # The round-trip projection, so it carries the link overrides too: they
+        # are device data like the document, and an export that dropped them
+        # would restore a fleet with every custom link quietly back on http.
+        columns = [*STRUCTURAL_COLUMNS, "data", "link_overrides",
+                   "checked_out_by_username", "created_at", "updated_at"]
 
         def project(device: Device) -> dict:
             row = _device_dict(db, device, cache)
@@ -722,7 +818,17 @@ def _export_shape(db: Session, device_type: DeviceType | None, mode: str):
     # drops the values it exists to preserve. The import side has always
     # accepted the column.
     keys = [field.key for field in fields]
-    columns = ["device_type", *dict.fromkeys(["unique_id", *keys])]
+    # `link_overrides` last, and for the same reason `misc_data` is here at
+    # all: it is part of a device that no field column can carry, so a file
+    # without it restores a fleet with every custom link quietly back on
+    # http. It is the only thing a field-column export used to lose — the
+    # document itself round-trips exactly, because the import coerces each
+    # value back to its field's type — and losing one thing silently is what
+    # made a second, lossless export necessary.
+    #
+    # A cell per device, empty for the devices that override nothing, which is
+    # nearly all of them. The importer already accepts the column.
+    columns = ["device_type", *dict.fromkeys(["unique_id", *keys]), "link_overrides"]
 
     def project(device: Device) -> dict:
         row = _device_dict(db, device, cache)
@@ -734,6 +840,10 @@ def _export_shape(db: Session, device_type: DeviceType | None, mode: str):
             # carries that answer.
             result[field.key] = row.get(field.key) if field.storage != "data" else document.get(field.key)
         result["unique_id"] = device.unique_id
+        # None rather than `{}` so the cell is blank: an empty JSON object in
+        # every row of a spreadsheet is noise, and a blank re-imports as "this
+        # file says nothing about link overrides" rather than "clear them".
+        result["link_overrides"] = device.link_overrides or None
         return result
 
     return columns, project
@@ -920,6 +1030,68 @@ def get_related_counts(
     return DeviceRelatedCountsOut(
         vendor_claims=sum(len(item["vendor_devices"]) for item in matches),
         tests=db.scalar(select(func.count(Test.id)).where(Test.device_id == device.id)) or 0,
+        changelog=db.scalar(_changelog_count(device.id)) or 0,
+    )
+
+
+def _changelog_query(device_id: str):
+    """Every audit row that is about this one device.
+
+    Scoped by `entity_id` rather than by action, so an action added later —
+    another plugin's callback, a new device operation — appears in the device's
+    history without this list having to learn about it first. Fleet-wide rows
+    (a scan of everything, an import, an export) carry no entity id and so are
+    not one device's history; they stay in the audit log.
+    """
+    return (
+        select(AuditLog)
+        .where(AuditLog.entity_type == "device", AuditLog.entity_id == device_id)
+        .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
+    )
+
+
+def _changelog_count(device_id: str):
+    """How many entries that query would return.
+
+    The ORDER BY has to go: Postgres rejects a count that still sorts by a
+    column the aggregate does not group on.
+    """
+    return _changelog_query(device_id).with_only_columns(func.count()).order_by(None)
+
+
+@router.get("/{device_id}/changelog", response_model=Page[ChangelogEntry])
+def get_device_changelog(
+    device_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """What has happened to this device, newest first.
+
+    Built from the audit log rather than from a second record kept in step with
+    it, and readable by anyone who can read the device — which is the whole
+    point of having it here rather than sending people to `/audit_logs`, where
+    only an admin may go. That is why the entries are a projection and not the
+    rows: see services/changelog.py for what an entry is allowed to say and
+    what is masked on the way out.
+    """
+    device = _get_device(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    q = _changelog_query(device.id)
+    total = db.scalar(_changelog_count(device.id)) or 0
+    logs = list(db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all())
+    return Page(
+        items=[
+            ChangelogEntry(**entry)
+            for entry in changelog_entries(
+                db, device, logs, include_raw=holds(db, user, AUDIT_VIEW),
+            )
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
     )
 
 
@@ -928,7 +1100,7 @@ def create_device(
     body: DeviceCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     unique_id = (body.unique_id or "").strip()
     if not unique_id:
@@ -940,6 +1112,11 @@ def create_device(
     try:
         requested_type = _resolve_device_type(db, type_value)
         applied = _write_document(db, device, document, requested_type, creating=True)
+        # Accepted on the way in as well as on update, so a device restored
+        # from an export comes back with the links it was exported with.
+        device.link_overrides = normalize_link_overrides(
+            getattr(body, "link_overrides", None)
+        )
     except (ValueError, DeviceValidationError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     device.device_type = requested_type
@@ -971,12 +1148,13 @@ def update_device(
     body: DeviceUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     device = _get_device(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
     old = {"unique_id": device.unique_id, "device_type": device.device_type_key, **device.data}
+    old_links = dict(device.link_overrides or {})
     document, type_value, type_supplied = _envelope(body)
     requested_type = device.device_type
     try:
@@ -1004,6 +1182,13 @@ def update_device(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if type_supplied:
         device.device_type = requested_type
+    # Replaced wholesale rather than merged: the editor sends every override
+    # the device has, so an entry it leaves out is one the operator removed.
+    if body.link_overrides is not None:
+        try:
+            device.link_overrides = normalize_link_overrides(body.link_overrides)
+        except DeviceValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     device.updated_by = user.id
     device.updated_at = utcnow()
     hook_failures = _apply_status_transition(db, device, applied["status"], user)
@@ -1013,6 +1198,12 @@ def update_device(
     # masked: the entry says the password was replaced without being a second
     # copy of either the old one or the new one.
     detail = {"diff": _redact_diff(db, device, field_diff(old, new))}
+    # Kept beside the field diff rather than inside it: an override is not a
+    # field value, and a changelog that listed it as one would claim the
+    # device's LAN address changed when only the link to it did.
+    link_diff = field_diff(old_links, dict(device.link_overrides or {}))
+    if link_diff:
+        detail["link_diff"] = link_diff
     if hook_failures:
         detail["hook_failures"] = hook_failures
     log_action(db, user, "device.update", "device", device.id, detail, request)
@@ -1026,7 +1217,7 @@ def scan_single_device(
     device_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     """Probe a single device (ICMP/HTTP/HTTPS/TELNET/SSH) and update its online state."""
     device = _get_device(db, device_id)
@@ -1074,7 +1265,7 @@ def delete_device(
     device_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     device = _get_device(db, device_id)
     if device is None:
@@ -1090,7 +1281,7 @@ def delete_devices_bulk(
     body: BulkIds,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     """Delete multiple devices by id (multi-select delete)."""
     deleted = 0
@@ -1139,6 +1330,14 @@ def _upsert_row(db: Session, row: dict, user: User) -> str:
     changing_type = type_supplied and (requested_type.id if requested_type else None) != device.device_type_id
     applied = _write_document(db, device, document, requested_type,
                               creating=creating, changing_type=changing_type)
+    # A column the raw export writes, so re-importing that file restores the
+    # links with everything else. A row that does not mention it — every CSV
+    # written against the field columns — leaves what the device already has.
+    if "link_overrides" in row:
+        overrides = row["link_overrides"]
+        if isinstance(overrides, str):
+            overrides = json.loads(overrides or "{}")
+        device.link_overrides = normalize_link_overrides(overrides)
     if creating:
         device.device_type = requested_type
         db.add(device)
@@ -1164,7 +1363,7 @@ def bulk_devices(
     body: BulkPayload,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     created = updated = deleted = 0
     errors: list[dict] = []
@@ -1195,7 +1394,7 @@ async def import_devices(
     file: UploadFile,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     content = await file.read()
     filename = file.filename or ""

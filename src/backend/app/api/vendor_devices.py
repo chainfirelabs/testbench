@@ -20,6 +20,8 @@ from ..schemas import (
     BulkIds,
     ImportResult,
     Page,
+    VendorDeviceCatalogCreate,
+    VendorDeviceCatalogOut,
     VendorDeviceCreate,
     VendorDeviceOut,
     VendorDeviceUpdate,
@@ -27,21 +29,28 @@ from ..schemas import (
 from ..services.audit import field_diff, log_action
 from ..services.io import (
     download_response,
-    export_response,
     parse_import,
     safe_filename,
+    streaming_export_response,
     strip_nulls,
     template_csv,
 )
-from ..services.list_filters import exclude_clause, excluded_values
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
 from ..services.query import order_by, row_error
+from ..services.versions import newest_version
 from ..services.entity_fields import (
     field_payload, get_entity_fields, merge_extra_columns, project_fields,
     validate_custom_values,
 )
-from .deps import get_current_user, require_admin, require_write
+from .deps import get_current_user, require_schema_manage, require_software_edit
 
 router = APIRouter(prefix="/software/{software_id}/vendor-devices", tags=["vendor-devices"])
+
+# The same rows, addressed as one catalogue rather than one software's list.
+# A vendor device belongs to a software version, but the question people
+# actually arrive with — "does anything claim to support this box?" — is not
+# about a version, and cannot be asked of an endpoint that needs one first.
+catalog_router = APIRouter(prefix="/vendor-devices", tags=["vendor-devices"])
 
 EXPORT_COLUMNS = [
     "id",
@@ -242,13 +251,14 @@ def list_grouped_vendor_devices(
         if key in {"search", "sort", "order", "page", "page_size"} or not value:
             continue
         excluded = key.startswith("exclude__")
-        field = key.removeprefix("exclude__") if excluded else key
+        included = key.startswith("include__")
+        field = key.removeprefix("exclude__" if excluded else "include__") if excluded or included else key
         expression = (getattr(VendorDevice, field) if field in standard else
                       VendorDevice.misc_data[field].astext if field in custom else None)
         if expression is None:
             continue
-        if excluded:
-            clause = exclude_clause(expression, excluded_values(value))
+        if excluded or included:
+            clause = (exclude_clause if excluded else include_clause)(expression, excluded_values(value))
             if clause is not None:
                 source_query = source_query.where(clause)
         else:
@@ -303,7 +313,7 @@ def vendor_device_schema(
 @router.put("/schema")
 def update_vendor_device_schema(
     software_id: str, body: VendorFieldLayoutIn, db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     software = _get_software(db, software_id)
     fields = get_entity_fields(db, "vendor_devices")
@@ -371,7 +381,7 @@ def export_vendor_devices(
     db.commit()
     # The stem carries a software name, which is free text: safe_filename keeps a
     # quote or newline in it from breaking out of the Content-Disposition header.
-    return export_response(rows, [field.key for field in fields], format, f"{software.name}-vendor-devices")
+    return streaming_export_response(rows, [field.key for field in fields], format, f"{software.name}-vendor-devices")
 
 
 @router.get("/template")
@@ -392,7 +402,7 @@ async def import_vendor_devices(
     file: UploadFile,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     """Load a vendor compatibility list.
 
@@ -471,7 +481,7 @@ def delete_vendor_devices_bulk(
     body: BulkIds,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     """Delete multiple vendor devices by id (multi-select delete)."""
     software = _get_software(db, software_id)
@@ -493,7 +503,7 @@ def create_vendor_device(
     body: VendorDeviceCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     software = _get_software(db, software_id)
     try:
@@ -525,7 +535,7 @@ def update_vendor_device(
     body: VendorDeviceUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     software = _get_software(db, software_id)
     vd = _get_vd(db, software, vd_id)
@@ -560,7 +570,7 @@ def delete_vendor_device(
     vd_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     software = _get_software(db, software_id)
     vd = _get_vd(db, software, vd_id)
@@ -570,3 +580,429 @@ def delete_vendor_device(
     )
     db.delete(vd)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# The catalogue: vendor claims across every software version at once.
+# ---------------------------------------------------------------------------
+
+# Columns a catalogue search matches on, and the ones it filters by exactly.
+CATALOG_TEXT_FILTERS = {
+    "make": VendorDevice.make,
+    "model": VendorDevice.model,
+    "firmware_version": VendorDevice.firmware_version,
+    "hardware_version": VendorDevice.hardware_version,
+    "architecture": VendorDevice.architecture,
+    "source": VendorDevice.source,
+    "notes": VendorDevice.notes,
+}
+
+CATALOG_EXACT_FILTERS = {
+    "support_status": VendorDevice.support_status,
+    "software_id": VendorDevice.software_id,
+}
+
+CATALOG_SORT_COLUMNS = {
+    **CATALOG_TEXT_FILTERS,
+    "support_status": VendorDevice.support_status,
+    "software_name": Software.name,
+    "software_version": Software.version,
+    "created_at": VendorDevice.created_at,
+    "updated_at": VendorDevice.updated_at,
+}
+
+# The two columns naming the version a row is a claim by. The claim's own
+# columns follow, and they come from the field catalog rather than from a list
+# here: an installation that added a vendor-device field expects to see it in
+# the file, and — because the file is also an import — a column left out is not
+# merely missing from the export. Re-importing writes the whole row, so an
+# absent column reads as "no value" and clears what was there.
+CATALOG_SOFTWARE_COLUMNS = ["software_name", "software_version"]
+
+
+def _catalog_export_fields(db: Session) -> list[EntityField]:
+    """The claim columns a catalogue file carries, in catalog order.
+
+    The global catalog, not one software's layout: a file that may name any
+    software cannot be shaped by the visibility overrides of one of them.
+    """
+    return [
+        field for field in get_entity_fields(db, "vendor_devices")
+        if field.key != "misc_data"
+    ]
+
+# Query parameters that steer the request rather than filter it.
+CATALOG_CONTROLS = {"search", "sort", "order", "page", "page_size", "offset", "format", "software"}
+
+
+def _catalog_query(db: Session, search: str | None, params: dict):
+    """Vendor claims across every software, filtered by `?column=value`.
+
+    Joined to `software` rather than resolved per row: the software's name is
+    part of what a catalogue row *is*, and it is also something to search and
+    sort on — "every claim Backup-Restore makes" is the same question as "every
+    claim about a Cisco", asked of the other side of the join.
+    """
+    q = select(VendorDevice, Software).join(Software, VendorDevice.software_id == Software.id)
+    if search:
+        like = f"%{search}%"
+        # Custom (misc_data) columns are configured per software version, so a
+        # catalogue-wide search takes the union of every version's own fields.
+        custom = [
+            VendorDevice.misc_data[field.key].astext.ilike(like)
+            for field in get_entity_fields(db, "vendor_devices")
+            if field.storage == "data" and not field.sensitive
+        ]
+        q = q.where(or_(
+            *[column.ilike(like) for column in CATALOG_TEXT_FILTERS.values()],
+            Software.name.ilike(like),
+            Software.version.ilike(like),
+            *custom,
+        ))
+    # A software named rather than identified: the name covers every version of
+    # it, which is what someone filtering by software means.
+    name = params.get("software")
+    if name:
+        q = q.where(func.lower(Software.name) == str(name).lower())
+    for key, value in params.items():
+        if key in CATALOG_CONTROLS or value in (None, ""):
+            continue
+        if key.startswith(("exclude__", "include__")):
+            keeping = key.startswith("include__")
+            field = key.removeprefix("include__" if keeping else "exclude__")
+            expression = CATALOG_SORT_COLUMNS.get(field)
+            pick = include_clause if keeping else exclude_clause
+            clause = pick(expression, excluded_values(value)) if expression is not None else None
+            if clause is not None:
+                q = q.where(clause)
+            continue
+        if key in CATALOG_EXACT_FILTERS:
+            q = q.where(CATALOG_EXACT_FILTERS[key] == value)
+        elif key in CATALOG_TEXT_FILTERS:
+            q = q.where(CATALOG_TEXT_FILTERS[key].ilike(f"%{value}%"))
+        elif key == "software_name":
+            q = q.where(Software.name.ilike(f"%{value}%"))
+        elif key == "software_version":
+            q = q.where(Software.version.ilike(f"%{value}%"))
+    return q
+
+
+def _catalog_rows(db: Session, pairs: list[tuple[VendorDevice, Software]]) -> list[VendorDeviceCatalogOut]:
+    """Vendor claims with the software that makes them, and its place in the line.
+
+    `software_is_latest` is resolved for the whole page in one query: the same
+    fact `/software` reports on every row, so a claim on a superseded version
+    reads as one here too rather than looking like current guidance.
+    """
+    if not pairs:
+        return []
+    names = {software.name.lower() for _vd, software in pairs}
+    siblings: dict[str, list[Software]] = {}
+    for row in db.scalars(select(Software).where(func.lower(Software.name).in_(names))).all():
+        siblings.setdefault(row.name.lower(), []).append(row)
+    latest = {
+        name: (newest_version(rows).id if rows else None) for name, rows in siblings.items()
+    }
+    out = []
+    for vendor_device, software in pairs:
+        item = VendorDeviceCatalogOut.model_validate(vendor_device)
+        item.software_name = software.name
+        item.software_version = software.version or ""
+        item.software_is_latest = latest.get(software.name.lower()) == software.id
+        out.append(item)
+    return out
+
+
+@catalog_router.get("", response_model=Page[VendorDeviceCatalogOut])
+def search_vendor_devices(
+    request: Request,
+    search: str | None = None,
+    software: str | None = None,
+    make: str | None = None,
+    model: str | None = None,
+    firmware_version: str | None = None,
+    hardware_version: str | None = None,
+    architecture: str | None = None,
+    support_status: str | None = None,
+    sort: str = "make",
+    order: str = "asc",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=1000),
+    offset: int | None = Query(None, ge=0),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Search every vendor compatibility list at once.
+
+    These are claims, not evidence: a row here says a vendor published support
+    for that hardware, whether or not this fleet owns one and whether or not it
+    has ever been run. What has actually been tested lives in `/tests`.
+
+    Paginates the two ways `/devices` does. `page` is what the UI sends;
+    `offset` takes precedence when given and counts in rows, which is what a
+    caller resuming a sweep at the row it stopped on needs.
+    """
+    q = _catalog_query(db, search, dict(request.query_params))
+    total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    column = CATALOG_SORT_COLUMNS.get(sort, VendorDevice.make)
+    # Secondary sort keeps paging stable when the primary column repeats — and
+    # it repeats constantly here, where one make covers hundreds of claims.
+    q = q.order_by(
+        column.desc() if order == "desc" else column.asc(),
+        Software.name.asc(),
+        VendorDevice.match_key.asc(),
+    )
+    start = offset if offset is not None else (page - 1) * page_size
+    pairs = [tuple(row) for row in db.execute(q.offset(start).limit(page_size)).all()]
+    return Page(
+        items=_catalog_rows(db, pairs),
+        total=total,
+        page=start // page_size + 1,
+        page_size=page_size,
+    )
+
+
+@catalog_router.get("/export")
+def export_vendor_device_catalog(
+    request: Request,
+    format: str = "json",
+    search: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The same search, as a file. Filters are the ones the list endpoint takes.
+
+    The claim's columns come from the field catalog, so a custom vendor-device
+    field is in the file — and, because this file is what the catalogue import
+    reads, stays in the rows when it is read back. A fixed column list here
+    would not merely omit the field: re-importing writes the whole row, so the
+    absent column would read as "no value" and clear what an operator typed.
+    """
+    q = _catalog_query(db, search, dict(request.query_params))
+    q = q.order_by(Software.name.asc(), VendorDevice.match_key.asc())
+    pairs = [tuple(row) for row in db.execute(q).all()]
+    fields = _catalog_export_fields(db)
+    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
+    rows = []
+    for item in _catalog_rows(db, pairs):
+        row = item.model_dump(mode="json")
+        rows.append({
+            "software_name": row["software_name"],
+            "software_version": row["software_version"],
+            **project_fields(row, fields, "misc_data"),
+        })
+    log_action(db, user, "vendor_devices.catalog_export", "vendor_device", None,
+               {"format": format, "count": len(rows)}, request)
+    db.commit()
+    return streaming_export_response(rows, columns, format, "vendor-devices")
+
+
+# ---------- creating and importing from the catalogue ----------
+#
+# The write half of the cross-software page. Everything below reaches the same
+# validation, dedupe and audit path as the software-scoped endpoints above —
+# the only thing it adds is working out *which* software version each row is a
+# claim by, which on those endpoints is already settled by the URL.
+
+
+def _software_by_name_version(db: Session, name: str, version: str | None) -> Software:
+    """The one software row with this name and this version.
+
+    Not `_get_software`: that resolves a bare name to the newest version, which
+    is right for a URL an operator typed and wrong for a file. A row that names
+    a version this software does not have is an error rather than a claim
+    quietly filed against whichever version happens to be current — the file
+    said 2.1, and writing it to 3.0 would be inventing a claim nobody made.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("software_name is required")
+    version = (version or "").strip()
+    candidates = list(db.scalars(
+        select(Software).where(func.lower(Software.name) == name.lower())
+    ))
+    if not candidates:
+        raise ValueError(f"Unknown software: {name}")
+    for software in candidates:
+        if (software.version or "") == version:
+            return software
+    known = ", ".join(sorted(item.version or "(unversioned)" for item in candidates))
+    raise ValueError(
+        f"{candidates[0].name} has no version '{version or '(unversioned)'}' — it has {known}"
+    )
+
+
+@catalog_router.get("/template")
+def vendor_device_catalog_template(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """A blank CSV with the columns a catalogue import accepts.
+
+    Carries `software_name` and `software_version` ahead of the claim's own
+    fields, because a row here has to say which version is making the claim.
+
+    The same columns the catalogue export writes, from the same helper, so a
+    blank template and a filled export are the same shape and both import.
+    Read-only fields are dropped: a column an import would ignore is a column
+    that invites someone to fill it in for nothing.
+    """
+    fields = [field for field in _catalog_export_fields(db) if field.writable]
+    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
+    return download_response(
+        template_csv(columns), "vendor-devices-template.csv", "text/csv",
+    )
+
+
+@catalog_router.post("", response_model=VendorDeviceCatalogOut, status_code=201)
+def create_vendor_device_from_catalog(
+    body: VendorDeviceCatalogCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_software_edit),
+):
+    """Add a claim to a named software version, from the cross-software page."""
+    values = body.model_dump()
+    name = values.pop("software_name")
+    version = values.pop("software_version", "")
+    try:
+        software = _software_by_name_version(db, name, version)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        data = _validate_values(db, software, values)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    key = build_match_key(data)
+    if _find_duplicate(db, software, key):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{software.name} already lists a vendor device matching {_describe(data)}",
+        )
+    vd = VendorDevice(software_id=software.id, created_by=user.id, updated_by=user.id)
+    _apply(vd, data)
+    db.add(vd)
+    log_action(
+        db, user, "software.vendor_device.create", "vendor_device", vd.id,
+        {"software_id": software.id, "from_catalog": True, **values}, request,
+    )
+    db.commit()
+    db.refresh(vd)
+    return _catalog_rows(db, [(vd, software)])[0]
+
+
+@catalog_router.post("/import", response_model=ImportResult)
+async def import_vendor_device_catalog(
+    file: UploadFile,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_software_edit),
+):
+    """Load vendor claims for any number of software versions at once.
+
+    One file may name many versions; each row says which through its
+    `software_name` and `software_version` columns. Within a version, rows are
+    matched on the identity fields exactly as the per-software import matches
+    them, so re-importing an updated file refreshes rows instead of duplicating
+    them — and a row whose software cannot be resolved is reported as that row's
+    error, leaving the rest of the file to apply.
+    """
+    rows = parse_import(await file.read(), file.filename or "")
+    result = ImportResult(created=0, updated=0, errors=[])
+    fields = get_entity_fields(db, "vendor_devices")
+    known = {
+        field.key for field in fields if field.storage != "data"
+    } | IMPORT_IGNORED | {"misc_data"} | set(CATALOG_SOFTWARE_COLUMNS)
+
+    # The whole file is validated before anything is written, for the reason
+    # the per-software import gives: rolling one bad row back mid-file would
+    # undo the rows already applied while the counts still claimed them.
+    parsed: list[tuple[Software, str, dict]] = []
+    for i, row in enumerate(rows):
+        try:
+            if not isinstance(row, dict):
+                raise ValueError("row must be an object")
+            row = merge_extra_columns(row, known, "misc_data")
+            cleaned = strip_nulls({k: v for k, v in row.items() if k not in IMPORT_IGNORED})
+            software = _software_by_name_version(
+                db, cleaned.pop("software_name", ""), cleaned.pop("software_version", ""),
+            )
+            data = _validate_values(db, software, VendorDeviceCreate(**cleaned).model_dump())
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append({"row": i, "error": row_error(exc)})
+            continue
+        parsed.append((software, build_match_key(data), data))
+
+    # Loaded once per software the file actually names, rather than once per
+    # row: a file is usually a handful of versions and a great many claims.
+    existing: dict[str, dict[str, VendorDevice]] = {}
+    for software, _key, _data in parsed:
+        if software.id in existing:
+            continue
+        existing[software.id] = {
+            vd.match_key: vd for vd in db.scalars(
+                select(VendorDevice).where(VendorDevice.software_id == software.id)
+            )
+        }
+
+    touched: set[tuple[str, str]] = set()
+    for software, key, data in parsed:
+        rows_for_software = existing[software.id]
+        vd = rows_for_software.get(key)
+        is_new = vd is None
+        if is_new:
+            vd = VendorDevice(software_id=software.id, created_by=user.id, updated_by=user.id)
+            db.add(vd)
+            rows_for_software[key] = vd
+        _apply(vd, data)
+        vd.updated_by = user.id
+        if not is_new:
+            vd.updated_at = utcnow()
+        if (software.id, key) not in touched:
+            result.created += 1 if is_new else 0
+            result.updated += 0 if is_new else 1
+            touched.add((software.id, key))
+
+    log_action(
+        db, user, "vendor_devices.catalog_import", "vendor_device", None,
+        {
+            "file": file.filename,
+            "software_count": len(existing),
+            "created": result.created,
+            "updated": result.updated,
+            "errors": result.errors,
+        },
+        request,
+    )
+    db.commit()
+    return result
+
+
+@catalog_router.post("/delete", status_code=204)
+def delete_vendor_devices_from_catalog(
+    body: BulkIds,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_software_edit),
+):
+    """Delete claims by id, wherever they live.
+
+    The per-software endpoint takes the software from the URL and ignores any
+    id that does not belong to it, which is the right shape for one version's
+    list. A selection made on the catalogue page spans versions by design — the
+    same device claimed by three software is three rows — so each id is
+    resolved to its own software here instead.
+
+    Audited one row at a time, naming the software each belonged to, so the
+    entries read the same as the ones the per-software delete writes.
+    """
+    for vd_id in body.ids:
+        vd = db.get(VendorDevice, vd_id)
+        if vd is None:
+            continue
+        log_action(
+            db, user, "software.vendor_device.delete", "vendor_device", vd.id,
+            {"software_id": vd.software_id, "snapshot": _vd_dict(vd),
+             "bulk": True, "from_catalog": True},
+            request,
+        )
+        db.delete(vd)
+    db.commit()
+    return None

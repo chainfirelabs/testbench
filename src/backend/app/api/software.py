@@ -1,5 +1,3 @@
-import re
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
@@ -27,12 +25,13 @@ from ..schemas import (
     VendorDeviceCreate,
 )
 from ..services.audit import field_diff, log_action
-from ..services.io import download_response, export_response, parse_import, strip_nulls, template_csv
-from ..services.list_filters import exclude_clause, excluded_values
+from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
+from ..services.versions import newest_version, version_key
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
 from .devices import device_out
-from .deps import get_current_user, require_write
+from .deps import get_current_user, require_software_edit
 
 router = APIRouter(prefix="/software", tags=["software"])
 
@@ -63,40 +62,10 @@ IMPORT_IGNORED = {
     "vendor_devices", "bundle_components", "bundle_parent_count",
 }
 
-_VERSION_RE = re.compile(r"^[vV]?(\d+(?:\.\d+)*)(?:[-+](.*))?$")
-
-
-def _version_key(version: str) -> tuple:
-    """Sort dotted numeric versions naturally, with releases above prereleases.
-
-    The catalogue permits free-form versions, so values outside that common
-    grammar fall back to a case-folded natural sort. Numeric versions always
-    outrank free-form and unversioned rows.
-    """
-    raw = (version or "").strip()
-    if not raw:
-        return (0,)
-    match = _VERSION_RE.fullmatch(raw)
-    if match:
-        release = [int(part) for part in match.group(1).split(".")]
-        while len(release) > 1 and release[-1] == 0:
-            release.pop()
-        suffix = match.group(2)
-        # A final release is newer than its prerelease (2.0 > 2.0-rc1).
-        return (2, tuple(release), 1 if suffix is None else 0, _natural_key(suffix or ""))
-    return (1, _natural_key(raw))
-
-
-def _natural_key(value: str) -> tuple:
-    return tuple(
-        (1, int(token)) if token.isdigit() else (0, token.casefold())
-        for token in re.findall(r"\d+|\D+", value)
-    )
-
-
-def _newest_version(rows: list[Software]) -> Software | None:
-    """Highest version, with creation time/id only breaking equal-version ties."""
-    return max(rows, key=lambda row: (_version_key(row.version), row.created_at, row.id)) if rows else None
+# Version ordering is shared with the cross-software vendor-claim search, which
+# also has to mark the current version of each name (services/versions.py).
+_version_key = version_key
+_newest_version = newest_version
 
 
 def _same_name(name: str):
@@ -319,13 +288,16 @@ def _query_software(db: Session, search: str | None, latest_only: bool = False, 
         q = q.where(or_(*searchable) if searchable else Software.id.ilike(like))
     for key, value in (filters or {}).items():
         excluded = key.startswith("exclude__")
-        field = catalog.get(key.removeprefix("exclude__") if excluded else key)
+        included = key.startswith("include__")
+        field = catalog.get(
+            key.removeprefix("exclude__" if excluded else "include__") if excluded or included else key
+        )
         if not field or field.key in {"vendor_device_count", "version_count"}:
             continue
         expression = entity_field_expression(Software, field)
-        if excluded:
+        if excluded or included:
             values = [coerce_query_value(field, item) for item in excluded_values(value)]
-            clause = exclude_clause(expression, values)
+            clause = exclude_clause(expression, values) if excluded else include_clause(expression, values)
             if clause is not None:
                 q = q.where(clause)
             continue
@@ -344,10 +316,61 @@ def _query_software(db: Session, search: str | None, latest_only: bool = False, 
     return q
 
 
-@router.get("", response_model=Page[SoftwareOut])
+# Keys `_annotate` works out from a row's siblings and its bundle, rather than
+# reading off the row. Asking for one of these needs the whole annotation pass;
+# asking for none of them does not, which is the point of the projection.
+SOFTWARE_DERIVED_KEYS = {
+    "vendor_device_count", "version_count", "is_latest",
+    "bundle_components", "bundle_parent_count", "target_count",
+}
+
+# Not values in the document.
+SOFTWARE_STRUCTURAL_KEYS = {"id", "created_at", "updated_at"}
+
+
+def _project_software(software: Software, keys: list[str]) -> dict:
+    """One software row as just the fields a caller asked for.
+
+    Everything not structural is read from the document by name, so a field an
+    installation added is projectable without this code knowing about it.
+    """
+    document = software.misc_data
+    projected: dict = {}
+    for key in keys:
+        if key in SOFTWARE_STRUCTURAL_KEYS:
+            projected[key] = getattr(software, key, None)
+        elif key == "misc_data":
+            projected[key] = document
+        else:
+            projected[key] = getattr(software, key, None) if hasattr(Software, key) else document.get(key)
+    return projected
+
+
+def _software_fields(db: Session, fields: str | None) -> list[str] | None:
+    """`?fields=a,b,c` as a list, or None for the whole row. Secrets refused."""
+    if fields is None:
+        return None
+    keys = [key.strip() for key in fields.split(",") if key.strip()]
+    if not keys:
+        raise HTTPException(status_code=422, detail="fields must name at least one field")
+    catalog = {field.key: field for field in get_entity_fields(db, "software")}
+    secrets = sorted({key for key in keys if getattr(catalog.get(key), "sensitive", False)})
+    if secrets:
+        raise HTTPException(
+            status_code=422,
+            detail=f"fields cannot include sensitive fields: {', '.join(secrets)}",
+        )
+    return keys
+
+
+# See the note on list_devices: the row shape depends on `fields`, so declaring
+# SoftwareOut would coerce a projection back up to a full row.
+@router.get("")
 def list_software(
     request: Request,
     search: str | None = None,
+    # Comma-separated field keys; see `_project_software`.
+    fields: str | None = None,
     latest_only: bool = False,
     sort: str = "name",
     order: str = "asc",
@@ -356,15 +379,25 @@ def list_software(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    requested = _software_fields(db, fields)
     filters = {
         key: value for key, value in request.query_params.items()
-        if key not in {"search", "latest_only", "sort", "order", "page", "page_size"}
+        if key not in {"search", "latest_only", "sort", "order", "page", "page_size", "fields"}
     }
     q = _query_software(db, search, latest_only, filters)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     q = q.order_by(entity_order_by(db, "software", Software, sort, order))
     items = list(db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all())
-    return Page(items=_annotate(db, items), total=total, page=page, page_size=page_size)
+    if requested is None:
+        rows: list = _annotate(db, items)
+    elif SOFTWARE_DERIVED_KEYS & set(requested):
+        # One of the sibling-and-bundle fields was asked for, so the annotation
+        # pass has to run; the projection then just narrows what it produced.
+        annotated = [item.model_dump(mode="json") for item in _annotate(db, items)]
+        rows = [{key: row.get(key) for key in requested} for row in annotated]
+    else:
+        rows = [_project_software(item, requested) for item in items]
+    return Page(items=rows, total=total, page=page, page_size=page_size)
 
 
 @router.get("/export")
@@ -395,7 +428,7 @@ def export_software(
         {"format": format, "count": len(rows), "vendor_devices": vendor_total}, request,
     )
     db.commit()
-    return export_response(rows, [field.key for field in fields] + ["bundle_components", "vendor_devices"], format, "software")
+    return streaming_export_response(rows, [field.key for field in fields] + ["bundle_components", "vendor_devices"], format, "software")
 
 
 @router.get("/template")
@@ -537,7 +570,7 @@ def create_version(
     body: SoftwareVersionCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     """Add a version, starting from the one it branches off.
 
@@ -593,7 +626,7 @@ def create_software(
     body: SoftwareCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     # A name that already exists is a new *version* of that software, and versions
     # inherit a copy of the vendor device list. Creating one here would make a
@@ -635,7 +668,7 @@ def update_software(
     body: SoftwareUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     software = _get_software(db, software_id)
     if software is None:
@@ -704,7 +737,7 @@ def delete_software(
     software_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     software = _get_software(db, software_id)
     if software is None:
@@ -719,7 +752,7 @@ def delete_software_bulk(
     body: BulkIds,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     """Delete multiple software records by id (multi-select delete)."""
     for software_id in body.ids:
@@ -736,7 +769,7 @@ def bulk_software(
     body: BulkPayload,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     created = updated = deleted = 0
     errors: list[dict] = []
@@ -790,7 +823,7 @@ async def import_software(
     file: UploadFile,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_software_edit),
 ):
     content = await file.read()
     filename = file.filename or ""

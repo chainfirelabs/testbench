@@ -6,7 +6,7 @@ import DetailValue from '../components/DetailValue.vue'
 import { api } from '../api/client'
 import { daysFromToday, daysUntil, formatDate } from '../dates'
 import { describeScan } from '../scan'
-import { useAuthStore } from '../stores/auth'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 import { optionLabel } from '../deviceColumns'
 import {
   UNCATEGORIZED,
@@ -16,6 +16,12 @@ import {
   type SchemaField,
 } from '../deviceSchema'
 import { loadDeviceActions, type PluginAction } from '../pluginActions'
+import {
+  deviceAddressUrl,
+  deviceLinkTarget,
+  isDeviceAddressField,
+  type DeviceLinkOverrides,
+} from '../deviceInventory'
 import { deviceTypes, loadDeviceTypes } from '../deviceTypes'
 
 const route = useRoute()
@@ -40,6 +46,10 @@ const statusField = computed(() => displayFields.value.find((field) => field.key
 const hasStatus = computed(() => !!statusField.value?.visible)
 const addressRoleFor = (field: SchemaField) =>
   field.role === 'scan_address_wan' ? 'wan' : field.role === 'scan_address_lan' ? 'lan' : null
+
+/** The device's own web page, for a field the schema says opens one. */
+const addressUrl = (field: SchemaField) =>
+  deviceAddressUrl(fieldValue(detail.value, field), field, detail.value?.link_overrides)
 
 /**
  * The plugin actions this device can run, and why the others cannot.
@@ -67,6 +77,7 @@ const tabs = [
   { id: 'plugin-steps', label: 'Plugin Steps' },
   { id: 'software', label: 'Vendor Claims' },
   { id: 'tests', label: 'Tests' },
+  { id: 'changelog', label: 'Changelog' },
 ]
 
 /** For the DATE columns, which have no time to render and no zone to shift. */
@@ -110,6 +121,60 @@ const testCount = ref<number | null>(null)
 const showUnsupported = ref(false)
 const expanded = ref<string[]>([])
 
+// ---------- changelog ----------
+/*
+ * What has happened to this device, newest first.
+ *
+ * Read from `/devices/:id/changelog`, which projects the audit log rather than
+ * returning it: the audit log itself is admin-only, and its rows carry things
+ * a device's history has no business showing (other entities, IP addresses,
+ * plugin callback details written without redaction). The projection is safe
+ * for anyone who can see the device, so a tester can answer "who changed the
+ * firmware?" without being made an admin.
+ *
+ * Paged, and loaded on first visit to the tab: a long-lived device accumulates
+ * hundreds of entries and most visits never open this.
+ */
+const changelog = ref<any[]>([])
+const changelogTotal = ref(0)
+const changelogPage = ref(1)
+const changelogLoading = ref(false)
+const changelogError = ref('')
+const changelogCount = ref<number | null>(null)
+const CHANGELOG_PAGE_SIZE = 50
+const changelogPages = computed(() =>
+  Math.max(1, Math.ceil(changelogTotal.value / CHANGELOG_PAGE_SIZE)),
+)
+
+async function loadChangelog(page = 1) {
+  if (!detail.value?.id) return
+  const deviceId = detail.value.id
+  changelogLoading.value = true
+  changelogError.value = ''
+  try {
+    const res = await api<any>(
+      `/devices/${deviceId}/changelog?page=${page}&page_size=${CHANGELOG_PAGE_SIZE}`,
+    )
+    // Do not land a slow response on a different device after navigation.
+    if (detail.value?.id !== deviceId) return
+    changelog.value = res.items || []
+    changelogTotal.value = res.total || 0
+    changelogCount.value = res.total || 0
+    changelogPage.value = page
+  } catch (e: any) {
+    changelogError.value = e.message
+  } finally {
+    changelogLoading.value = false
+  }
+}
+
+/** A changed value as one line. `null` is "not set", not the word "null". */
+function changeText(value: any): string {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
+
 // ---------- plugin successful steps ----------
 const pluginArtifacts = ref<any[]>([])
 const pluginArtifactsLoading = ref(false)
@@ -127,7 +192,7 @@ const rebootConfigSource = ref('')
 const rebootConfigAvailable = ref(false)
 
 async function loadRebootOverride() {
-  if (!detail.value || !auth.isAdmin) return
+  if (!detail.value || !auth.can(PERMISSION.pluginsManage)) return
   try {
     const result = await api<any>(`/plugins/device-reboot/devices/${detail.value.id}/configuration`)
     rebootOverride.value = {
@@ -202,14 +267,22 @@ const infoAiConfiguration = ref<Record<string, any>>({})
 const aiProfiles = ref<any[]>([])
 const aiModels = (profileId: string | null) => aiProfiles.value.find((item) => item.id === profileId)?.models || []
 async function loadAiProfiles() {
-  if (!auth.isAdmin || aiProfiles.value.length) return
-  aiProfiles.value = (await api<any[]>('/ai/providers')).filter((item) => item.enabled)
+  // `settings.manage`, not `plugins.manage`: the profile list is an
+  // installation setting and its endpoint is guarded as one. A role that
+  // configures plugins without managing settings still gets the per-device
+  // plugin panels below — it just cannot pick a provider profile.
+  if (!auth.can(PERMISSION.settingsManage) || aiProfiles.value.length) return
+  try {
+    aiProfiles.value = (await api<any[]>('/ai/providers')).filter((item) => item.enabled)
+  } catch {
+    // The panels are still usable without it; the profile picker offers nothing.
+  }
 }
 const infoConfigSource = ref('')
 const infoConfigAvailable = ref(false)
 
 async function loadInfoOverride() {
-  if (!detail.value || !auth.isAdmin) return
+  if (!detail.value || !auth.can(PERMISSION.pluginsManage)) return
   try {
     const result = await api<any>(`/plugins/device-info-agent/devices/${detail.value.id}/configuration`)
     infoOverride.value = {
@@ -393,12 +466,14 @@ async function loadRelatedCounts() {
   const deviceId = detail.value.id
   vendorClaimCount.value = null
   testCount.value = null
+  changelogCount.value = null
   try {
     const counts = await api<any>(`/devices/${deviceId}/related-counts`)
     // Do not land a slow response on a different device after navigation.
     if (detail.value?.id !== deviceId) return
     vendorClaimCount.value = counts.vendor_claims
     testCount.value = counts.tests
+    changelogCount.value = counts.changelog ?? null
   } catch {
     // The tabs remain usable and load their own data; an unavailable count is
     // represented honestly as pending rather than as a false zero.
@@ -432,6 +507,7 @@ function invalidateCompat() {
 
 watch(tab, (t) => {
   if (t === 'software' && !compat.value && !compatLoading.value) loadCompat()
+  if (t === 'changelog' && !changelog.value.length && !changelogLoading.value) loadChangelog(1)
   if (t === 'plugin-steps') {
     loadAiProfiles()
     loadPluginArtifacts()
@@ -451,6 +527,35 @@ const editWritableFields = computed(() =>
 )
 let editSchemaRequest = 0
 
+/*
+ * The per-device link overrides, as the form edits them.
+ *
+ * Kept apart from `form` because they are not field values and must not be
+ * sent as any: they travel in their own `link_overrides` envelope key. Blank
+ * means "inherit", which is why the controls start empty rather than
+ * pre-filled with the schema's default — an operator who never touches them
+ * leaves the device following the field, and a default shown in the box would
+ * be indistinguishable from a choice they made.
+ */
+const linkForm = ref<Record<string, { scheme: string; port: string }>>({})
+
+/*
+ * The fields whose links this device can be made to differ on.
+ *
+ * Visible rather than writable: an override changes how a value is opened, not
+ * the value, so a field an operator may read but not edit — a scanned address,
+ * say — can still be pointed at the right port.
+ */
+const linkableFields = computed(() =>
+  editFields.value.filter((field) => field.visible && isDeviceAddressField(field)),
+)
+
+/** What a field's link does when the device says nothing, for the hint text. */
+function inheritedLink(field: SchemaField): string {
+  const target = deviceLinkTarget(field, null)
+  return `${target.scheme}://${target.port ? `…:${target.port}` : '…'}`
+}
+
 function startEdit() {
   editFields.value = displayFields.value
   form.value = Object.fromEntries(editWritableFields.value.map((field) => {
@@ -458,6 +563,11 @@ function startEdit() {
     return [field.key, field.type === 'json' ? JSON.stringify(value || {}, null, 2) : value ?? '']
   }))
   form.value.device_type_id = detail.value.device_type_id || ''
+  const overrides: DeviceLinkOverrides = detail.value.link_overrides || {}
+  linkForm.value = Object.fromEntries(editFields.value.map((field) => [field.key, {
+    scheme: overrides[field.key]?.scheme || '',
+    port: overrides[field.key]?.port != null ? String(overrides[field.key]!.port) : '',
+  }]))
   editing.value = true
   tab.value = 'details'
 }
@@ -479,6 +589,16 @@ watch(
         if (Object.prototype.hasOwnProperty.call(form.value, field.key)) continue
         const value = fieldValue(detail.value, field)
         form.value[field.key] = field.type === 'json' ? JSON.stringify(value || {}, null, 2) : value ?? ''
+      }
+      // Same for the link overrides: a field this type shows and the last one
+      // did not arrives with whatever the device already had stored for it.
+      const overrides: DeviceLinkOverrides = detail.value.link_overrides || {}
+      for (const field of editFields.value) {
+        if (Object.prototype.hasOwnProperty.call(linkForm.value, field.key)) continue
+        linkForm.value[field.key] = {
+          scheme: overrides[field.key]?.scheme || '',
+          port: overrides[field.key]?.port != null ? String(overrides[field.key]!.port) : '',
+        }
       }
     } catch (e: any) {
       toast.value = e.message
@@ -554,11 +674,40 @@ async function saveEdit() {
     if (purpose) data[purpose.key] = null
     if (due) data[due.key] = null
   }
+  // Every override the device should end up with, rebuilt from the controls:
+  // the API replaces the set wholesale, so a field left blank here is one the
+  // operator cleared back to the field's default.
+  const linkOverrides: Record<string, { scheme?: string; port?: number }> = {}
+  for (const field of linkableFields.value) {
+    const draft = linkForm.value[field.key]
+    if (!draft) continue
+    const override: { scheme?: string; port?: number } = {}
+    if (draft.scheme) override.scheme = draft.scheme
+    if (draft.port !== '' && draft.port != null) {
+      const port = Number(draft.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        toast.value = `${field.label} link port must be a whole number between 1 and 65535`
+        setTimeout(() => (toast.value = ''), 4000)
+        return
+      }
+      override.port = port
+    }
+    if (override.scheme || override.port) linkOverrides[field.key] = override
+  }
+  // Overrides for fields this layout does not show are the operator's data in
+  // the same way an unlisted document key is, and are not this form's to drop.
+  for (const [key, override] of Object.entries<any>(detail.value.link_overrides || {})) {
+    if (!linkableFields.value.some((field) => field.key === key)) linkOverrides[key] = override
+  }
   saving.value = true
   try {
     const updated = await api<any>(`/devices/${detail.value.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ device_type_id: form.value.device_type_id || null, data }),
+      body: JSON.stringify({
+        device_type_id: form.value.device_type_id || null,
+        data,
+        link_overrides: linkOverrides,
+      }),
     })
     Object.assign(detail.value, updated)
     editing.value = false
@@ -675,7 +824,7 @@ watch(() => detail.value?.device_type_id, () => {
         {{ daysOverdue !== null ? 'Overdue' : optionLabel(detail.data?.status || '') }}
       </span>
       <div class="toolbar">
-        <template v-if="auth.canWrite">
+        <template v-if="auth.can(PERMISSION.devicesEdit)">
           <button v-if="!editing" class="btn" @click="startEdit">Edit</button>
           <template v-else>
             <button class="btn btn-primary" :disabled="saving || editSchemaLoading" @click="saveEdit">
@@ -699,7 +848,8 @@ watch(() => detail.value?.device_type_id, () => {
       >
         {{ t.label
         }}<span v-if="t.id === 'software'"> ({{ vendorClaimCount ?? '…' }})</span
-        ><span v-else-if="t.id === 'tests'"> ({{ testCount ?? '…' }})</span>
+        ><span v-else-if="t.id === 'tests'"> ({{ testCount ?? '…' }})</span
+        ><span v-else-if="t.id === 'changelog'"> ({{ changelogCount ?? '…' }})</span>
       </button>
     </div>
 
@@ -742,6 +892,32 @@ watch(() => detail.value?.device_type_id, () => {
             :max="field.role === 'checkout_due' ? daysFromToday(7) : undefined"
           />
         </template>
+        <!-- How this one device opens its linked fields, where it differs from
+             the schema. Its own section rather than a control beside each
+             address, because it is not part of the address: the value stays
+             what the scanner and the reboot plugin are handed, and a scheme
+             typed into it would take the device offline. -->
+        <template v-if="linkableFields.length">
+          <h3 class="form-section">Links</h3>
+          <template v-for="field in linkableFields" :key="`link-${field.key}`">
+            <label :for="`link-${field.key}`">{{ field.label }} link</label>
+            <div v-if="linkForm[field.key]" class="link-override">
+              <select :id="`link-${field.key}`" v-model="linkForm[field.key].scheme">
+                <option value="">Inherit — {{ inheritedLink(field) }}</option>
+                <option value="http">http</option>
+                <option value="https">https</option>
+              </select>
+              <input
+                v-model="linkForm[field.key].port"
+                type="number"
+                min="1"
+                max="65535"
+                :placeholder="field.link_port ? `${field.link_port} (inherited)` : 'Default port'"
+                :aria-label="`${field.label} link port`"
+              />
+            </div>
+          </template>
+        </template>
       </form>
       <template v-else>
         <dl class="kv">
@@ -760,6 +936,19 @@ watch(() => detail.value?.device_type_id, () => {
               </template>
               <template v-else-if="field.type === 'select'">
                 {{ fieldValue(detail, field) ? optionLabel(fieldValue(detail, field)) : '—' }}
+              </template>
+              <!-- An address the device answers on opens its web page. The
+                   address itself is the link here, unlike the grid: nothing on
+                   this tab is editable until Edit is pressed, so a click has
+                   only one meaning. -->
+              <template v-else-if="isDeviceAddressField(field) && addressUrl(field)">
+                <a
+                  class="grid-link"
+                  :href="addressUrl(field)!"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="`Open ${addressUrl(field)}`"
+                >{{ fieldValue(detail, field) }}</a>
               </template>
               <template v-else>{{ fieldValue(detail, field) || '—' }}</template>
               <span v-if="field.role === 'checkout_due' && daysOverdue !== null">
@@ -799,7 +988,7 @@ watch(() => detail.value?.device_type_id, () => {
         Successful steps are reused by later AI runs. Editing creates a new version;
         deleting clears every saved version so the next run starts fresh.
       </p>
-      <section v-if="auth.isAdmin && rebootConfigAvailable" class="plugin-step-card device-plugin-config">
+      <section v-if="auth.can(PERMISSION.pluginsManage) && rebootConfigAvailable" class="plugin-step-card device-plugin-config">
         <h3>Reboot configuration for this device</h3>
         <p class="muted">
           This override has highest priority. Effective method:
@@ -837,7 +1026,7 @@ watch(() => detail.value?.device_type_id, () => {
           <button class="btn btn-primary" @click="saveRebootOverride">Save override</button>
         </div>
       </section>
-      <section v-if="auth.isAdmin && infoConfigAvailable" class="plugin-step-card device-plugin-config">
+      <section v-if="auth.can(PERMISSION.pluginsManage) && infoConfigAvailable" class="plugin-step-card device-plugin-config">
         <h3>Device Info configuration for this device</h3>
         <p class="muted">
           This override has highest priority.
@@ -919,9 +1108,9 @@ watch(() => detail.value?.device_type_id, () => {
               v-model="artifactDrafts[artifactKey(definition.plugin_id, definition.artifact_type)]"
               class="plugin-step-editor"
               spellcheck="false"
-              :readonly="!auth.canWrite"
+              :readonly="!auth.can(PERMISSION.devicesEdit)"
             ></textarea>
-            <div v-if="auth.canWrite" class="plugin-step-actions">
+            <div v-if="auth.can(PERMISSION.devicesEdit)" class="plugin-step-actions">
               <button
                 class="btn btn-primary"
                 :disabled="artifactSaving === artifactKey(definition.plugin_id, definition.artifact_type)"
@@ -1099,6 +1288,63 @@ watch(() => detail.value?.device_type_id, () => {
       </div>
     </div>
 
+    <div v-else-if="tab === 'changelog'">
+      <p class="muted tab-intro">
+        Everything recorded against this device, newest first — who changed it,
+        when, and what the value was before.
+      </p>
+      <p v-if="changelogError" class="error">{{ changelogError }}</p>
+      <p v-else-if="changelogLoading && !changelog.length" class="muted">Loading…</p>
+      <p v-else-if="!changelog.length" class="muted">Nothing has been recorded for this device yet.</p>
+      <template v-else>
+        <ol class="changelog">
+          <li v-for="entry in changelog" :key="entry.id" class="changelog-entry">
+            <div class="changelog-head">
+              <span class="changelog-summary">{{ entry.summary }}</span>
+              <span class="changelog-meta">
+                {{ entry.username }} · {{ new Date(entry.timestamp).toLocaleString() }}
+              </span>
+            </div>
+            <ul v-if="entry.changes.length" class="changelog-changes">
+              <li v-for="change in entry.changes" :key="change.field">
+                <span class="changelog-field">{{ change.label }}</span>
+                <span class="changelog-old">{{ changeText(change.old) }}</span>
+                <span class="changelog-arrow" aria-label="changed to">→</span>
+                <span class="changelog-new">{{ changeText(change.new) }}</span>
+              </li>
+            </ul>
+            <!-- Admins get the raw audit detail behind a disclosure: it is the
+                 same row they would read in the audit log, and for an entry
+                 with no field diff (a plugin result, a scan) it is the only
+                 thing that says what actually happened. -->
+            <details v-if="entry.detail && !entry.changes.length" class="changelog-detail">
+              <summary>Details</summary>
+              <pre>{{ JSON.stringify(entry.detail, null, 2) }}</pre>
+            </details>
+          </li>
+        </ol>
+        <div v-if="changelogPages > 1" class="changelog-paging">
+          <button
+            class="btn btn-mini"
+            type="button"
+            :disabled="changelogPage <= 1 || changelogLoading"
+            @click="loadChangelog(changelogPage - 1)"
+          >
+            ‹ Newer
+          </button>
+          <span class="muted">Page {{ changelogPage }} of {{ changelogPages }}</span>
+          <button
+            class="btn btn-mini"
+            type="button"
+            :disabled="changelogPage >= changelogPages || changelogLoading"
+            @click="loadChangelog(changelogPage + 1)"
+          >
+            Older ›
+          </button>
+        </div>
+      </template>
+    </div>
+
     <DetailModal
       v-if="detail_"
       :title="detail_.title"
@@ -1114,6 +1360,93 @@ watch(() => detail.value?.device_type_id, () => {
 </template>
 
 <style scoped>
+/* ---------- changelog ----------
+ * A list of events, not a table: entries have between zero and a dozen field
+ * changes each, and a table with one row per change loses which change belongs
+ * to which edit — which is the one thing the tab exists to say.
+ */
+.tab-intro { margin: 0 0 12px; }
+
+.changelog {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.changelog-entry {
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.changelog-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.changelog-summary { font-weight: 550; }
+
+.changelog-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.changelog-changes {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.changelog-changes li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.changelog-field {
+  min-width: 140px;
+  color: var(--text-muted);
+}
+
+/* The old value is struck through rather than merely dimmed: at a glance the
+   pair has to read as "this, not that", and two shades of grey do not. */
+.changelog-old {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.changelog-arrow { color: var(--text-muted); }
+.changelog-new { color: var(--text); }
+
+.changelog-detail { margin-top: 8px; }
+.changelog-detail summary { color: var(--text-muted); cursor: pointer; font-size: 12px; }
+.changelog-detail pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: 12px;
+  overflow: auto;
+}
+
+.changelog-paging {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
 .actions-pane { margin-top: 18px; }
 .actions-pane h3 { margin: 0 0 8px; font-size: 14px; }
 .action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
@@ -1296,4 +1629,36 @@ watch(() => detail.value?.device_type_id, () => {
     background: var(--surface-3);
   }
 }
+
+/* ---------- link overrides ----------
+   How one device opens its linked fields, in the edit form. The scheme picker
+   carries the inherited value as its empty option, so "no override" reads as a
+   statement of what happens rather than as a blank. */
+.form-section {
+  /* Spans both columns of `.form-grid`, which is a label column and a control
+     column and has no third place for a heading to sit. */
+  grid-column: 1 / -1;
+  margin: 10px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.link-override {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.link-override select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.link-override input {
+  /* Enough for five digits and the spinner, and no more: a port is a short
+     value and a full-width box would read as the more important of the two. */
+  flex: 0 0 9.5em;
+}
+
 </style>

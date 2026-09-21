@@ -8,10 +8,12 @@
 > device and vendor-device declarations can live in the external DeviceSchema
 > ConfigMap selected by `schema.devices`.
 
-Vendor Devices have a shared field catalog under **Schema → Vendor Devices**.
-Each software version can override which catalog fields are shown or required
-from its **Vendor Devices → Customize fields** action. A new software version
-inherits those overrides and can diverge afterward.
+Vendor claims have a shared field catalog, editable from **Schema → Vendor
+Claims**. Each software version can then override which of those fields are
+shown or required, from the **Customize fields** action on its own **Vendor
+Claims** tab — that one is per version rather than global, which is why it
+stays on the software page. A new software version inherits those overrides and
+can diverge afterward.
 
 Additional vendor-device values are stored in `misc_data`, but appear as normal
 columns in forms, CSV templates, imports, and exports. API and MCP searches scan

@@ -40,18 +40,29 @@ tb = TestBench.from_env()                       # reads those two variables
 tb = TestBench("http://localhost:8001", key)    # or pass them directly
 ```
 
-Pick the **lowest role that does the job**. A `readonly` key lists and inspects;
-checking a device out or recording a result needs `tester` or better. A key can
-be revoked from the same page without disturbing the account it belongs to, so
-give each framework its own and label it.
+Pick the **lowest role that does the job**. Reading needs no permission at all;
+checking a device out needs `devices.edit` and recording a result needs
+`tests.edit`. A key never grants more than its owner does, and it can be revoked
+from the same page without disturbing the account it belongs to — so give each
+framework its own and label it.
 
-`tb.identity` tells you what you actually got — worth asserting at the top of a
-run rather than discovering an hour in:
+Roles are defined per installation, so the role's *name* tells you nothing
+portable: check the permissions. `tb.identity` carries both, and is worth
+asserting at the top of a run rather than discovering an hour in:
 
 ```python
-if not tb.identity.can_write:
-    sys.exit(f"key is {tb.identity.role}, need tester")
+from testbench_client import DEVICES_EDIT, TESTS_EDIT
+
+if not tb.identity.can_write:                   # tests.edit and devices.edit
+    sys.exit(f"key is {tb.identity.role}, which cannot run a suite")
+
+if not tb.identity.can(TESTS_EDIT):             # or ask for one permission
+    sys.exit("this key cannot record results")
 ```
+
+An older TestBench that predates definable roles reports only a role name;
+`can()` answers from what those three fixed roles granted, so this keeps
+working against one.
 
 ## Devices
 
@@ -171,6 +182,46 @@ tb.software.get("curl-smoke", "3.8.5")         # a specific one
 tb.software.versions("curl-smoke")             # all of them, newest first
 ```
 
+## Vendor devices
+
+Hardware a vendor **claims** their software supports — their published
+compatibility list. Read-only, and not the same question as `tests`:
+
+- a vendor device is a **claim**. Not evidence, and not necessarily hardware
+  this fleet owns.
+- a test is **evidence**. Absence of one means untested, not unsupported.
+
+Code that treats them as interchangeable is the mistake this section exists to
+prevent; `tb.vendor_devices.for_device(...)` and `tb.tests.for_device(...)`
+answer different questions and routinely disagree.
+
+```python
+# Every compatibility list at once — the question no single software answers.
+tb.vendor_devices.list(search="ISR 4331")
+tb.vendor_devices.list(make="Cisco", support_status="supported")
+
+# One software's own list. A bare name gives the current version's.
+tb.vendor_devices.for_software("curl-smoke")
+tb.vendor_devices.for_software("curl-smoke", "3.8.5")
+
+# Who claims to support a device in the fleet, found by its make and model.
+for claim in tb.vendor_devices.for_device("dev-0042", supported_only=True):
+    print(claim)        # Cisco ISR 4331: supported (Backup-Restore 2.0)
+```
+
+Every row names the software and version making the claim. `software_is_latest`
+is false for a claim made by a version that has since been superseded — still a
+real claim, but not current guidance:
+
+```python
+current = [c for c in tb.vendor_devices.for_device("dev-0042") if c.software_is_latest]
+```
+
+`support_status` is the vendor's own word — `supported`, `partial`,
+`unsupported` or `planned`. Unsupported rows come back like any other, because
+"the vendor says no" is an answer; `supported_only=` and `.is_supported` filter
+to the unqualified yes.
+
 ## Errors
 
 Every exception subclasses `TestBenchError` and carries `.status` and
@@ -220,6 +271,7 @@ curl. Under `pytest-xdist` each worker is its own process and gets its own.
 
 - `examples/inventory.py` — the fleet, grouped by status
 - `examples/run_suite.py` — reserve, run, record
+- `examples/coverage_gap.py` — vendor claims with no test evidence behind them
 - `examples/pytest_conftest.py` — fixtures that reserve a device for a session
   and record a result per test from its actual outcome
 
@@ -241,7 +293,9 @@ checkout test depends on.
   and friends exist; they are deliberately not wrapped, because an automated
   framework should be recording evidence, not editing the inventory.
 - Bulk and CSV import (`/devices/import`, `/tests/import`).
-- Vendor compatibility lists, saved filters, users, audit log.
+- Editing vendor compatibility lists — reading them is `tb.vendor_devices`;
+  writing one is an import from a vendor's datasheet, done in the web app.
+- Saved filters, users, roles, audit log.
 
 Each is a short method following the pattern in `devices.py` if you need it.
 

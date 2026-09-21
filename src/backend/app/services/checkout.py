@@ -25,7 +25,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import SessionLocal, new_uuid, utcnow
-from ..models import Device, Notification, User
+from ..models import Device, Notification, Role, User
+from .permissions import DEVICES_EDIT, USERS_MANAGE, role_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -162,9 +163,17 @@ def _digest_admins(db: Session, overdue: list[Device], stamp: date) -> None:
         f", {_plural((stamp - d.checkout_due).days, 'day')} over"
         for d in overdue
     ]
+    # Whoever can act on it: an overdue device is chased by the people who can
+    # edit the inventory and the people who manage accounts, which is what
+    # "admin" meant when it was the only role that could do either. Asked by
+    # permission so a custom role gets the digest without being called admin.
+    chasers = {
+        slug for slug in db.scalars(select(Role.slug))
+        if {USERS_MANAGE, DEVICES_EDIT} <= frozenset(role_permissions(db, slug))
+    }
     admins = db.scalars(
-        select(User).where(User.role == "admin", User.is_active.is_(True))
-    ).all()
+        select(User).where(User.role.in_(chasers), User.is_active.is_(True))
+    ).all() if chasers else []
     for admin in admins:
         _notify(
             db,

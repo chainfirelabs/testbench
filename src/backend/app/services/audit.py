@@ -1,11 +1,11 @@
 """Audit logging: every mutating action writes an append-only audit row
 in the same transaction as the change."""
 
-from datetime import date, datetime
 
 from fastapi import Request
 from sqlalchemy.orm import Session
 
+from ..db import jsonable
 from ..models import AuditLog, User
 
 
@@ -42,18 +42,9 @@ def log_action(
     return entry
 
 
-def _jsonable(value):
-    """Coerce a column value to something JSONB will take.
-
-    The diff goes into a JSONB column, so a value the JSON encoder does not
-    know is not a formatting problem — it is a 500 on the write it was
-    describing. Dates and times are the ones that reach here (checkout_due,
-    checked_out_at, last_seen_online); everything else the models hold is
-    already a JSON primitive.
-    """
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    return value
+# The diff goes into a JSONB column, and so does the device document; the rule
+# is the same in both places and now lives in one.
+_jsonable = jsonable
 
 
 def field_diff(old: dict, new: dict) -> dict:

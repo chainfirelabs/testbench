@@ -16,11 +16,11 @@ from ..schemas import (
     TestUpdate,
 )
 from ..services.audit import field_diff, log_action
-from ..services.io import download_response, export_response, parse_import, strip_nulls, template_csv
-from ..services.list_filters import exclude_clause, excluded_values
+from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
-from .deps import get_current_user, require_write
+from .deps import get_current_user, require_tests_edit
 
 router = APIRouter(prefix="/tests", tags=["tests"])
 
@@ -156,23 +156,48 @@ def _query_tests(
     if tag:
         q = q.where(Test.tag == tag)
     catalog = {field.key: field for field in get_entity_fields(db, "tests")}
-    joined_component = False
+    # A test's device, software and author are rows of their own, so filtering
+    # on them means joining to reach them. They used to be skipped outright,
+    # which did not disable the filter — it ignored it: the grid narrowed to a
+    # device and the server answered with every test there is.
+    joined_component = joined_device = joined_software = joined_creator = False
     for key, value in (filters or {}).items():
         excluded = key.startswith("exclude__")
-        key = key.removeprefix("exclude__") if excluded else key
+        included = key.startswith("include__")
+        if excluded or included:
+            key = key.removeprefix("exclude__" if excluded else "include__")
         field = catalog.get(key)
-        if not field or field.key in {"device_unique_id", "software_name", "created_by_username", "created_at"}:
+        # `created_at` is a timestamp, which no checklist offers and no text
+        # comparison fits; it has no filter shape here yet.
+        if not field or field.key == "created_at":
             continue
-        if key in {"component_name", "component_version"}:
+        if key == "device_unique_id":
+            if not joined_device:
+                q = q.join(Device, Test.device_id == Device.id)
+                joined_device = True
+            expression = Device.unique_id
+        elif key == "software_name":
+            if not joined_software:
+                q = q.join(Software, Test.software_id == Software.id)
+                joined_software = True
+            expression = Software.name
+        elif key == "created_by_username":
+            # Outer: a test imported or written by a since-deleted account has
+            # no author row, and "(Blanks)" has to be able to find it.
+            if not joined_creator:
+                q = q.outerjoin(User, Test.created_by == User.id)
+                joined_creator = True
+            expression = User.username
+        elif key in {"component_name", "component_version"}:
             if not joined_component:
                 q = q.outerjoin(SoftwareComponent, Test.component_id == SoftwareComponent.id)
                 joined_component = True
             expression = getattr(SoftwareComponent, "name" if key == "component_name" else "version")
         else:
             expression = entity_field_expression(Test, field)
-        if excluded:
+        if excluded or included:
             values = [coerce_query_value(field, item) for item in excluded_values(value)]
-            clause = exclude_clause(expression, values)
+            clause = exclude_clause(expression, values) if excluded else include_clause(expression, values)
             if clause is not None:
                 q = q.where(clause)
             continue
@@ -189,9 +214,18 @@ def _query_tests(
                 "component_version", "created_by_username",
             }
         ]
+        # Only the joins a filter above has not already made: joining the same
+        # table twice is a different query, and usually an empty one.
         if not joined_component:
             q = q.outerjoin(SoftwareComponent, Test.component_id == SoftwareComponent.id)
-        q = q.join(Device, Test.device_id == Device.id).join(Software, Test.software_id == Software.id).where(
+            joined_component = True
+        if not joined_device:
+            q = q.join(Device, Test.device_id == Device.id)
+            joined_device = True
+        if not joined_software:
+            q = q.join(Software, Test.software_id == Software.id)
+            joined_software = True
+        q = q.where(
             or_(
                 Device.unique_id.ilike(like), Software.name.ilike(like),
                 SoftwareComponent.name.ilike(like), SoftwareComponent.version.ilike(like),
@@ -244,7 +278,7 @@ def export_tests(
     rows = [project_fields(_test_dict(t), fields, "misc_data") for t in items]
     log_action(db, user, "export.tests", "test", None, {"format": format, "count": len(rows)}, request)
     db.commit()
-    return export_response(rows, [field.key for field in fields], format, "tests")
+    return streaming_export_response(rows, [field.key for field in fields], format, "tests")
 
 
 @router.get("/template")
@@ -274,7 +308,7 @@ def create_test(
     body: TestCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_tests_edit),
 ):
     if body.outcome not in TEST_OUTCOMES:
         raise HTTPException(status_code=400, detail=f"outcome must be one of {TEST_OUTCOMES}")
@@ -318,7 +352,7 @@ def update_test(
     body: TestUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_tests_edit),
 ):
     test = db.get(Test, test_id)
     if test is None:
@@ -353,7 +387,7 @@ def delete_test(
     test_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_tests_edit),
 ):
     test = db.get(Test, test_id)
     if test is None:
@@ -368,7 +402,7 @@ def delete_tests_bulk(
     body: BulkIds,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_tests_edit),
 ):
     """Delete multiple tests by id (multi-select delete)."""
     for test_id in body.ids:
@@ -385,7 +419,7 @@ def bulk_tests(
     body: BulkPayload,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_tests_edit),
 ):
     created = updated = deleted = 0
     errors: list[dict] = []
@@ -438,7 +472,7 @@ async def import_tests(
     file: UploadFile,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_tests_edit),
 ):
     content = await file.read()
     filename = file.filename or ""

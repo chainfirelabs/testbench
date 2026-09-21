@@ -4,8 +4,10 @@ import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import DetailModal from '../components/DetailModal.vue'
 import { detailCellRenderer } from '../detail'
-import { api, downloadFile } from '../api/client'
+import { api } from '../api/client'
+import { useDownload } from '../downloads'
 import { remoteTableParams } from '../remoteTable'
+import { makeFilterValues } from '../suggestions'
 
 const rows = ref<any[]>([])
 const toast = ref('')
@@ -50,6 +52,21 @@ async function load() {
   table.value?.reapplyView()
 }
 
+/*
+ * Values for the column filters' checklists.
+ *
+ * The audit log is the list where picking values off a list matters most —
+ * "everything this user did", "every login failure" — and it is also the
+ * longest, so the page on screen is the least representative sample of it
+ * there is. The distinct values come from the server.
+ */
+const filterValues = makeFilterValues({
+  entity: 'audit_logs',
+  // Timestamps, opaque ids and the JSON detail blob: nothing anyone filters by
+  // ticking a value.
+  skip: ['timestamp', 'entity_id', 'detail'],
+})
+
 async function loadRemoteAudit(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
   const page = await api<any>(`/audit_logs?${params}`)
@@ -61,8 +78,22 @@ function onGridReady() {
   profiles.value?.applyDefault()
 }
 
+/*
+ * The toast on this page was declared and rendered but never set by anything,
+ * so an export that failed said nothing at all. It says something now.
+ */
+function showToast(msg: string, isError = false) {
+  toast.value = msg
+  toastError.value = isError
+  setTimeout(() => (toast.value = ''), 4000)
+}
+
+// The audit log is the largest table in the application and the one most
+// likely to keep somebody waiting.
+const { downloading, download } = useDownload(showToast)
+
 function exportAs(format: string) {
-  downloadFile(`/audit_logs/export?format=${format}`, `audit_logs.${format}`)
+  download(`/audit_logs/export?format=${format}`, `audit_logs.${format}`, 'export')
 }
 
 onMounted(load)
@@ -73,8 +104,12 @@ onMounted(load)
     <div class="page-header">
       <h2>Audit Log</h2>
       <div class="toolbar">
-        <button class="btn" @click="exportAs('json')">Export JSON</button>
-        <button class="btn" @click="exportAs('csv')">Export CSV</button>
+        <button class="btn" :disabled="downloading" @click="exportAs('json')">
+            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+          </button>
+        <button class="btn" :disabled="downloading" @click="exportAs('csv')">
+            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+          </button>
       </div>
     </div>
     <DataTable
@@ -82,6 +117,7 @@ onMounted(load)
       :columns="columns"
       :rows="rows"
       :remote-loader="loadRemoteAudit"
+      :filter-values="filterValues"
       @grid-ready="onGridReady"
     >
       <template #table-actions>

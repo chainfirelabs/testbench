@@ -4,19 +4,20 @@ import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
-import EntityFieldsModal from '../components/EntityFieldsModal.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
 import { dateColumn } from '../dates'
-import { api, downloadFile } from '../api/client'
+import { api } from '../api/client'
+import { useDownload } from '../downloads'
 import { useImportProgress } from '../importProgress'
-import { useAuthStore } from '../stores/auth'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityFields } from '../entityFields'
 import { loadAllPages } from '../pagination'
 import { remoteTableParams } from '../remoteTable'
+import { makeFilterValues } from '../suggestions'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -27,7 +28,6 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
-const customizingFields = ref(false)
 const { fields: testFields, loadFields } = useEntityFields('tests')
 const { importState, runImport, closeImport } = useImportProgress()
 
@@ -57,18 +57,46 @@ const newTest = ref<Record<string, any>>({})
 /** How the server matches names: trimmed and case-folded. */
 const key = (v: any) => String(v ?? '').trim().toLowerCase()
 
+/*
+ * Devices by their folded unique_id, built once per load rather than scanned
+ * per keystroke. `matchedDevice` recomputes on every character typed into the
+ * device field, and a linear find over a few thousand rows on each of those is
+ * work that does not need doing twice.
+ */
+const devicesByUniqueId = computed(() => {
+  const index = new Map<string, any>()
+  for (const device of devices.value) index.set(key(device.unique_id), device)
+  return index
+})
+
 const matchedDevice = computed(() => {
   const k = key(newTest.value.device_unique_id)
-  return k ? devices.value.find((d: any) => key(d.unique_id) === k) || null : null
+  return k ? devicesByUniqueId.value.get(k) || null : null
+})
+
+/*
+ * Software grouped by folded name, newest version first. Same reasoning as the
+ * device index: this is read on every keystroke in the software field, and the
+ * grouping does not change between them.
+ */
+const softwareByName = computed(() => {
+  const index = new Map<string, any[]>()
+  for (const item of software.value) {
+    const k = key(item.name)
+    const group = index.get(k)
+    if (group) group.push(item)
+    else index.set(k, [item])
+  }
+  for (const group of index.values()) {
+    group.sort((a: any, b: any) => (a.created_at < b.created_at ? 1 : -1))
+  }
+  return index
 })
 
 /** Every version of the software whose name was typed, newest first. */
 const matchedSoftwareVersions = computed(() => {
   const k = key(newTest.value.software_name)
-  if (!k) return []
-  return software.value
-    .filter((t: any) => key(t.name) === k)
-    .sort((a: any, b: any) => (a.created_at < b.created_at ? 1 : -1))
+  return k ? softwareByName.value.get(k) || [] : []
 })
 
 /**
@@ -212,8 +240,27 @@ const NEW_TEST_FIELDS = computed<FormField[]>(() => {
   return fields
 })
 
+/*
+ * Opening the dialog has to fetch the fleet first, which is not instant and
+ * used to happen with nothing on screen to say so — the button simply sat
+ * there, and if the fetch failed it sat there forever, the rejection going
+ * nowhere. It now says it is working and reports a failure to the toast.
+ */
+const openingNew = ref(false)
+
 async function openNew() {
-  if (!devices.value.length || !software.value.length) await loadReferences()
+  if (openingNew.value) return
+  if (!referencesLoaded.value) {
+    openingNew.value = true
+    try {
+      await loadReferences()
+    } catch (e: any) {
+      showToast(e?.message || 'Devices and software could not be loaded.', true)
+      return
+    } finally {
+      openingNew.value = false
+    }
+  }
   newTest.value = {
     device_unique_id: '',
     software_name: '',
@@ -340,6 +387,11 @@ function showToast(msg: string, isError = false) {
   setTimeout(() => (toast.value = ''), 4000)
 }
 
+// Exports read the whole table before the browser is handed anything, so the
+// button has to say it is working — and a failure has to reach the toast
+// rather than becoming an unhandled rejection nobody sees.
+const { downloading, download } = useDownload(showToast)
+
 // A computed (not a function called from the template): a fresh Set on every
 // render would look like a change to the grid and trigger needless refreshes.
 const dirtyIds = computed(() => new Set(dirty.value.keys()))
@@ -348,16 +400,87 @@ function isRowDirty(row: any): boolean {
   return !!row.id && dirty.value.has(row.id)
 }
 
+/*
+ * Every device and every software version, which the New Test dialog needs in
+ * full: it resolves a typed unique_id to a device, groups software by name to
+ * offer its versions, and matches bundle components within the chosen version.
+ * A suggestions endpoint could fill the two pickers but not the cascade.
+ *
+ * `referencesLoaded` rather than testing the arrays: an installation with no
+ * software yet has an empty list, which is an answer, and re-fetching the
+ * whole fleet every time the dialog opens because of it is not.
+ */
+const referencesLoaded = ref(false)
+
+/*
+ * Only the fields the dialog reads.
+ *
+ * It resolves a typed unique_id to a device and shows the make, model and
+ * status in the hint; nothing below touches anything else. Asking for the
+ * whole row meant a fleet of two thousand arrived as 2.3MB of documents —
+ * every custom field and misc_data blob — to be thrown away after four values
+ * were taken from each. `?fields=` is answered from the document by name, so
+ * an installation that renames or adds a field keeps working; a field that
+ * does not exist comes back null rather than failing the request.
+ */
+const DEVICE_REFERENCE_FIELDS = ['unique_id', 'make', 'model', 'status'].join(',')
+/*
+ * `created_at` orders the versions and `id` is what a test binds to.
+ *
+ * `bundle_components` is here because a test against a suite records *which
+ * component* was run, and the two component fields only appear once the chosen
+ * version turns out to have some. Leaving it out of the projection silently
+ * removed them from the dialog — the field list asks `matchedComponents`, and
+ * a version whose components were never fetched has none.
+ *
+ * It is the one field here the server cannot read straight off the row, so
+ * asking for it costs the bundle lookup. That is the price of the feature, not
+ * an oversight: the alternative is fetching components when a version is
+ * chosen, which is a request per selection instead of one for the batch.
+ */
+const SOFTWARE_REFERENCE_FIELDS = [
+  'id', 'name', 'version', 'created_at', 'bundle_components',
+].join(',')
+
 async function loadReferences() {
   const [devPage, softwarePage] = await Promise.all([
-    loadAllPages<any>((page) => api(`/devices?page=${page}&page_size=1000`)),
-    loadAllPages<any>((page) => api(`/software?page=${page}&page_size=1000`)),
+    loadAllPages<any>((page) =>
+      api(`/devices?page=${page}&page_size=1000&fields=${DEVICE_REFERENCE_FIELDS}`)),
+    loadAllPages<any>((page) =>
+      api(`/software?page=${page}&page_size=1000&fields=${SOFTWARE_REFERENCE_FIELDS}`)),
   ])
   devices.value = devPage.items
   software.value = softwarePage.items
+  referencesLoaded.value = true
 }
 
+/** Re-run filter and sort over rows whose values changed underneath them. */
 async function load() { table.value?.reapplyView() }
+
+/**
+ * Re-read the list from the server, row count and all.
+ *
+ * For a test created, deleted or imported: a server-paged grid keeps the row
+ * count it was last given, so refreshing the blocks it holds cannot show a row
+ * that did not exist when it was told how many there were.
+ */
+async function reloadRows() { table.value?.reload() }
+
+/*
+ * Values for the column filters' checklists. The grid is server-paged, so the
+ * distinct values of a column are the server's to answer; the vocabularies
+ * (outcome, tag) this page already has.
+ */
+const filterValues = makeFilterValues({
+  entity: 'tests',
+  local: (colId) => {
+    const field = testFields.value.find((f: any) => f.key === colId)
+    if (field?.type === 'select') return field.options
+    if (field?.type === 'boolean') return [true, false]
+    return undefined
+  },
+  skip: ['misc_data', 'created_at', 'updated_at'],
+})
 
 async function loadRemoteTests(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
@@ -500,7 +623,10 @@ async function deleteRow(row: any) {
     await api(`/tests/${row.id}`, { method: 'DELETE' })
     rows.value = rows.value.filter((r) => toRaw(r) !== toRaw(row))
     dirty.value.delete(row.id)
-    await load()
+    // The selection lives in the grid, and a deleted row stays ticked in it
+    // until told otherwise.
+    table.value?.clearSelection()
+    await reloadRows()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -514,8 +640,12 @@ async function deleteSelected() {
     await api('/tests/delete', { method: 'POST', body: JSON.stringify({ ids }) })
     rows.value = rows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) dirty.value.delete(id)
+    // Emptying this page's copy leaves the rows ticked in the grid, which then
+    // adds them to whatever is ticked next — deleting 100 and selecting 100
+    // more read as 200.
+    table.value?.clearSelection()
     selected.value = []
-    await load()
+    await reloadRows()
     showToast(`Deleted ${ids.length} test${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -604,8 +734,9 @@ async function saveNewTest(values: Record<string, any>) {
   creating.value = true
   try {
     const created = await api<any>('/tests', { method: 'POST', body: JSON.stringify(payload) })
-    // Newest first, so the row you just made is where you are looking.
-    await load()
+    // A row that did not exist a moment ago: re-read the list rather than
+    // refresh the window the grid is already holding.
+    await reloadRows()
     showNew.value = false
     showToast('Test recorded')
   } catch (e: any) {
@@ -616,12 +747,12 @@ async function saveNewTest(values: Record<string, any>) {
 }
 
 function exportAs(format: string) {
-  downloadFile(`/tests/export?format=${format}`, `tests.${format}`)
+  download(`/tests/export?format=${format}`, `tests.${format}`, 'export')
 }
 
 /** A blank CSV with base fields; users may append misc-data columns. */
 function downloadTemplate() {
-  downloadFile('/tests/template', 'tests-template.csv')
+  download('/tests/template', 'tests-template.csv', 'template')
 }
 
 async function onImportFile(e: Event) {
@@ -629,7 +760,8 @@ async function onImportFile(e: Event) {
   if (!file) return
   try {
     const result = await runImport('/tests/import', file)
-    if (result) await load()
+    // An import adds rows, so the row count has moved.
+    if (result) await reloadRows()
   } finally {
     if (fileInput.value) fileInput.value.value = ''
   }
@@ -643,15 +775,19 @@ onMounted(loadFields)
     <div class="page-header">
       <h2>Tests</h2>
       <div class="toolbar">
-        <button v-if="auth.canWrite" class="btn btn-primary" @click="openNew">+ New test</button>
-        <button v-if="auth.isAdmin" class="btn" @click="customizingFields = true">
-          Customize fields
+        <button
+          v-if="auth.can(PERMISSION.testsEdit)"
+          class="btn btn-primary"
+          :disabled="openingNew"
+          @click="openNew"
+        >
+          {{ openingNew ? 'Loading…' : '+ New test' }}
         </button>
         <!-- Outside the menu: the panel closes on click, and a file input
              unmounted mid-picker never fires `change`. -->
         <input ref="fileInput" type="file" accept=".json,.csv" style="display: none" @change="onImportFile" />
         <OverflowMenu>
-          <template v-if="auth.canWrite">
+          <template v-if="auth.can(PERMISSION.testsEdit)">
             <button class="btn" @click="fileInput?.click()">Import</button>
             <button
               class="btn"
@@ -661,21 +797,37 @@ onMounted(loadFields)
               Template
             </button>
           </template>
-          <button class="btn" @click="exportAs('json')">Export JSON</button>
-          <button class="btn" @click="exportAs('csv')">Export CSV</button>
+          <button class="btn" :disabled="downloading" @click="exportAs('json')">
+            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+          </button>
+          <button class="btn" :disabled="downloading" @click="exportAs('csv')">
+            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+          </button>
         </OverflowMenu>
       </div>
     </div>
+    <!-- The other half of the sentence Vendor Claims starts. That page says
+         its rows are claims carrying no evidence; this one says these are the
+         evidence. Neither is much use without the other, and a label alone
+         cannot say who did the testing. -->
+    <p class="muted page-intro">
+      Results this team recorded, each one a run of a software version against a
+      device in this inventory. These are outcomes, not claims — what a vendor
+      says its software supports is under
+      <router-link to="/vendor-devices">Vendor Claims</router-link>, and nothing
+      there has been verified here.
+    </p>
     <DataTable
       ref="table"
       :columns="columns"
       :rows="rows"
       :remote-loader="loadRemoteTests"
-      :editable="auth.canWrite"
-      :selectable="auth.canWrite"
+      :filter-values="filterValues"
+      :editable="auth.can(PERMISSION.testsEdit)"
+      :selectable="auth.can(PERMISSION.testsEdit)"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
-      :row-editable="auth.canWrite"
+      :row-editable="auth.can(PERMISSION.testsEdit)"
       @cell-edit="onCellEdit"
       @edit-row="openEdit"
       @save-row="saveRow"
@@ -693,7 +845,7 @@ onMounted(loadFields)
       </template>
       <template #selection-actions>
         <button
-          v-if="auth.canWrite && selected.length"
+          v-if="auth.can(PERMISSION.testsEdit) && selected.length"
           class="btn"
           title="Edit common values on the selected tests"
           @click="openBulkEdit"
@@ -701,7 +853,7 @@ onMounted(loadFields)
           Edit
         </button>
         <button
-          v-if="auth.canWrite && selected.length"
+          v-if="auth.can(PERMISSION.testsEdit) && selected.length"
           class="btn btn-danger"
           title="Delete the selected tests"
           @click="deleteSelected"
@@ -710,13 +862,6 @@ onMounted(loadFields)
         </button>
       </template>
     </DataTable>
-    <EntityFieldsModal
-      v-if="customizingFields"
-      entity="tests"
-      title="Test Fields"
-      @close="customizingFields = false"
-      @saved="loadFields"
-    />
 
     <FormModal
       v-if="bulkEditing"
@@ -763,3 +908,9 @@ onMounted(loadFields)
     <div v-if="toast" class="toast" :class="{ 'toast-error': toastError }">{{ toast }}</div>
   </div>
 </template>
+
+<style scoped>
+/* Matches the Vendor Claims page, which carries the other half of the
+   contrast: the two intros are meant to be read against each other. */
+.page-intro { margin: 0 0 12px; max-width: 70ch; }
+</style>

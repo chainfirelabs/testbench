@@ -21,6 +21,7 @@ from .api import (
     vendor_devices,
     entity_fields,
     plugins,
+    roles,
     ai_providers,
 )
 from .config import settings
@@ -30,6 +31,7 @@ from .models import User
 from .services.checkout import start_checkout_sweep_loop
 from .services.scan import start_interval_loop
 from .services.entity_fields import initialize_entity_fields
+from .services.permissions import seed_roles
 from .services.device_schema import refresh_managed_indexes, seed_device_schema
 from .services.device_schema_yaml import reconcile_from_settings
 from .services.plugin_host import registry as plugin_registry, start_refresh_loop as start_plugin_refresh_loop
@@ -100,6 +102,9 @@ async def lifespan(app: FastAPI):
     plugin_registry.refresh()
     reconcile_plugin_fields()
     start_plugin_refresh_loop(reconcile_plugin_fields)
+    # Before the admin account: the role it is given has to exist first.
+    with SessionLocal() as role_db:
+        seed_roles(role_db)
     seed_admin()
     start_interval_loop()
     start_checkout_sweep_loop()
@@ -126,11 +131,14 @@ app.include_router(device_schema.router, prefix=API_PREFIX)
 app.include_router(device_schema.fields_router, prefix=API_PREFIX)
 app.include_router(software.router, prefix=API_PREFIX)
 app.include_router(vendor_devices.router, prefix=API_PREFIX)
+# The same rows at /vendor-devices, searchable without naming a software first.
+app.include_router(vendor_devices.catalog_router, prefix=API_PREFIX)
 app.include_router(tests.router, prefix=API_PREFIX)
 app.include_router(saved_filters.router, prefix=API_PREFIX)
 app.include_router(notifications.router, prefix=API_PREFIX)
 app.include_router(audit.router, prefix=API_PREFIX)
 app.include_router(users.router, prefix=API_PREFIX)
+app.include_router(roles.router, prefix=API_PREFIX)
 app.include_router(entity_fields.router, prefix=API_PREFIX)
 app.include_router(plugins.router, prefix=API_PREFIX)
 app.include_router(plugins.host_router, prefix=API_PREFIX)

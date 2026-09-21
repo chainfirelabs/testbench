@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
-import { useAuthStore } from '../stores/auth'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue') },
@@ -35,6 +35,14 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Software' },
   },
   {
+    // Vendor claims across every software at once — the question a per-software
+    // list cannot be asked, because it needs a software to start from.
+    path: '/vendor-devices',
+    name: 'vendor-devices',
+    component: () => import('../views/VendorDevicesView.vue'),
+    meta: { title: 'Vendor Claims' },
+  },
+  {
     path: '/tests',
     name: 'tests',
     component: () => import('../views/TestsView.vue'),
@@ -50,25 +58,25 @@ const routes: RouteRecordRaw[] = [
     path: '/audit',
     name: 'audit',
     component: () => import('../views/AuditView.vue'),
-    meta: { title: 'Audit Log', roles: ['admin'] },
+    meta: { title: 'Audit Log', permission: PERMISSION.auditView },
   },
   {
     path: '/users',
     name: 'users',
     component: () => import('../views/UsersView.vue'),
-    meta: { title: 'Users', roles: ['admin'] },
+    meta: { title: 'Users', permission: PERMISSION.usersManage },
   },
   {
     path: '/settings/ai',
     name: 'ai-providers',
     component: () => import('../views/AiProvidersView.vue'),
-    meta: { title: 'AI Providers', roles: ['admin'] },
+    meta: { title: 'AI Providers', permission: PERMISSION.settingsManage },
   },
   {
     path: '/settings/schema',
     name: 'schema',
     component: () => import('../views/DeviceSchemaView.vue'),
-    meta: { title: 'Schema', roles: ['admin'] },
+    meta: { title: 'Schema', permission: PERMISSION.schemaManage },
   },
   {
     path: '/settings/device-schema',
@@ -103,7 +111,10 @@ router.beforeEach(async (to) => {
   await ensureAuthLoaded()
   const auth = useAuthStore()
   if (!auth.user) return { path: '/login' }
-  const roles = to.meta.roles as string[] | undefined
-  if (roles && !roles.includes(auth.user.role)) return { path: '/' }
+  // Gated on what the role grants, not on what it is called: an installation
+  // can define a role that reads the audit log without being called admin,
+  // and the API would let it through even when this did not.
+  const permission = to.meta.permission as string | undefined
+  if (permission && !auth.can(permission)) return { path: '/' }
   return true
 })

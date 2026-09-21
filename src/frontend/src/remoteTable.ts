@@ -21,6 +21,13 @@ export function remoteTableParams(
   }
   for (const [field, model] of Object.entries<any>(request.filterModel || {})) {
     if (model?.filterType === 'valueChecklist') {
+      // The checklist sends whichever side of its selection is shorter, so the
+      // URL grows with what was picked rather than with how many distinct
+      // values the column happens to hold.
+      if (Array.isArray(model.included)) {
+        params.set(`include__${field}`, JSON.stringify(model.included))
+        continue
+      }
       const excluded = model.excluded || []
       if (excluded.length) params.set(`exclude__${field}`, JSON.stringify(excluded))
       continue

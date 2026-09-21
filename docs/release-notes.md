@@ -1,5 +1,267 @@
 # Release notes
 
+## 1.9.3
+
+- A device field can now be marked **Opens a web page** in Schema → Device
+  Fields, which offers its value as a link to that address: the value itself on
+  the device page, and a small icon beside it in the inventory grid, where the
+  cell is editable. Fields carrying a scan address role get it on by default,
+  including on upgrade; any other field can be opted in and any field can be
+  opted out. See [Opening a web page](device-schema.md#opening-a-web-page).
+- A linked field now chooses the **scheme and port** its link opens — `http`
+  or `https`, and a port or the scheme's own — in Schema → Device Fields, and a
+  single device that answers somewhere else overrides both under **Links** on
+  its own page. Existing links are unchanged: every field starts on `http` with
+  no port, which is what they did before.
+
+  The override belongs there rather than in the address itself. A field
+  carrying a scan address role has its value handed straight to a socket by the
+  network scan and by the Reboot plugin, so a scheme stored in the value makes
+  the device read as offline and stops its reboots, while the link still looks
+  right. See [Choosing the scheme and
+  port](device-schema.md#choosing-the-scheme-and-port).
+
+- Creating or updating a device with `last_seen_online`, `last_scanned_at` or
+  `checkout_due` no longer fails when that field is not on the device schema.
+  The API declares all three as date types, so a request carrying one arrived
+  as a Python date; a field the catalog does not account for is kept as it
+  came, and a date object is not something a JSON column can store. The write
+  failed at the flush — a 500 naming no field, which is why nothing about the
+  request suggested what was wrong. Values entering the document are now
+  converted the same way values entering an audit entry already were.
+
+  It affected only the single-device create and update, since those are the
+  paths with a model to parse the value. The bundled `seed_dev_data.py` sends
+  `last_seen_online`, so a new installation hit this on the first script it ran.
+
+- Suggestion lists render at most 100 options, with a count of what is left
+  ("and 1,900 more — keep typing to narrow"). Each option is a real DOM node,
+  and the fields offering every device or every software version matched all
+  of them while the box was still empty — so focusing the field built a node
+  per device in one tick. Typing was always how the list was meant to be used;
+  now an untyped list costs the same as a typed one. The phone's picker sheet
+  is capped the same way.
+
+- **New test** looks up a typed device or software name through an index built
+  once, rather than scanning every row on every keystroke.
+
+- Collections loaded in full — the device and software lists behind the New
+  test dialog — fetch their pages a few at a time instead of one after another.
+  The first page still goes alone, since until it returns there is no total to
+  work from; the rest overlap. A collection that took a dozen sequential round
+  trips now takes three or four batches of them.
+
+- List endpoints take **`?fields=`**, a comma-separated set of field keys, and
+  return just those. Keys resolve against the device or software document by
+  name, so a field an installation defined is projectable without the API
+  knowing about it, and a field a particular row does not carry comes back null
+  rather than failing the request. Sensitive fields are refused outright: a
+  projection reads the document directly, which is the one path that would hand
+  back a value an ordinary list response never carries.
+
+  **New test** uses it. Opening the dialog on a fleet of 2,000 devices
+  transferred 2.5 MB of documents to read four values from each; it now
+  transfers 208 KB — **12x less**, and twice as fast even on a local network,
+  where transfer is nearly free.
+
+- Exports **stream** instead of being built in memory and sent in one piece.
+  Total time is unchanged — the same rows are still read and rendered — but the
+  whole file is no longer held: a 30,000-test JSON export peaked at 16.8 MB and
+  now peaks at 0.8 MB, and the download starts as soon as the first rows are
+  ready rather than after the last one.
+
+  Streaming was tried once before and reverted, because Starlette iterates a
+  sync file object line by line and a pretty-printed export became one
+  threadpool hop per line. That finding stands; the mistake was the chunk size.
+  Exports now go out a thousand rows at a time, and the bytes are identical to
+  what the buffered writers produced — there are tests pinning that, including
+  for an empty export, which is still `[]`.
+
+- The Software list no longer has an **All versions** / **Latest only**
+  toggle. It shows the current version of each piece of software, always. The
+  other view was a changelog — four rows of the same name between one piece of
+  software and the next — and the versions of one piece of software belong to
+  that software: click its name to see them, and to switch between them.
+
+- Exports and templates now say they are working, and say when they fail.
+  Every one of them was started without waiting for it, so a slow export left
+  a button that looked dead and a failed one said nothing at all — the error
+  became an unhandled rejection. They now disable while preparing and report a
+  failure to the page's toast. The Audit Log's toast was never wired up to
+  anything; it is now.
+
+- **New test** likewise. Opening the dialog loads every device and every
+  software version first, which is not instant on a large fleet and had no
+  indication that anything was happening; a failure left the button doing
+  nothing at all, permanently. It now shows that it is loading, reports a
+  failure, and does not re-fetch the fleet each time it is opened.
+
+- Filtering the Tests list by **Device**, **Software** or **Created By** now
+  works. Those three are rows of their own rather than columns on a test, so
+  reaching them means a join — and the filter loop skipped them instead. That
+  did not disable them: it ignored them, so narrowing the grid to one device
+  and asking the server returned every test there was. Clearing such a column
+  showed everything rather than nothing, which is how it was found.
+
+- A column filter that keeps only a few values out of many now works. The
+  checklist sent the values you *unticked*, so clearing a column and picking
+  one asked the server for "everything except these 499" — a sixteen-kilobyte
+  URL, which nginx rejects with 414 before the API ever sees it. The grid was
+  handed a failed request and showed nothing, which looks exactly like a
+  filter that matched nothing. It bit any column with more than roughly 250
+  distinct values.
+
+  The filter now sends whichever side of the selection is shorter: a few
+  unticked values still travel as `exclude__<field>`, while clearing the
+  column and picking one travels as `include__<field>` with that one value.
+  The URL grows with what you picked instead of with how many values the
+  column happens to hold — in one case, from 15,969 characters to 125.
+
+  The two are not quite the same statement, and that is deliberate. Excluding
+  hides what it names and lets anything else through, including a value the
+  list has never seen; including shows only what it names. Which is what
+  someone who cleared the column and ticked two things means.
+
+- A column filter can always undo itself. The checklist takes its values from
+  the rows on screen when a column has no server-side list of them — the
+  software columns on Vendor Claims, and anything a page cannot enumerate — so
+  a filter narrow enough to leave no rows left nothing to harvest. Reopened
+  from there it offered an empty list while still hiding every row: no
+  checkbox to untick, and no way back except clearing the filter. Whatever a
+  filter is excluding is now always listed, so it can be let back.
+
+- Exporting from the Devices page now exports **what the grid is showing**.
+  The export endpoint has always taken the list endpoint's filters, but the
+  page only ever sent the device type from the route — so narrowing the grid
+  to three devices and exporting handed back the whole fleet, silently and
+  plausibly. The search box, the column filters and the overdue toggle all
+  reach the file now, built from the same parameters the grid's own loader
+  uses so the two cannot read it differently.
+
+- The **Customize fields** button is gone from Devices, Software, Tests and
+  Vendor Claims. Field catalogs are edited in one place now — the **Schema**
+  page, which has a tab for each and does strictly more than the dialogs did:
+  the same endpoints, plus field creation, deletion and per-type layouts. Four
+  buttons that each opened a different partial view of the same settings were
+  four places to look for one thing.
+
+  A software version's own **Vendor Claims → Customize fields** stays. It
+  overrides which catalog fields that version shows, which is per version and
+  has no equivalent on the Schema page.
+
+- There is **one Export CSV** on the Devices page again. The second one existed
+  because the ordinary export silently dropped per-device link overrides —
+  they belong to no field, so they had no column — and restoring a fleet from
+  it put every custom link back on `http` without a word. The workaround was an
+  export carrying the whole device document as a JSON blob per row: lossless,
+  unusable in a spreadsheet, and impossible to choose between without already
+  knowing all of this.
+
+  The ordinary export carries the overrides now, in a column that is blank for
+  the devices that override nothing. Everything else already round-tripped
+  exactly — the import coerces each value back to its field's type, so a
+  number comes back a number and nested JSON comes back nested — so with that
+  one gap closed there is nothing left to choose between. Exports and imports
+  are covered by round-trip tests that compare a device with itself.
+
+  `columns=data` remains on the API for callers that want the document as one
+  object rather than spread across columns.
+
+- **New vendor device** picks its software by typing rather than from a
+  dropdown, the way New test and New software do. A select was workable with a
+  dozen entries and unusable with several hundred — and this is the page where
+  every software in the installation is a candidate. The Version field follows
+  the software named above it, says so when a version does not exist, and fills
+  itself in when there is only one. More than one is left for you to choose: a
+  claim on the wrong version is a wrong claim.
+
+- **Vendor Devices** is now called **Vendor Claims** everywhere it is named:
+  the menu, the page title, the software page's tab, the count column on the
+  Software list, and the **Schema** page's own tab. The rows are assertions a
+  vendor makes, not hardware this fleet owns, and the old name read as a third
+  device list sitting between Software and Tests. The search results and the
+  device page's own tab already called them claims.
+
+  The `/vendor-devices` URL and the API paths are unchanged, so links and
+  integrations keep working.
+
+- The **Tests** page now carries a one-line introduction saying its rows are
+  results this team recorded, and linking to Vendor Claims for what a vendor
+  says it supports. Vendor Claims has always said its rows carry no test
+  evidence; Tests never said the opposite half.
+
+- The **Vendor Claims** page is now editable like every other list: **New
+  vendor device**, **Import**, **Template**, inline cell
+  editing, a per-row Edit dialog, and multi-select **Delete** — alongside the
+  export it already had.
+
+  Because the page spans every software, a claim created here names the version
+  making it: the dialog requires a software and a version, and an imported file
+  carries `software_name` and `software_version` columns per row, which are the
+  first two columns of both the template and the catalogue export, so an
+  exported file imports straight back. A row naming a version that software
+  does not have is reported as that row's error rather than filed against
+  whichever version is current.
+
+  The catalogue export, the template and the page's columns are all built from
+  the vendor-device field catalog, so a field an installation added is a column
+  in the file and in the grid. For the export this is not presentation: the
+  export is also what the import reads, and an import writes the whole row, so
+  a column left out of the file would come back as "no value" and clear what
+  somebody had typed.
+
+  Editing a row acts on the software version that row belongs to. The two
+  software columns are the exception and stay read-only — moving a claim from
+  one version to another is a different claim, not an edit to a value. A
+  multi-select delete spans versions in one call, and is audited per row with
+  the software each belonged to.
+
+- **Bulk Edit** on the Devices page can now set the **Device Type**, so a batch
+  of uncategorized devices can be filed in one go. The dialog previously offered
+  only fields every selected device's schema agreed on, which excluded the type
+  — and left the button disabled entirely when a mixed selection shared nothing.
+  Moving a device to a type checks it against that type's schema, so one missing
+  a value the new type requires is reported and left as it was.
+
+## 1.9.2
+
+- Roles are now defined by the installation. **Users & Roles → Roles** creates
+  and edits roles and ticks what each one grants — view the audit log, edit
+  devices, manage the schema, and so on — instead of choosing between three
+  fixed roles. The built-in readonly, tester and admin roles are seeded with
+  the permission sets that reproduce their previous behaviour exactly, so
+  upgrading changes nobody's access. See [Roles and permissions](roles.md).
+- Every device has a **Changelog** tab: who changed what, when, and what the
+  value was before, read from the audit log. Visible to anyone who can see the
+  device rather than to admins only; secrets are masked and the raw audit entry
+  is shown only to users who can read the audit log.
+- Vendor compatibility claims can be searched across every software version at
+  once, from the new **Vendor Devices** page, `GET /api/v1/vendor-devices`,
+  global search, the `find_vendor_devices` MCP tool, `tb.vendor_devices` in the
+  Python client, `VendorDevices` in the Go client, and `testbench
+  --vendor-devices` in the Go CLI. Each result names the software and version
+  making the claim and flags claims on superseded versions.
+- The clients read what a key may do from its permissions rather than from its
+  role's name, which stopped being a reliable guess once installations could
+  define roles: `tb.identity.can("tests.edit")` in Python, and `permissions` in
+  the Go CLI's `--whoami` output. Both still answer correctly against a
+  TestBench that predates definable roles.
+- Column filters on the server-paged lists now offer every distinct value in the
+  column rather than only those on the page being viewed, and the panel's
+  "Select all" and "Clear" act on whatever the search box is showing.
+- Creating, deleting or importing a row now updates the list immediately.
+  Server-paged grids were refreshing the rows they already held without
+  re-reading how many there were, so a new record did not appear until the
+  browser was reloaded.
+- Deleting selected rows now clears the selection. The count was carried over,
+  so deleting 100 rows and selecting 100 more reported 200 selected.
+- Selecting all rows on a page now selects the whole page at every page size.
+  The fetch block size did not follow the page-size selector, so at 250 or 500
+  rows a page only the first 100 were loaded and only those were selected.
+- The Tested Devices list under a software no longer hangs on a large number of
+  tested devices: its response had stopped reporting the total, so the grid kept
+  requesting further pages past the end of the data.
+
 ## 1.9.1
 
 - Large Devices, Software, Tests, Audit Log, Vendor Devices, and Tested Devices

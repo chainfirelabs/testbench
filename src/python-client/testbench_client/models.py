@@ -18,6 +18,9 @@ from typing import Any
 DEVICE_STATUSES = ("available", "checked_out", "inventory", "missing", "broken")
 TEST_OUTCOMES = ("pass", "fail", "warn")
 TEST_TAGS = ("adhoc", "acceptance", "end-to-end", "automated")
+# What a vendor claims about a device, which is not a test result. "unsupported"
+# is a claim like any other — the vendor saying no — not the absence of one.
+VENDOR_SUPPORT_STATUSES = ("supported", "partial", "unsupported", "planned")
 
 PASS = "pass"
 FAIL = "fail"
@@ -98,30 +101,79 @@ def to_api_datetime(value: datetime | str | None) -> str | None:
     return value.isoformat()
 
 
+# Permission keys, mirroring backend/app/services/permissions.py. A role is a
+# set of these, defined per installation — `role` is its name, `permissions` is
+# what it actually grants, and only the second is worth testing against.
+DEVICES_EDIT = "devices.edit"
+SOFTWARE_EDIT = "software.edit"
+TESTS_EDIT = "tests.edit"
+VIEWS_SAVE = "views.save"
+AUDIT_VIEW = "audit.view"
+USERS_MANAGE = "users.manage"
+SCHEMA_MANAGE = "schema.manage"
+PLUGINS_MANAGE = "plugins.manage"
+SETTINGS_MANAGE = "settings.manage"
+
+# Roles an older server reported before permissions existed, and what each of
+# them granted. Used only to answer `can()` against such a server; see below.
+_LEGACY_ROLE_PERMISSIONS = {
+    "readonly": frozenset(),
+    "tester": frozenset({DEVICES_EDIT, SOFTWARE_EDIT, TESTS_EDIT, VIEWS_SAVE}),
+    "admin": frozenset({
+        DEVICES_EDIT, SOFTWARE_EDIT, TESTS_EDIT, VIEWS_SAVE, AUDIT_VIEW,
+        USERS_MANAGE, SCHEMA_MANAGE, PLUGINS_MANAGE, SETTINGS_MANAGE,
+    }),
+}
+
+
 @dataclass
 class Identity:
-    """Who the configured API key authenticates as."""
+    """Who the configured API key authenticates as, and what it may do."""
 
     id: str = ""
     username: str = ""
     role: str = ""
     email: str | None = None
+    # What the role grants. An installation defines its own roles, so the name
+    # says nothing reliable on its own — this is the list to check.
+    permissions: frozenset[str] = field(default_factory=frozenset)
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Identity":
+        role = data.get("role", "")
+        granted = data.get("permissions")
         return cls(
             id=data.get("id", ""),
             username=data.get("username", ""),
-            role=data.get("role", ""),
+            role=role,
             email=data.get("email"),
+            # A server from before roles were definable does not send these;
+            # fall back to what its three fixed roles granted, so `can()` keeps
+            # answering correctly against an older deployment.
+            permissions=frozenset(granted) if granted is not None
+            else _LEGACY_ROLE_PERMISSIONS.get(role, frozenset()),
             raw=data,
         )
 
+    def can(self, permission: str) -> bool:
+        """Whether this key holds one permission, e.g. `can(TESTS_EDIT)`.
+
+        Worth asking at the start of a run rather than discovering it as a 403
+        halfway through a suite.
+        """
+        return permission in self.permissions
+
     @property
     def can_write(self) -> bool:
-        """Whether this key may create tests or change device status."""
-        return self.role in ("tester", "admin")
+        """Whether this key may record results and check devices out.
+
+        The two things a test framework does. A key that can do one and not the
+        other is unusual but expressible, and this is deliberately the
+        conjunction: a suite that can check a device out and then cannot write
+        down what happened has failed in the least useful way possible.
+        """
+        return self.can(TESTS_EDIT) and self.can(DEVICES_EDIT)
 
 
 @dataclass
@@ -381,3 +433,73 @@ class Test:
 
     def __str__(self) -> str:
         return f"{self.software_name} on {self.device_unique_id}: {self.outcome}"
+
+
+@dataclass
+class VendorDevice:
+    """Hardware a vendor CLAIMS their software supports.
+
+    Not a device in the fleet and not evidence: a row here says a vendor
+    published support for that hardware, whether or not anyone owns one and
+    whether or not it has ever been run. What has actually been tested is a
+    `Test`, and absence of one means untested, not unsupported.
+
+    A claim belongs to one software version, which `software_name` and
+    `software_version` name. `software_is_latest` is false for a claim made by
+    a version that has since been superseded — still a real claim, but not
+    current guidance.
+    """
+
+    id: str = ""
+    software_id: str = ""
+    software_name: str = ""
+    software_version: str = ""
+    software_is_latest: bool = True
+    make: str | None = None
+    model: str | None = None
+    firmware_version: str | None = None
+    hardware_version: str | None = None
+    architecture: str | None = None
+    support_status: str = ""
+    source: str | None = None
+    notes: str | None = None
+    misc_data: dict = field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "VendorDevice":
+        return cls(
+            id=data.get("id", ""),
+            software_id=data.get("software_id", ""),
+            software_name=data.get("software_name") or "",
+            software_version=data.get("software_version") or "",
+            software_is_latest=bool(data.get("software_is_latest", True)),
+            make=data.get("make"),
+            model=data.get("model"),
+            firmware_version=data.get("firmware_version"),
+            hardware_version=data.get("hardware_version"),
+            architecture=data.get("architecture"),
+            support_status=data.get("support_status", ""),
+            source=data.get("source"),
+            notes=data.get("notes"),
+            misc_data=data.get("misc_data") or {},
+            created_at=parse_datetime(data.get("created_at")),
+            updated_at=parse_datetime(data.get("updated_at")),
+            raw=data,
+        )
+
+    @property
+    def is_supported(self) -> bool:
+        """The vendor said yes without qualification. `partial` is not this."""
+        return self.support_status == "supported"
+
+    @property
+    def hardware(self) -> str:
+        """Make and model as one string, for a log line."""
+        return " ".join(b for b in (self.make, self.model) if b) or "(unspecified)"
+
+    def __str__(self) -> str:
+        software = f"{self.software_name} {self.software_version}".strip()
+        return f"{self.hardware}: {self.support_status} ({software})"

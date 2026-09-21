@@ -46,7 +46,9 @@ and they routinely disagree:
 Never merge the two into a single "supported devices" answer. When a question
 is ambiguous, either ask which sense is meant, or return both clearly labelled.
 The same split applies in reverse for a device: `list_software_tested_on` is the
-evidence sense.
+evidence sense, and `find_vendor_devices` is the claim sense — it searches every
+software's compatibility list at once, which is the only way to answer "does
+anything claim to support this hardware?" without naming a software first.
 
 IDENTIFIERS.
 Use human identifiers everywhere: "dev-0042", "nmap". Do not construct UUIDs —

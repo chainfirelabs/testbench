@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app.config import settings
-from app.api.deps import get_current_user, require_session, require_write
+from app.api.deps import get_current_user, require_devices_edit, require_session
 from app.api.plugins import _preserve_repeat_artifact
 from app.services.plugin_host import PluginRegistry
 
@@ -22,8 +22,12 @@ class PluginConfigurationTests(unittest.TestCase):
         self.assertEqual(user.username, "testbench-mcp")
         self.assertEqual(user.role, "readonly")
         self.assertEqual(request.state.auth_method, "mcp_internal")
+        # The identity carries an empty permission set of its own, so the guard
+        # refuses it without reaching the database for what `readonly` grants —
+        # which is what lets this identity exist before any bootstrap.
+        self.assertEqual(user.granted_permissions, frozenset())
         with self.assertRaises(HTTPException) as write_error:
-            require_write(user)
+            require_devices_edit(user=user, db=None)
         self.assertEqual(write_error.exception.status_code, 403)
         with self.assertRaises(HTTPException) as session_error:
             require_session(request, user)

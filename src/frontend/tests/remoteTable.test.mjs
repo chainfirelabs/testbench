@@ -36,3 +36,25 @@ test('translates checklist exclusions without losing multiple values', () => {
   assert.deepEqual(JSON.parse(params.get('exclude__status')), ['retired', 'repair'])
   assert.equal(params.has('status'), false)
 })
+
+test('a checklist filter travels as whichever side it carries', () => {
+  const excluding = remoteTableParams(
+    { startRow: 0, endRow: 50, search: '', sortModel: [], filterModel: {
+      make: { filterType: 'valueChecklist', excluded: ['Dell'] } } }, {})
+  assert.equal(excluding.get('exclude__make'), '["Dell"]')
+  assert.equal(excluding.get('include__make'), null)
+
+  const including = remoteTableParams(
+    { startRow: 0, endRow: 50, search: '', sortModel: [], filterModel: {
+      make: { filterType: 'valueChecklist', included: ['Cisco'] } } }, {})
+  assert.equal(including.get('include__make'), '["Cisco"]')
+  assert.equal(including.get('exclude__make'), null)
+})
+
+test('an inclusion of nothing is still sent, because it means no rows', () => {
+  // Unlike an empty exclusion, which means "filter off".
+  const params = remoteTableParams(
+    { startRow: 0, endRow: 50, search: '', sortModel: [], filterModel: {
+      make: { filterType: 'valueChecklist', included: [] } } }, {})
+  assert.equal(params.get('include__make'), '[]')
+})

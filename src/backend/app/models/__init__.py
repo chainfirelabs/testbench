@@ -1,4 +1,5 @@
 from .user import User
+from .role import Role
 from .api_key import ApiKey
 from .device import Device
 from .device_type import DeviceType
@@ -23,6 +24,7 @@ from .ai_provider import AiProviderProfile, AiPluginDefault
 
 __all__ = [
     "User",
+    "Role",
     "ApiKey",
     "Device",
     "DeviceType",

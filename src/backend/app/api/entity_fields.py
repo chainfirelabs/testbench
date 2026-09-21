@@ -12,7 +12,7 @@ from ..services.entity_fields import (
     FIELD_TYPES, REQUIRED_FIELDS, drop_entity_field_indexes,
     ensure_entity_field_indexes, field_payload, get_entity_fields,
 )
-from .deps import get_current_user, require_admin
+from .deps import get_current_user, require_schema_manage
 
 router = APIRouter(prefix="/entity-fields", tags=["schema"])
 EDITABLE_ENTITIES = ("software", "tests", "vendor_devices")
@@ -109,7 +109,7 @@ def fields_for_entity(entity: str, db: Session = Depends(get_db), user: User = D
 @router.put("/{entity}")
 def update_entity_field_layout(
     body: EntityFieldLayoutUpdate, entity: str, db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Atomically replace an entity's field order and visibility."""
     entity = _entity(entity)
@@ -130,7 +130,7 @@ def update_entity_field_layout(
 
 @router.post("/{entity}", status_code=201)
 def create_entity_field(body: EntityFieldCreate, entity: str, db: Session = Depends(get_db),
-                        user: User = Depends(require_admin)):
+                        user: User = Depends(require_schema_manage)):
     entity = _entity(entity)
     key = body.key.strip().lower()
     if not KEY_RE.fullmatch(key):
@@ -156,7 +156,7 @@ def create_entity_field(body: EntityFieldCreate, entity: str, db: Session = Depe
 
 @router.patch("/{entity}/{field_id}")
 def update_entity_field(body: EntityFieldUpdate, entity: str, field_id: str,
-                        db: Session = Depends(get_db), user: User = Depends(require_admin)):
+                        db: Session = Depends(get_db), user: User = Depends(require_schema_manage)):
     item = _field(db, entity, field_id)
     if item.configuration_source == "yaml":
         raise HTTPException(status_code=409, detail=f"{item.label} is owned by the DeviceSchema ConfigMap")
@@ -184,7 +184,7 @@ def update_entity_field(body: EntityFieldUpdate, entity: str, field_id: str,
 
 @router.delete("/{entity}/{field_id}", status_code=204)
 def delete_entity_field(entity: str, field_id: str, db: Session = Depends(get_db),
-                        user: User = Depends(require_admin)):
+                        user: User = Depends(require_schema_manage)):
     item = _field(db, entity, field_id)
     if item.configuration_source == "yaml":
         raise HTTPException(status_code=409, detail=f"{item.label} is owned by the DeviceSchema ConfigMap")

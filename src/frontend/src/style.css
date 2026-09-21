@@ -557,6 +557,13 @@ textarea:disabled {
 
 .value-checklist-option input { flex: 0 0 auto; }
 
+/* Why the list is short, or empty, said in the panel rather than left to be
+   guessed at from a blank box. */
+.value-checklist-status {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 label {
   color: var(--text-muted);
   font-size: 13px;
@@ -1080,6 +1087,52 @@ label {
 /* Cells whose value is opened in a dialog rather than shown in the row:
    notes, test data, misc data. Built by a cell renderer, so this must be a
    global class — scoped styles never reach detached DOM. */
+/* An address cell: the value, plus a link to the device's own web page.
+   Built by a cell renderer, so this cannot be scoped. */
+.address-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.address-open {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  /* Dimmed until the row is approached: the address is the content and the
+     link is an affordance, so it should not compete with the value it sits
+     beside on every row of a full grid. */
+  opacity: 0.55;
+  transition:
+    color var(--dur) var(--ease),
+    opacity var(--dur) var(--ease);
+}
+
+.address-open svg {
+  width: 13px;
+  height: 13px;
+}
+
+@media (hover: hover) {
+  .ag-row:hover .address-open,
+  .address-open:hover {
+    opacity: 1;
+  }
+
+  .address-open:hover {
+    color: var(--accent);
+  }
+}
+
+/* Touch has no hover to reveal it, so it stays visible there. */
+@media (hover: none) {
+  .address-open {
+    opacity: 1;
+  }
+}
+
 .cell-view-btn {
   background: none;
   border: 0;
@@ -1352,7 +1405,7 @@ label {
   color: var(--yellow);
 }
 
-/* Vendor support level, rendered inside the Vendor Devices grid. Cell
+/* Vendor support level, rendered inside the Vendor Claims grid. Cell
    renderers build detached DOM, so this cannot live in a scoped block. */
 .support-pill {
   display: inline-flex;

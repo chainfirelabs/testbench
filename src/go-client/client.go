@@ -59,6 +59,7 @@ type Client struct {
 	Devices           *Devices
 	Software          *Software
 	Tests             *Tests
+	VendorDevices     *VendorDevices
 }
 
 var versioned = regexp.MustCompile(`/api/v[0-9]+$`)
@@ -103,6 +104,7 @@ func New(baseURL, token string, options Options) (*Client, error) {
 	c.Devices = &Devices{c}
 	c.Software = &Software{c}
 	c.Tests = &Tests{c}
+	c.VendorDevices = &VendorDevices{c}
 	return c, nil
 }
 func FromEnv(options Options) (*Client, error) {

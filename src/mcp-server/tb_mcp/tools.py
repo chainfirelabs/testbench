@@ -20,6 +20,7 @@ from .enums import (
     DEVICE_STATUSES,
     TEST_OUTCOMES,
     TEST_TAGS,
+    VENDOR_SUPPORT_STATUSES,
     check,
 )
 from .format import (
@@ -440,6 +441,76 @@ async def list_vendor_supported_devices(
         items,
         page["total"],
         software=describe_software(record),
+        sense="vendor compatibility claims — not evidence, and not necessarily hardware we own",
+    )
+
+
+@server.tool()
+async def find_vendor_devices(
+    search: str | None = None,
+    software: str | None = None,
+    make: str | None = None,
+    model: str | None = None,
+    firmware_version: str | None = None,
+    hardware_version: str | None = None,
+    architecture: str | None = None,
+    support_status: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
+    """Search every vendor compatibility list at once, by hardware.
+
+    The reverse of `list_vendor_supported_devices`, which starts from a
+    software and lists its claims. This starts from the hardware: "does
+    anything claim to support a Cisco ISR 4331?" is a question no single
+    software's list can answer, and each row here names the software and
+    version the claim belongs to.
+
+    Claims, not evidence. A row means a vendor published support for that
+    hardware — not that this fleet owns one, and not that anyone has run it.
+    `support_status` is the vendor's own word (supported, partial, unsupported,
+    planned), and "unsupported" rows are returned like any other, because
+    "the vendor says no" is an answer. For what has actually been run, call
+    `list_devices_tested_with` or `list_software_tested_on`.
+
+    `search` matches make, model, firmware, hardware version, architecture,
+    source, notes and the software's name at once; the named filters are
+    narrower and combine with AND. `software` takes a software name and covers
+    every version of it.
+
+    A claim on a superseded version is still returned, marked
+    `software_is_latest: false` — it is real, but it is not current guidance.
+
+    To sweep more than one response, pass `next_offset` back as `offset`.
+    """
+    limit = clamp_limit(limit)
+    support_status = check(support_status, "support status", VENDOR_SUPPORT_STATUSES)
+    architecture = check(architecture, "architecture", DEVICE_ARCHITECTURES)
+    page = await api().get(
+        "/vendor-devices",
+        params={
+            "search": search, "software": software,
+            "make": make, "model": model,
+            "firmware_version": firmware_version,
+            "hardware_version": hardware_version,
+            "architecture": architecture,
+            "support_status": support_status,
+            "sort": "make", "order": "asc",
+            "page_size": limit, "offset": max(0, offset),
+        },
+    )
+    return envelope(
+        [
+            {
+                "software": item.get("software_name"),
+                "software_version": item.get("software_version") or None,
+                "software_is_latest": item.get("software_is_latest", True),
+                **vendor_device_brief(item),
+            }
+            for item in page["items"]
+        ],
+        page["total"],
+        offset=max(0, offset),
         sense="vendor compatibility claims — not evidence, and not necessarily hardware we own",
     )
 

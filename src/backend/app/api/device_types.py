@@ -21,7 +21,7 @@ from ..services.device_schema import (
     get_effective_fields,
     publish_revision,
 )
-from .deps import get_current_user, require_admin
+from .deps import get_current_user, require_schema_manage
 
 router = APIRouter(prefix="/device-types", tags=["device types"])
 
@@ -71,7 +71,7 @@ def create_device_type(
     body: DeviceTypeCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     key = body.key.strip().lower()
     if not TYPE_KEY_RE.fullmatch(key):
@@ -103,7 +103,7 @@ def update_device_type(
     body: DeviceTypeUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     item = db.get(DeviceType, type_id)
     if item is None:
@@ -127,7 +127,7 @@ def delete_device_type(
     type_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     item = db.get(DeviceType, type_id)
     if item is None:

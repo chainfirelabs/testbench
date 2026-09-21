@@ -47,7 +47,7 @@ const TABS = [
   { id: 'plugins', label: 'Plugins' },
   { id: 'software', label: 'Software' },
   { id: 'tests', label: 'Tests' },
-  { id: 'vendor_devices', label: 'Vendor Devices' },
+  { id: 'vendor_devices', label: 'Vendor Claims' },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -273,7 +273,9 @@ function newField(place = false) {
   newFieldGlobal.value = place ? isGlobalScope.value : true
   editingField.value = {
     key: '', label: '', field_type: 'text', description: '', options: [], validation: {},
-    sensitive: false, indexed: false, unique_value: false, plugin_role: null, enabled: true,
+    sensitive: false, indexed: false, unique_value: false, opens_web_page: false,
+    link_scheme: 'http', link_port: null,
+    plugin_role: null, enabled: true,
   }
 }
 
@@ -303,6 +305,14 @@ async function saveField() {
       options: draft.options || [],
       validation: draft.validation || {},
       sensitive: !!draft.sensitive,
+      opens_web_page: !!draft.opens_web_page,
+      link_scheme: draft.link_scheme === 'https' ? 'https' : 'http',
+      // The number input hands back a string, and an empty one means the
+      // scheme's own port rather than port zero.
+      link_port:
+        draft.link_port == null || String(draft.link_port).trim() === ''
+          ? null
+          : Number(draft.link_port),
       indexed: !!draft.indexed,
       unique_value: !!draft.unique_value,
       plugin_role: draft.plugin_role || null,
@@ -1046,6 +1056,13 @@ function flagsFor(definition: FieldDefinition): string {
   if (definition.unique_value) flags.push('unique')
   else if (definition.indexed) flags.push('indexed')
   if (definition.sensitive) flags.push('sensitive')
+  // Spelled out only where it is not the default, so the common case stays a
+  // single short word and an unusual one is visible without opening the field.
+  if (definition.opens_web_page) {
+    const scheme = definition.link_scheme === 'https' ? 'https' : 'http'
+    flags.push(definition.link_port ? `links ${scheme}:${definition.link_port}`
+      : scheme === 'https' ? 'links https' : 'links')
+  }
   if (definition.protected_system_field) flags.push('system')
   if (!definition.enabled) flags.push('disabled')
   return flags.join(' · ')
@@ -1860,6 +1877,32 @@ onMounted(async () => {
         <label class="check"><input type="checkbox" v-model="editingField.sensitive" /> Sensitive (kept out of search, suggestions and plugin payloads)</label>
         <label class="check"><input type="checkbox" v-model="editingField.indexed" /> Indexed (filtered often)</label>
         <label class="check"><input type="checkbox" v-model="editingField.unique_value" /> Unique across the fleet</label>
+        <label class="check">
+          <input type="checkbox" v-model="editingField.opens_web_page" />
+          Opens a web page (the value is linked in the grid and on the device page)
+        </label>
+        <!-- The installation's default for that link. A single device that
+             answers somewhere else overrides both on its own page; this is
+             what it overrides. Hidden until the box is ticked, because until
+             then there is no link for them to describe. -->
+        <template v-if="editingField.opens_web_page">
+          <label>
+            Link scheme
+            <select v-model="editingField.link_scheme">
+              <option value="http">http</option>
+              <option value="https">https</option>
+            </select>
+            <small class="muted">
+              http suits most devices: one serving only https usually redirects from port 80,
+              while https against a self-signed certificate warns before it connects.
+            </small>
+          </label>
+          <label>
+            Link port
+            <input v-model="editingField.link_port" type="number" min="1" max="65535" placeholder="Default for the scheme" />
+            <small class="muted">Leave blank for 80 or 443. A device on another port overrides this on its own page.</small>
+          </label>
+        </template>
         <label v-if="!creatingField && !editingField.protected_system_field" class="check">
           <input type="checkbox" v-model="editingField.enabled" /> Enabled
         </label>

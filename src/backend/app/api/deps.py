@@ -7,13 +7,23 @@ from sqlalchemy.orm import Session
 
 from ..db import as_utc, get_db, utcnow
 from ..models import ApiKey, User
-from ..models.user import lower_role
 from ..core.security import decode_token, hash_api_key, split_api_key, verify_api_key
 from ..config import settings
+from ..services.permissions import (
+    AUDIT_VIEW,
+    DEVICES_EDIT,
+    PLUGINS_MANAGE,
+    SCHEMA_MANAGE,
+    SETTINGS_MANAGE,
+    SOFTWARE_EDIT,
+    TESTS_EDIT,
+    USERS_MANAGE,
+    VIEWS_SAVE,
+    caller_permissions,
+    role_permissions,
+)
 
 bearer_scheme = HTTPBearer(auto_error=False)
-
-ROLES = ("admin", "tester", "readonly")
 
 # How stale `api_keys.last_used_at` is allowed to get. Stamping it on every
 # request would turn every read into a write; a minute's resolution is enough
@@ -72,15 +82,27 @@ def _from_api_key(request: Request, db: Session, prefix: str, secret: str) -> Us
     # The key's role is capped against the owner's *current* role, not the one
     # they held when they minted it: demoting someone has to weaken the keys
     # they already handed out, and a stored grant alone would not do that.
-    effective = lower_role(key.role, user.role)
+    #
+    # The cap is the intersection of the two permission sets, which is what a
+    # ladder's "whichever grants less" meant when there were only three roles
+    # and each was a superset of the one below. With roles an installation
+    # defines, two of them need not be comparable at all — a key carrying
+    # "auditor" held by a "tester" grants what both grant, which is nothing
+    # either of them could not already do.
+    owned = role_permissions(db, user.role)
+    effective = role_permissions(db, key.role) & owned
 
-    # Detached on purpose. Every role check downstream reads `user.role`, so the
-    # cheapest correct way to apply the cap is to hand back a User carrying the
-    # effective role — but mutating a session-attached row would mean the next
-    # `db.commit()` in the request writes the downgrade back to the users table.
+    # Detached on purpose. The permission set is carried on the User object for
+    # the rest of the request, and mutating a session-attached row would mean
+    # the next `db.commit()` writes the downgrade back to the users table.
     # Expunging first makes the object a local copy that no flush can reach.
     db.expunge(user)
-    user.role = effective
+    user.granted_permissions = effective
+    # Kept honest for anything that reads the name rather than the set — the
+    # 403 messages, for one. A key granting less than its owner is not acting
+    # as its owner's role, so it should not say that it is.
+    if effective != owned:
+        user.role = key.role
     return user
 
 
@@ -88,7 +110,7 @@ def _from_mcp_internal(request: Request) -> User:
     """A chart-bundled, readonly service identity with no database bootstrap."""
     now = utcnow()
     request.state.auth_method = "mcp_internal"
-    return User(
+    user = User(
         id="testbench-mcp-internal",
         username="testbench-mcp",
         email=None,
@@ -98,6 +120,12 @@ def _from_mcp_internal(request: Request) -> User:
         created_at=now,
         last_login_at=None,
     )
+    # Read-only by construction rather than by looking up what `readonly`
+    # currently grants: this identity exists without a database bootstrap, and
+    # an installation that gave its readonly role a write permission must not
+    # thereby hand one to a service account it never created.
+    user.granted_permissions = frozenset()
+    return user
 
 
 def get_current_user(
@@ -130,16 +158,46 @@ def get_current_user(
     return _from_jwt(db, presented)
 
 
-def require_write(user: User = Depends(get_current_user)) -> User:
-    if user.role not in ("admin", "tester"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role for write access")
-    return user
+def require_permission(permission: str, what: str):
+    """A dependency that admits a caller holding `permission`.
+
+    `what` completes "…is not allowed to <what>", so the 403 says which
+    capability is missing rather than which role the caller is not.
+    """
+
+    def guard(
+        user: User = Depends(get_current_user), db: Session = Depends(get_db),
+    ) -> User:
+        if permission not in caller_permissions(db, user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Your role ({user.role}) is not allowed to {what}.",
+            )
+        return user
+
+    return guard
 
 
-def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
-    return user
+require_devices_edit = require_permission(DEVICES_EDIT, "edit devices")
+require_software_edit = require_permission(SOFTWARE_EDIT, "edit software")
+require_tests_edit = require_permission(TESTS_EDIT, "record tests")
+require_views_save = require_permission(VIEWS_SAVE, "save views")
+require_audit_view = require_permission(AUDIT_VIEW, "read the audit log")
+require_users_manage = require_permission(USERS_MANAGE, "manage users and roles")
+require_schema_manage = require_permission(SCHEMA_MANAGE, "manage the schema")
+require_plugins_manage = require_permission(PLUGINS_MANAGE, "manage plugins")
+require_settings_manage = require_permission(SETTINGS_MANAGE, "manage settings")
+
+
+def holds(db: Session, user: User, permission: str) -> bool:
+    """Whether the caller has a permission, asked rather than enforced.
+
+    For the places deciding how much of a record to show rather than whether to
+    allow an action — the device changelog includes the raw audit entry for a
+    caller who could read it in the audit log anyway, and hides it from everyone
+    else.
+    """
+    return permission in caller_permissions(db, user)
 
 
 def _reject_non_session(request: Request, what: str) -> None:
@@ -164,10 +222,10 @@ def require_session(
     return user
 
 
-def require_admin_session(
-    request: Request, user: User = Depends(require_admin)
+def require_users_manage_session(
+    request: Request, user: User = Depends(require_users_manage)
 ) -> User:
-    """Admin role, held by a real login rather than an API key.
+    """Permission to manage accounts, held by a real login rather than a key.
 
     Same reasoning as `require_session`, one step further out: a local account is
     a credential too, and a longer-lived one than a key. A key that can create an

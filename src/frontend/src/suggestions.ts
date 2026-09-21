@@ -18,9 +18,16 @@
  */
 import { ref, type Ref } from 'vue'
 import { api } from './api/client'
+import { resolveFilterValues, type FilterValueSource } from './filterValues'
 
 /** Matches the whitelist in `backend/app/api/suggestions.py`. */
-export type SuggestEntity = 'devices' | 'software' | 'vendor-devices' | 'tests'
+export type SuggestEntity =
+  | 'devices'
+  | 'software'
+  | 'vendor-devices'
+  | 'tests'
+  | 'audit_logs'
+  | 'users'
 
 export interface SuggestOption {
   value: string
@@ -29,8 +36,9 @@ export interface SuggestOption {
 
 interface Entry {
   options: Ref<SuggestOption[]>
-  loading: boolean
   loaded: boolean
+  /** The request in flight, so concurrent callers share one fetch. */
+  inflight: Promise<void> | null
 }
 
 const cache = new Map<string, Entry>()
@@ -39,27 +47,50 @@ function entryFor(entity: SuggestEntity, field: string): Entry {
   const key = `${entity}/${field}`
   let entry = cache.get(key)
   if (!entry) {
-    entry = { options: ref([]), loading: false, loaded: false }
+    entry = { options: ref([]), loaded: false, inflight: null }
     cache.set(key, entry)
   }
   return entry
 }
 
-async function fetchInto(entity: SuggestEntity, field: string, entry: Entry) {
-  if (entry.loading || entry.loaded) return
-  entry.loading = true
-  try {
-    const res = await api<{ values: string[] }>(
-      `/suggestions/${entity}/${encodeURIComponent(field)}?limit=500`,
-    )
-    entry.options.value = (res.values || []).map((v) => ({ value: v, label: v }))
-    entry.loaded = true
-  } catch {
-    // A field with no suggestions behaves exactly like one whose suggestions
-    // failed to load: you type the value. Never surface this.
-  } finally {
-    entry.loading = false
-  }
+function fetchInto(entity: SuggestEntity, field: string, entry: Entry): Promise<void> {
+  if (entry.loaded) return Promise.resolve()
+  // Held rather than re-issued: the grid's column filters and the cell editors
+  // ask for the same field at the same moment, and a caller that needs the
+  // values (rather than a ref that fills in) has to be able to await the one
+  // request rather than racing it.
+  if (entry.inflight) return entry.inflight
+  entry.inflight = api<{ values: string[] }>(
+    `/suggestions/${entity}/${encodeURIComponent(field)}?limit=500`,
+  )
+    .then((res) => {
+      entry.options.value = (res.values || []).map((v) => ({ value: v, label: v }))
+      entry.loaded = true
+    })
+    .catch(() => {
+      // A field with no suggestions behaves exactly like one whose suggestions
+      // failed to load: you type the value. Never surface this.
+    })
+    .finally(() => {
+      entry.inflight = null
+    })
+  return entry.inflight
+}
+
+/**
+ * The distinct values of one field, awaited rather than watched.
+ *
+ * The same cache `useSuggestions` reads, so a column filter and the cell
+ * editor under it never disagree about what is in the column, and one write
+ * invalidates both.
+ */
+export async function suggestionValues(
+  entity: SuggestEntity,
+  field: string,
+): Promise<string[]> {
+  const entry = entryFor(entity, field)
+  await fetchInto(entity, field, entry)
+  return entry.options.value.map((option) => option.value)
 }
 
 /**
@@ -88,4 +119,19 @@ export function invalidateSuggestions(entity: SuggestEntity): void {
     // it had until the replacement lands, instead of blinking to empty.
     void fetchInto(entity, key.slice(entity.length + 1), entry)
   }
+}
+
+/**
+ * A `filterValues` function for DataTable, bound to one collection.
+ *
+ * The policy — local vocabulary first, then the server, then nothing — is in
+ * filterValues.ts; this is where it meets the request that answers it, which
+ * is the cache above. That shared cache is the point: a column's filter and
+ * the cell editor under it offer the same values, and one write invalidates
+ * both.
+ */
+export function makeFilterValues(
+  source: FilterValueSource,
+): (colId: string) => Promise<any[]> {
+  return (colId: string) => resolveFilterValues(source, colId, suggestionValues)
 }

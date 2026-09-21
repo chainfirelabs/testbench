@@ -123,10 +123,12 @@ class TestBench:
         from .devices import Devices
         from .software import SoftwareResource
         from .tests import Tests
+        from .vendor_devices import VendorDevices
 
         self.devices = Devices(self)
         self.tests = Tests(self)
         self.software = SoftwareResource(self)
+        self.vendor_devices = VendorDevices(self)
 
     def entity_fields(self) -> dict[str, list[dict]]:
         """Logical device/software/test fields this installation exposes.
@@ -360,8 +362,9 @@ def _to_error(response: httpx.Response, path: str) -> TestBenchError:
         )
     if status == 403:
         return PermissionDenied(
-            f"Permission denied: {detail}. The key's role is the lower of the role "
-            f"it was minted with and its owner's current role.",
+            f"Permission denied: {detail}. A key grants what its role and its "
+            f"owner's role both grant, so it is never more than its owner has — "
+            f"check `tb.whoami().permissions`.",
             **kwargs,
         )
     if status == 404:

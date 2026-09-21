@@ -3,10 +3,12 @@ import { computed, onMounted, ref } from 'vue'
 import DataTable, { type RemoteTableRequest, type RowAction } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
+import RolesPanel from '../components/RolesPanel.vue'
 import { api } from '../api/client'
-import { MIN_PASSWORD_LENGTH, rolesUpTo } from '../constants'
-import { useAuthStore } from '../stores/auth'
+import { MIN_PASSWORD_LENGTH } from '../constants'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 import { remoteTableParams } from '../remoteTable'
+import { makeFilterValues } from '../suggestions'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -32,15 +34,47 @@ const savingRole = ref(false)
 
 const fmt = (p: any) => (p.value ? new Date(p.value).toLocaleString() : '')
 
-const columns = [
+/*
+ * The roles an account can be given, fetched rather than hard-coded.
+ *
+ * Every role this installation has, not a ceiling: assigning a role is guarded
+ * by `users.manage`, and somebody who holds that already has the power to give
+ * it away. (Minting an API *key* is different — a key must never carry more
+ * than its owner, so that list is narrowed; see ProfileView.)
+ */
+const allRoles = ref<{ slug: string; name: string; description: string | null; permissions: string[] }[]>([])
+
+/**
+ * How much a role grants, as a colour.
+ *
+ * Three bands rather than a name lookup: one for roles that can hand out roles,
+ * one for roles that can change something, and grey for the rest. That keeps
+ * the column meaningful for a role this page has never heard of, which is the
+ * normal case once an installation defines its own.
+ */
+function roleColour(slug: string): string {
+  const permissions = allRoles.value.find((role) => role.slug === slug)?.permissions || []
+  if (permissions.includes(PERMISSION.usersManage)) return 'var(--accent)'
+  return permissions.length ? '#60a5fa' : '#9ca3af'
+}
+
+/*
+ * Built from `allRoles` rather than fixed, because the Role column colours a
+ * row by what the role grants. It used to colour by name — orange for "admin",
+ * blue for "tester" — which turns every role an installation defines into
+ * undifferentiated grey however much it grants.
+ */
+const columns = computed(() => [
   { field: 'username', headerName: 'Username', minWidth: 140 },
   { field: 'email', headerName: 'Email', minWidth: 160, valueFormatter: (p: any) => p.value || '—' },
   { field: 'auth_provider', headerName: 'Provider' },
   {
     field: 'role',
     headerName: 'Role',
+    valueFormatter: (p: any) =>
+      allRoles.value.find((role) => role.slug === p.value)?.name || p.value,
     cellStyle: (p: any) => ({
-      color: p.value === 'admin' ? 'var(--accent)' : p.value === 'tester' ? '#60a5fa' : '#9ca3af',
+      color: roleColour(p.value),
       fontWeight: 600,
     }),
   },
@@ -59,7 +93,7 @@ const columns = [
   },
   { field: 'created_at', headerName: 'Created', valueFormatter: fmt, minWidth: 170 },
   { field: 'last_login_at', headerName: 'Last Login', valueFormatter: (p: any) => (p.value ? new Date(p.value).toLocaleString() : '—'), minWidth: 170 },
-]
+])
 
 function showToast(msg: string, isError = false) {
   toast.value = msg
@@ -67,9 +101,31 @@ function showToast(msg: string, isError = false) {
   setTimeout(() => (toast.value = ''), 4000)
 }
 
+/** Re-run filter and sort over rows whose values changed underneath them. */
 async function load() {
   table.value?.reapplyView()
 }
+
+/**
+ * Re-read the list from the server, row count and all.
+ *
+ * For an account created or removed: a server-paged grid keeps the row count
+ * it was last given, so refreshing the blocks it holds cannot show a row that
+ * did not exist when it was told how many there were.
+ */
+async function reloadRows() {
+  table.value?.reload()
+}
+
+/*
+ * Values for the column filters' checklists — the server's to answer, since
+ * the grid only ever holds the window on screen.
+ */
+const filterValues = makeFilterValues({
+  entity: 'users',
+  local: (colId) => (colId === 'is_online' ? [true, false] : undefined),
+  skip: ['created_at', 'last_login_at'],
+})
 
 async function loadRemoteUsers(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
@@ -114,11 +170,27 @@ async function toggleActive(row: any) {
 // ---------------------------------------------------------------------------
 
 const roleOptions = computed(() =>
-  rolesUpTo(auth.user?.role).map((r) => ({ value: r, label: r })),
+  allRoles.value.map((role) => ({ value: role.slug, label: `${role.name} (${role.slug})` })),
 )
 
-const ROLE_HINT =
-  'readonly can look but not touch; tester also writes devices, software and tests; admin also manages users and reads the audit log.'
+const ROLE_HINT = computed(() => {
+  const described = allRoles.value
+    .filter((role) => role.description)
+    .map((role) => `${role.name}: ${role.description}`)
+  return described.length
+    ? described.join(' · ')
+    : 'What each role grants is set on the Roles tab.'
+})
+
+async function loadRoles() {
+  try {
+    allRoles.value = await api<any[]>('/roles')
+  } catch {
+    // The dialog is still usable: the field accepts the slug either way, and
+    // the API rejects one that does not exist.
+    allRoles.value = []
+  }
+}
 
 const PASSWORD_FIELDS: FormField[] = [
   {
@@ -146,13 +218,13 @@ const NEW_USER_FIELDS = computed<FormField[]>(() => [
     type: 'select',
     required: true,
     options: roleOptions.value,
-    hint: ROLE_HINT,
+    hint: ROLE_HINT.value,
   },
   { key: 'email', label: 'Email', placeholder: 'Optional' },
 ])
 
 const ROLE_FIELDS = computed<FormField[]>(() => [
-  { key: 'role', label: 'Role', type: 'select', required: true, options: roleOptions.value, hint: ROLE_HINT },
+  { key: 'role', label: 'Role', type: 'select', required: true, options: roleOptions.value, hint: ROLE_HINT.value },
 ])
 
 /**
@@ -187,9 +259,10 @@ async function createUser(values: Record<string, any>) {
     const created = await api<any>('/users', { method: 'POST', body: JSON.stringify(payload) })
     showNew.value = false
     showToast(`Local user ${created.username} created`)
-    // Reload rather than splice: the list comes back sorted by username, and a
-    // brand new row has derived fields (session state) only that endpoint sets.
-    await load()
+    // Reload rather than splice: the list comes back sorted by username, a
+    // brand new row has derived fields (session state) only that endpoint
+    // sets, and the grid has to be told the list grew.
+    await reloadRows()
   } catch (e: any) {
     showToast(e.message, true)
   } finally {
@@ -267,7 +340,7 @@ const SHIELD_ICON =
 
 function extraActions(row: any): RowAction[] {
   // The route is admin-only, so anyone reading this page can act on it.
-  if (!auth.isAdmin) return []
+  if (!auth.can(PERMISSION.usersManage)) return []
   const actions: RowAction[] = []
   const isLocal = row.auth_provider === 'local'
   const isSelf = row.id === auth.user?.id
@@ -304,17 +377,73 @@ function extraActions(row: any): RowAction[] {
   return actions
 }
 
-onMounted(load)
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+// Accounts and roles are two halves of the same question — who may do what —
+// and splitting them across two pages means assigning a role and deciding what
+// it grants are never on screen together.
+
+const tab = ref<'accounts' | 'roles'>('accounts')
+const rolesPanel = ref<InstanceType<typeof RolesPanel> | null>(null)
+
+async function onRolesChanged() {
+  // Editing a role can change what the person editing it may do, including
+  // whether this very page stays reachable. Re-reading their own record keeps
+  // the navigation honest rather than waiting for the next sign-in.
+  await Promise.all([auth.loadMe(), loadRoles()])
+  // A role's user count is on screen here, and a role change may have moved one.
+  table.value?.reload()
+}
+
+onMounted(() => {
+  load()
+  loadRoles()
+})
 </script>
 
 <template>
-  <div class="page">
+  <!--
+    Two tabs with opposite layout needs, so the modifier follows the tab.
+
+    Accounts holds a DataTable, which sizes itself to the panel and scrolls
+    internally: that wants plain `.page`, one viewport tall. Roles is a
+    document that grows — a card per role, each unfolding a dozen permission
+    checkboxes — and under `.page`'s `flex: 1; min-height: 0` it was capped at
+    viewport height and painted outside its own rounded border. `.page-flow`
+    lets the panel grow to its content and leaves the scrolling to `.content`.
+  -->
+  <div class="page" :class="{ 'page-flow': tab === 'roles' }">
     <div class="page-header">
-      <h2>Users</h2>
+      <h2>Users &amp; Roles</h2>
       <div class="toolbar">
-        <button v-if="auth.isAdmin" class="btn btn-primary" @click="openNew">+ New user</button>
+        <button
+          v-if="tab === 'accounts' && auth.can(PERMISSION.usersManage)"
+          class="btn btn-primary"
+          @click="openNew"
+        >
+          + New user
+        </button>
       </div>
     </div>
+    <div class="tabs">
+      <button :class="{ active: tab === 'accounts' }" @click="tab = 'accounts'">
+        Accounts
+      </button>
+      <button :class="{ active: tab === 'roles' }" @click="tab = 'roles'">
+        Roles ({{ allRoles.length || '…' }})
+      </button>
+    </div>
+
+    <RolesPanel
+      v-if="tab === 'roles'"
+      ref="rolesPanel"
+      :editable="auth.can(PERMISSION.usersManage)"
+      @toast="(message, isError) => showToast(message, isError)"
+      @changed="onRolesChanged"
+    />
+
+    <template v-else>
     <p class="muted" style="margin-top: 0; max-width: 90ch">
       Users sign in via SSO (Authentik) or a local account. SSO users are created
       automatically on first login and their role is mapped from their Authentik
@@ -329,6 +458,7 @@ onMounted(load)
       :columns="columns"
       :rows="rows"
       :remote-loader="loadRemoteUsers"
+      :filter-values="filterValues"
       :extra-row-actions="extraActions"
       @grid-ready="onGridReady"
     >
@@ -341,6 +471,8 @@ onMounted(load)
         />
       </template>
     </DataTable>
+
+    </template>
 
     <FormModal
       v-if="showNew"

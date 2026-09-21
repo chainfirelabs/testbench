@@ -120,8 +120,24 @@ def test_lan_and_wan_mac_findings_update_their_own_fields():
     assert result['accepted']['discovery_wan_mac']['field'] == 'wan_mac'
 
 
+def _streamed(response) -> bytes:
+    """The bytes of a StreamingResponse, for a test asserting on an export.
+
+    Exports stream rather than buffering, so there is no `.body` to read: the
+    content does not exist as one object anywhere, which is the point.
+    """
+    import asyncio
+
+    async def collect() -> bytes:
+        chunks = [chunk async for chunk in response.body_iterator]
+        return b"".join(c if isinstance(c, bytes) else c.encode() for c in chunks)
+
+    return asyncio.run(collect())
+
+
 def test_unscoped_default_export_includes_type_only_fields():
-    device = NS(id='d', unique_id='phone-1', device_type_key='phone', data={'imei': '123'})
+    device = NS(id='d', unique_id='phone-1', device_type_key='phone', data={'imei': '123'},
+                link_overrides={})
     fields = [field('unique_id', storage='column'), field('imei')]
     db = Mock()
     db.scalars.return_value.all.return_value = [device]
@@ -130,7 +146,12 @@ def test_unscoped_default_export_includes_type_only_fields():
           patch.object(devices, '_device_dict', return_value={'unique_id': 'phone-1', 'misc_data': {}})):
         response = devices.export_devices(format='json', columns_mode='type', expand_misc=True,
                                            request=None, db=db, user=None)
-    assert json.loads(response.body) == [{'device_type': 'phone', 'unique_id': 'phone-1', 'imei': '123'}]
+    # `link_overrides` rides along in every field-column export, blank when the
+    # device overrides nothing: it is the one part of a device no field column
+    # describes, and leaving it out is what used to make a restore lossy.
+    assert json.loads(_streamed(response)) == [
+        {'device_type': 'phone', 'unique_id': 'phone-1', 'imei': '123', 'link_overrides': None},
+    ]
 
 
 @pytest.mark.parametrize('fleet', [False, True])

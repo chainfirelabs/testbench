@@ -155,3 +155,82 @@ func TestHelpDoesNotExposeToken(t *testing.T) {
 		t.Fatal("help exposed credential")
 	}
 }
+
+func TestVendorDevicesListsTheCatalogue(t *testing.T) {
+	code, out, err := invoke(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/api/v1/vendor-devices" || q.Get("search") != "ISR" || q.Get("support_status") != "supported" {
+			t.Error(r.URL)
+		}
+		fmt.Fprint(w, `{"items":[{"id":"vd1","make":"Cisco","model":"ISR 4331","support_status":"supported","software_name":"Backup-Restore","software_version":"2.0"}],"total":1}`)
+	}, "--vendor-devices", "--search", "ISR", "--support", "supported")
+	if code != 0 || !strings.Contains(out, "Backup-Restore") || !strings.Contains(out, "ISR 4331") {
+		t.Fatal(code, out, err)
+	}
+	// The software making the claim leads the row: without it a claim says
+	// nothing, because a claim is a statement by one software about hardware.
+	if !strings.HasPrefix(strings.TrimSpace(out), "software_name") {
+		t.Fatalf("software should lead the default columns: %q", out)
+	}
+}
+
+func TestVendorDevicesForSoftwareResolvesThenFilters(t *testing.T) {
+	code, out, err := invoke(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/software/curl-smoke":
+			fmt.Fprint(w, `{"id":"sw-1","name":"curl-smoke","version":"3.8.5","is_latest":true}`)
+		case "/api/v1/vendor-devices":
+			// The named flag has to survive the narrowing rather than being
+			// dropped by it.
+			if q := r.URL.Query(); q.Get("software_id") != "sw-1" || q.Get("support_status") != "partial" {
+				t.Error(r.URL)
+			}
+			fmt.Fprint(w, `{"items":[{"id":"vd1","make":"Juniper"}],"total":1}`)
+		default:
+			t.Error(r.URL.Path)
+		}
+	}, "--vendor-devices", "--for-software", "curl-smoke", "--version", "3.8.5", "--support", "partial")
+	if code != 0 || !strings.Contains(out, "Juniper") {
+		t.Fatal(code, out, err)
+	}
+}
+
+func TestVendorDevicesForDeviceUsesItsMakeAndModel(t *testing.T) {
+	code, out, err := invoke(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/devices/dev-0042":
+			fmt.Fprint(w, `{"id":"d1","unique_id":"dev-0042","make":"Cisco","model":"ISR 4331"}`)
+		case "/api/v1/vendor-devices":
+			if q := r.URL.Query(); q.Get("make") != "Cisco" || q.Get("model") != "ISR 4331" {
+				t.Error(r.URL)
+			}
+			fmt.Fprint(w, `{"items":[{"id":"vd1","software_name":"NetGuard"}],"total":1}`)
+		default:
+			t.Error(r.URL.Path)
+		}
+	}, "--vendor-devices", "--for-device", "dev-0042")
+	if code != 0 || !strings.Contains(out, "NetGuard") {
+		t.Fatal(code, out, err)
+	}
+}
+
+func TestVendorDeviceFlagCombinationsAreRejected(t *testing.T) {
+	refuse := func(t *testing.T, want string, args ...string) {
+		t.Helper()
+		code, _, err := invoke(t, func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("no request should be made: %s", r.URL)
+		}, args...)
+		if code != 2 || !strings.Contains(err, want) {
+			t.Fatalf("args=%v code=%d err=%q", args, code, err)
+		}
+	}
+	refuse(t, "must be one of", "--vendor-devices", "--support", "maybe")
+	refuse(t, "--support requires --vendor-devices", "--devices", "--support", "supported")
+	refuse(t, "--get does not apply", "--vendor-devices", "--get", "vd1")
+	refuse(t, "not both", "--vendor-devices", "--for-device", "dev-1", "--for-software", "curl")
+	refuse(t, "--fields requires", "--vendor-devices", "--fields")
+	refuse(t, "select exactly one", "--vendor-devices", "--devices")
+	// The test vocabularies are not the claim vocabulary and vice versa.
+	refuse(t, "--outcome and --tag require --tests", "--vendor-devices", "--outcome", "pass")
+	refuse(t, "must be one of pass,fail,warn", "--tests", "--outcome", "supported")
+}

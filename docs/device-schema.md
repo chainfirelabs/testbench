@@ -196,6 +196,57 @@ hundred devices leave empty, a type change the stored values contradict, or a
 uniqueness rule two devices already break are reported, and the publish is
 refused, before any of it becomes the rule every save is measured against.
 
+## Opening a web page
+
+A field marked **Opens a web page** has its value offered as a link to that
+address — on the device page the value itself is the link; in the inventory
+grid a small icon sits beside it, because the cell is editable and a link
+spanning it would mean the first click of a double-click opened a browser tab.
+
+The link defaults to `http://` on the scheme's own port. A device serving only
+https almost always still listens on 80 and redirects, so http lands correctly
+either way, while https on a device with a self-signed certificate lands on a
+browser warning even when the device is fine. A value that carries its own
+scheme is honoured as written, so storing `https://10.0.0.1` in the field gets
+exactly that.
+
+### Choosing the scheme and port
+
+Two settings sit under the checkbox, and they are the installation's default
+*for that field*: **Link scheme** (`http` or `https`) and **Link port** (blank
+for 80 or 443). Per field rather than per installation, because the right
+answer differs between fields — a LAN address may be https on 8443 while a
+vendor support page is plain http.
+
+One device that answers somewhere else overrides both on its own page, under
+**Links** in the edit form. Each linked field gets a scheme picker that starts
+at *Inherit*, naming what the field does, and a port box that starts blank.
+Setting one and not the other keeps the field's answer for the other, and
+clearing both puts the device back on the field's default.
+
+**The override is not stored in the address.** It cannot be: a field carrying
+`scan_address_wan` or `scan_address_lan` has its value read raw by the network
+scan and by the Reboot plugin, which hand it straight to a socket. A value of
+`https://10.0.0.5:8443` is not an address, so the scan reports the device
+offline and reboots stop working — while the link, which parses the value,
+looks fine. Keeping the scheme and the port beside the address instead of
+inside it is the whole reason these settings exist. A device's overrides live
+in its own `link_overrides`, which is not a field and never reaches a plugin.
+
+Values that are not web addresses are left as plain text rather than guessed
+at, and only `http`/`https` results ever become links — a field holding
+`javascript:` or `file:` cannot be turned into one. A port, a path and a bare
+IPv6 address all work: `10.0.0.5:8443/ui`, `fd00::1`.
+
+Fields carrying `scan_address_wan` or `scan_address_lan` get the option turned
+on when they are created, since a management address is usually a web page.
+That is only the default — any field can be opted in, including one that is not
+an address at all (a vendor's support page), and any field can be opted out.
+
+In a DeviceSchema document the three settings are `opensWebPage`, `linkScheme`
+and `linkPort`, and a field on the defaults carries none of them. Per-device
+overrides are device data, not schema, and so are not in the document at all.
+
 ## Semantic roles
 
 Plugins ask for meaning, not for one installation's field names. A field

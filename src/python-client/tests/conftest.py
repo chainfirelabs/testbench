@@ -27,7 +27,11 @@ class FakeAPI:
         self.devices: dict[str, dict] = {}
         self.software: dict[str, dict] = {}
         self.tests: list[dict] = []
-        self.me = {"id": "u1", "username": "tester1", "role": "tester", "email": None}
+        self.vendor_devices: list[dict] = []
+        self.me = {
+            "id": "u1", "username": "tester1", "role": "tester", "email": None,
+            "permissions": ["devices.edit", "software.edit", "tests.edit", "views.save"],
+        }
         self.requests: list[httpx.Request] = []
         # Queue of (status, body) to serve before behaving normally, for
         # exercising retries.
@@ -77,6 +81,16 @@ class FakeAPI:
              "unavailable_reason": "Device Reboot is not enabled for the Routers device type"},
         ]
 
+    def as_role(self, role: str, permissions: list[str] | None = None) -> None:
+        """Sign the fake key in as a role granting `permissions`.
+
+        Both are set together on purpose: an installation defines its own
+        roles, so a name and a permission set that disagree describe nothing
+        real. Pass `permissions=None` for a role that grants nothing.
+        """
+        self.me["role"] = role
+        self.me["permissions"] = list(permissions or [])
+
     def add_device(self, unique_id: str, **fields) -> dict:
         row = {
             "id": f"uuid-{unique_id}", "unique_id": unique_id, "status": "available",
@@ -100,6 +114,35 @@ class FakeAPI:
         }
         self.software[row["id"]] = row
         return row
+
+    def add_vendor_device(self, software: dict, make: str, model: str,
+                          support_status: str = "supported", **fields) -> dict:
+        """A vendor's claim about hardware, attached to one software version."""
+        row = {
+            "id": f"vd-{len(self.vendor_devices) + 1}",
+            "software_id": software["id"],
+            "make": make, "model": model,
+            "firmware_version": None, "hardware_version": None, "architecture": None,
+            "support_status": support_status, "source": None, "notes": None,
+            "misc_data": {}, "created_at": "2026-01-01T00:00:00", "updated_at": None,
+        }
+        row.update(fields)
+        self.vendor_devices.append(row)
+        return row
+
+    def _catalog_row(self, row: dict) -> dict:
+        """A claim as the cross-software catalogue returns it: with its software.
+
+        The per-software endpoint does not repeat this, which is the difference
+        the client has to paper over — see `VendorDevices.for_software`.
+        """
+        software = self.software.get(row["software_id"], {})
+        return {
+            **row,
+            "software_name": software.get("name", ""),
+            "software_version": software.get("version", ""),
+            "software_is_latest": bool(software.get("is_latest", True)),
+        }
 
     # -- routing ----------------------------------------------------------
 
@@ -182,6 +225,31 @@ class FakeAPI:
                 except _Rejected as exc:
                     return httpx.Response(422, json={"detail": str(exc)})
                 return httpx.Response(200, json=row)
+
+        if path == "/vendor-devices" and method == "GET":
+            rows = [self._catalog_row(r) for r in self.vendor_devices]
+            if params.get("search"):
+                needle = params["search"].lower()
+                rows = [
+                    r for r in rows
+                    if any(needle in str(r.get(k) or "").lower()
+                           for k in ("make", "model", "software_name", "software_version"))
+                ]
+            # A software *name* covers every version of it, which is the whole
+            # reason the API takes a name here rather than an id.
+            if params.get("software"):
+                rows = [r for r in rows
+                        if r["software_name"].lower() == params["software"].lower()]
+            # One version exactly, as opposed to every version of a name.
+            if params.get("software_id"):
+                rows = [r for r in rows if r["software_id"] == params["software_id"]]
+            for key in ("make", "model", "firmware_version", "hardware_version",
+                        "architecture", "support_status"):
+                if params.get(key):
+                    rows = [r for r in rows
+                            if str(r.get(key) or "").lower() == params[key].lower()]
+            rows.sort(key=lambda r: (str(r.get(params.get("sort", "make")) or ""), r["id"]))
+            return httpx.Response(200, json=self._page(rows, params))
 
         if path == "/software" and method == "GET":
             rows = list(self.software.values())

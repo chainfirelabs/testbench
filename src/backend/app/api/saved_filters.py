@@ -7,7 +7,7 @@ from ..models import SavedFilter, User
 from ..models.saved_filter import FILTER_ENTITIES, FILTER_PLATFORMS, is_filter_entity
 from ..schemas import Page, SavedFilterCreate, SavedFilterOut, SavedFilterUpdate
 from ..services.audit import log_action
-from .deps import get_current_user, require_write
+from .deps import get_current_user, require_views_save
 
 router = APIRouter(prefix="/saved_filters", tags=["saved_filters"])
 
@@ -36,7 +36,7 @@ def list_saved_filters(
 def create_saved_filter(
     body: SavedFilterCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_views_save),
 ):
     if not is_filter_entity(body.entity):
         raise HTTPException(
@@ -70,7 +70,7 @@ def update_saved_filter(
     sf_id: str,
     body: SavedFilterUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_views_save),
 ):
     sf = db.get(SavedFilter, sf_id)
     if sf is None or sf.user_id != user.id:
@@ -97,7 +97,7 @@ def update_saved_filter(
 
 
 @router.delete("/{sf_id}", status_code=204)
-def delete_saved_filter(sf_id: str, db: Session = Depends(get_db), user: User = Depends(require_write)):
+def delete_saved_filter(sf_id: str, db: Session = Depends(get_db), user: User = Depends(require_views_save)):
     sf = db.get(SavedFilter, sf_id)
     if sf is None or sf.user_id != user.id:
         raise HTTPException(status_code=404, detail="Saved filter not found")

@@ -10,13 +10,13 @@ import DetailModal from '../components/DetailModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import CheckoutDialog from '../components/CheckoutDialog.vue'
 import PluginRunModal from '../components/PluginRunModal.vue'
-import DeviceFieldsModal from '../components/DeviceFieldsModal.vue'
 import { daysFromToday, daysUntil } from '../dates'
-import { api, downloadFile } from '../api/client'
+import { api } from '../api/client'
+import { useDownload } from '../downloads'
 import { useImportProgress } from '../importProgress'
-import { invalidateSuggestions, useSuggestions } from '../suggestions'
+import { invalidateSuggestions, makeFilterValues, useSuggestions } from '../suggestions'
 import { describeScan } from '../scan'
-import { useAuthStore } from '../stores/auth'
+import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { deviceGridColumns, optionLabel } from '../deviceColumns'
 import {
@@ -44,7 +44,6 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
-const customizingFields = ref(false)
 const { importState, runImport, closeImport } = useImportProgress()
 
 /*
@@ -226,6 +225,9 @@ function showToast(msg: string, isError = false) {
   setTimeout(() => (toast.value = ''), 4000)
 }
 
+// A fleet export is the slowest of these, and the raw shape is slower still.
+const { downloading, download } = useDownload(showToast)
+
 // A computed (not a function called from the template): a fresh Set on every
 // render would look like a change to the grid and trigger needless refreshes.
 const dirtyIds = computed(() => new Set(dirty.value.keys()))
@@ -234,9 +236,44 @@ function isRowDirty(row: any): boolean {
   return !!row.id && dirty.value.has(row.id)
 }
 
+/** Re-run filter and sort over rows whose values changed underneath them. */
 async function load() {
   table.value?.reapplyView()
 }
+
+/**
+ * Re-read the list from the server, row count and all.
+ *
+ * For changes to which devices exist — one created, deleted or imported.
+ * A server-paged grid cannot see those by refreshing the blocks it holds: it
+ * keeps the row count it was last given, so a new device lands past the end of
+ * a table that does not know it grew and a deleted one leaves a gap. This is
+ * why adding a device used to need a browser reload to show it.
+ */
+async function reloadRows() {
+  table.value?.reload()
+}
+
+/*
+ * Values for the column filters' checklists.
+ *
+ * A device grid is server-paged, so the distinct values of a column are the
+ * server's to answer. The ones this page can answer itself — a select field's
+ * vocabulary, the device types it already loaded — it does, without a request.
+ */
+const filterValues = makeFilterValues({
+  entity: 'devices',
+  local: (colId) => {
+    if (colId === 'device_type_id') return deviceTypes.value.map((type) => type.id)
+    const field = [...deviceFields.value, ...otherTypeFields.value].find((f) => f.key === colId)
+    if (field?.type === 'select') return field.options
+    if (field?.type === 'boolean') return [true, false]
+    return undefined
+  },
+  // The rest of the document as one cell, and the two columns derived from a
+  // timestamp — none of them a value anyone filters by picking from a list.
+  skip: ['misc_data', 'created_at', 'updated_at', 'last_scanned_at', 'last_seen_online'],
+})
 
 async function loadRemoteDevices(request: RemoteTableRequest) {
   const params = remoteTableParams(request, {
@@ -488,8 +525,10 @@ async function createDevice(values: Record<string, any>) {
   creating.value = true
   try {
     const created = await api<any>('/devices', { method: 'POST', body: JSON.stringify(devicePayload(values)) })
-    // Newest first, so the row you just made is where you are looking.
-    await load()
+    // A device that did not exist a moment ago: the grid has to re-read the
+    // list rather than refresh the rows it is holding, or the new row is
+    // simply not in the window it knows about.
+    await reloadRows()
     // The values just written are the ones the next device is most likely to
     // want offered.
     invalidateSuggestions('devices')
@@ -602,7 +641,10 @@ async function deleteRow(row: any) {
     await api(`/devices/${row.id}`, { method: 'DELETE' })
     rows.value = rows.value.filter((r) => toRaw(r) !== toRaw(row))
     dirty.value.delete(row.id)
-    await load()
+    // The grid keeps the selection, so a deleted row stays selected — and
+    // counted — unless it is told. See clearSelection in DataTable.
+    table.value?.clearSelection()
+    await reloadRows()
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -616,8 +658,12 @@ async function deleteSelected() {
     await api('/devices/delete', { method: 'POST', body: JSON.stringify({ ids }) })
     rows.value = rows.value.filter((r) => !ids.includes(r.id))
     for (const id of ids) dirty.value.delete(id)
+    // Emptying this page's copy is not enough: the selection lives in the
+    // grid, and rows left ticked there are added to whatever is ticked next —
+    // which is how deleting 100 and then selecting 100 more read as 200.
+    table.value?.clearSelection()
     selected.value = []
-    await load()
+    await reloadRows()
     showToast(`Deleted ${ids.length} device${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -626,6 +672,10 @@ async function deleteSelected() {
 
 // A bulk edit may span device types. Offer only writable fields whose key,
 // storage, type and choices agree in every selected device's effective schema.
+//
+// The device type itself is not among them and is added separately below: it
+// is not a schema field but the thing that *chooses* the schema, so it has no
+// entry to agree on and would be dropped by the very intersection it decides.
 const commonBulkDeviceFields = computed<SchemaField[]>(() => {
   if (!selected.value.length) return []
   const schemas = selected.value.map((row) => fieldsByType.value.get(row.device_type_key || '') || [])
@@ -639,16 +689,30 @@ const commonBulkDeviceFields = computed<SchemaField[]>(() => {
   }))
 })
 
-const BULK_DEVICE_FIELDS = computed<FormField[]>(() => commonBulkDeviceFields.value.map((field) => {
-  const form = schemaFormField(field)
-  // Existing rows already satisfy required constraints; bulk edit validates
-  // only fields the operator explicitly opts into changing.
-  form.required = false
-  if (field.type === 'select') {
-    form.options = field.options.map((value) => ({ value, label: optionLabel(value) }))
+const BULK_DEVICE_FIELDS = computed<FormField[]>(() => {
+  // First: categorising a batch of devices is the common reason to open this
+  // dialog at all. The button that opens it is already behind devices.edit.
+  const fields: FormField[] = [{
+    ...TYPE_FIELD,
+    options: [
+      { value: '', label: 'Uncategorized' },
+      ...deviceTypes.value.map((item) => ({ value: item.id, label: item.label })),
+    ],
+    hint: 'Moving a device to a type checks it against that type\'s schema. One '
+      + 'missing a value the new type requires is reported and left as it was.',
+  }]
+  for (const field of commonBulkDeviceFields.value) {
+    const form = schemaFormField(field)
+    // Existing rows already satisfy required constraints; bulk edit validates
+    // only fields the operator explicitly opts into changing.
+    form.required = false
+    if (field.type === 'select') {
+      form.options = field.options.map((value) => ({ value, label: optionLabel(value) }))
+    }
+    fields.push(form)
   }
-  return form
-}))
+  return fields
+})
 
 function sharedDeviceValue(field: SchemaField): any {
   const values = selected.value.map((row) => fieldValue(row, field))
@@ -656,10 +720,19 @@ function sharedDeviceValue(field: SchemaField): any {
   return encoded.every((value) => value === encoded[0]) ? values[0] ?? '' : ''
 }
 
+/** The type every selected device already has, or blank where they disagree. */
+function sharedDeviceTypeId(): string {
+  const ids = selected.value.map((row) => row.device_type_id || '')
+  return ids.every((id) => id === ids[0]) ? ids[0] : ''
+}
+
 function openBulkEdit() {
-  bulkEditValues.value = Object.fromEntries(
-    commonBulkDeviceFields.value.map((field) => [field.key, sharedDeviceValue(field)]),
-  )
+  bulkEditValues.value = {
+    ...Object.fromEntries(
+      commonBulkDeviceFields.value.map((field) => [field.key, sharedDeviceValue(field)]),
+    ),
+    device_type_id: sharedDeviceTypeId(),
+  }
   bulkEditing.value = true
 }
 
@@ -907,7 +980,7 @@ const POWER_ICON =
  * a field.
  */
 function pluginUnavailableReason(action: PluginAction, row: any): string | null {
-  return deviceActionUnavailableReason(action, row, fieldsByType.value, auth.canWrite)
+  return deviceActionUnavailableReason(action, row, fieldsByType.value, auth.can(PERMISSION.devicesEdit))
 }
 
 /** Expensive agents and disruptive actions deserve a question before launch. */
@@ -1077,12 +1150,45 @@ function extraActions(row: any): RowAction[] {
  * out. `columns=data` is the lossless third option, offered in the menu.
  */
 function exportAs(format: 'json' | 'csv', columns: 'type' | 'all' | 'data' = 'type') {
-  const typeFilter = activeTypeKey.value ? `&device_type=${encodeURIComponent(activeTypeKey.value)}` : ''
   const shape = activeTypeKey.value || columns !== 'type' ? columns : 'all'
   const variant = columns === 'data' ? 'raw' : undefined
-  downloadFile(
-    `/devices/export?format=${format}&columns=${shape}${typeFilter}`,
+  /*
+   * The grid's own search, sort and column filters, not just the device type.
+   *
+   * The export endpoint has always taken the list endpoint's filters — its
+   * docstring promises that what you see in a filtered table is what you get
+   * in the file — but this page only ever sent the type from the route. So
+   * narrowing the grid to three devices and exporting handed back the whole
+   * fleet, silently and plausibly, which is the worst way for an export to be
+   * wrong. Built from the same `remoteTableParams` the loader uses, so the two
+   * cannot read the same grid differently.
+   */
+  const state = table.value?.getState()
+  const params = remoteTableParams(
+    {
+      startRow: 0,
+      endRow: 1,
+      search: state?.quick_filter || '',
+      sortModel: state?.sort || [],
+      filterModel: state?.filter || {},
+    },
+    {
+      format,
+      columns: shape,
+      device_type: activeTypeKey.value || undefined,
+      overdue: showOverdueOnly.value || undefined,
+    },
+  )
+  // An export returns the whole filtered set, in its own order: a window into
+  // it means nothing, and the endpoint orders by creation date whatever it is
+  // told. Dropped rather than left to be ignored — anything the export does
+  // not recognise it treats as a column filter, so an installation with a
+  // field actually named `sort` would get a quietly wrong file.
+  for (const key of ['page', 'page_size', 'sort', 'order']) params.delete(key)
+  download(
+    `/devices/export?${params}`,
     deviceDownloadFilename(activeTypeKey.value, format, variant),
+    'export',
   )
 }
 
@@ -1091,9 +1197,10 @@ function downloadTemplate() {
   const scope = activeTypeKey.value && activeTypeKey.value !== UNCATEGORIZED
     ? `?device_type=${encodeURIComponent(activeTypeKey.value)}`
     : ''
-  downloadFile(
+  download(
     `/devices/template${scope}`,
     deviceDownloadFilename(activeTypeKey.value, 'csv', 'template'),
+    'template',
   )
 }
 
@@ -1102,7 +1209,8 @@ async function onImportFile(e: Event) {
   if (!file) return
   try {
     const result = await runImport('/devices/import', file)
-    if (result) await load()
+    // An import adds rows, so the row count has moved: re-read the list.
+    if (result) await reloadRows()
   } finally {
     if (fileInput.value) fileInput.value.value = ''
   }
@@ -1146,11 +1254,13 @@ watch(activeTypeKey, async () => {
   // a different saved layout, so all of it is re-resolved before the rows are.
   await loadSchema()
   await loadPluginActions(activeTypeKey.value === UNCATEGORIZED ? undefined : activeTypeKey.value)
-  await load()
+  // A different inventory is a different row set, not the same rows with
+  // different values, so the count has to be re-read with them.
+  await reloadRows()
   profiles.value?.applyDefault()
 })
 
-watch(showOverdueOnly, () => load())
+watch(showOverdueOnly, () => reloadRows())
 
 // Leaving the page ends the polling with it; nothing here outlives the view.
 onBeforeUnmount(() => {
@@ -1168,10 +1278,7 @@ onBeforeUnmount(() => {
       <div class="toolbar">
         <!-- The primary action stays outside the overflow: it is the one thing
              on this page you most often want, and it should be one tap. -->
-        <button v-if="auth.canWrite" class="btn btn-primary" @click="openNew">+ New device</button>
-        <button v-if="auth.isAdmin" class="btn" @click="customizingFields = true">
-          Customize fields
-        </button>
+        <button v-if="auth.can(PERMISSION.devicesEdit)" class="btn btn-primary" @click="openNew">+ New device</button>
         <!-- Only offered when there is something to see: a button reading
              "Overdue (0)" is a permanent reminder of nothing. -->
         <button
@@ -1188,12 +1295,13 @@ onBeforeUnmount(() => {
              `change`. -->
         <input ref="fileInput" type="file" accept=".json,.csv" style="display: none" @change="onImportFile" />
         <OverflowMenu>
-          <template v-if="auth.canWrite">
+          <template v-if="auth.can(PERMISSION.devicesEdit)">
             <button class="btn" @click="fileInput?.click()">Import</button>
             <button
               v-if="scanEnabled"
               class="btn"
               title="Download a blank CSV with the columns an import accepts"
+              :disabled="downloading"
               @click="downloadTemplate"
             >
               Template
@@ -1216,16 +1324,24 @@ onBeforeUnmount(() => {
                 : action.label }}
             </button>
           </template>
-          <button class="btn" @click="exportAs('json')">Export JSON</button>
-          <button class="btn" @click="exportAs('csv')">Export CSV</button>
-          <!-- The whole document in one column: lossless, and the only shape
-               that survives a schema change between export and re-import. -->
+          <button class="btn" :disabled="downloading" @click="exportAs('json')">
+            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+          </button>
+          <!-- One CSV, because there is now one answer. The second button
+               existed because a field-column export silently dropped link
+               overrides, so restoring a fleet needed the document-in-one-cell
+               shape; that shape carries a JSON blob per row and is unusable in
+               a spreadsheet, which made choosing between them a trap. The
+               field-column export carries the overrides now and round-trips
+               exactly, so there is nothing left to choose. `columns=data` is
+               still on the API for callers that want the whole document. -->
           <button
             class="btn"
-            title="Every field in one JSON column — re-imports exactly as exported"
-            @click="exportAs('csv', 'data')"
+            title="One column per field — opens in a spreadsheet, and re-imports exactly as exported"
+            :disabled="downloading"
+            @click="exportAs('csv')"
           >
-            Export CSV (raw)
+            {{ downloading ? 'Preparing…' : 'Export CSV' }}
           </button>
         </OverflowMenu>
       </div>
@@ -1239,11 +1355,12 @@ onBeforeUnmount(() => {
       :columns="columns"
       :rows="rows"
       :remote-loader="loadRemoteDevices"
-      :editable="auth.canWrite"
-      :selectable="auth.canWrite"
+      :filter-values="filterValues"
+      :editable="auth.can(PERMISSION.devicesEdit)"
+      :selectable="auth.can(PERMISSION.devicesEdit)"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
-      :row-editable="auth.canWrite"
+      :row-editable="auth.can(PERMISSION.devicesEdit)"
       :extra-row-actions="extraActions"
       :row-badge="rowBadge"
       :row-class="rowClass"
@@ -1267,16 +1384,16 @@ onBeforeUnmount(() => {
       </template>
       <template #selection-actions>
         <button
-          v-if="auth.canWrite && selected.length"
+          v-if="auth.can(PERMISSION.devicesEdit) && selected.length"
           class="btn"
-          title="Edit fields shared by the selected devices"
-          :disabled="!commonBulkDeviceFields.length"
+          title="Edit the device type, and any field the selected devices share"
+          :disabled="!BULK_DEVICE_FIELDS.length"
           @click="openBulkEdit"
         >
           Edit
         </button>
         <button
-          v-if="auth.canWrite && selected.length"
+          v-if="auth.can(PERMISSION.devicesEdit) && selected.length"
           class="btn btn-danger"
           title="Delete the selected devices"
           @click="deleteSelected"
@@ -1285,13 +1402,6 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </DataTable>
-    <DeviceFieldsModal
-      v-if="customizingFields"
-      :type-key="activeTypeKey && activeTypeKey !== UNCATEGORIZED ? activeTypeKey : undefined"
-      :title="`${pageTitle} Fields`"
-      @close="customizingFields = false"
-      @saved="loadSchema"
-    />
     <FormModal
       v-if="bulkEditing"
       :title="`Edit ${selected.length} selected devices`"

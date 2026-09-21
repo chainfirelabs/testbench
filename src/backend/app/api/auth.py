@@ -17,13 +17,13 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db, utcnow
-from ..models import ApiKey, User
-from ..models.user import role_ceiling
+from ..models import ApiKey, Role, User
 from ..schemas import ApiKeyCreate, ApiKeyCreated, ApiKeyOut, LoginIn, LoginOut, UserOut
 from ..core.security import create_token, dummy_verify, generate_api_key, verify_password
 from ..services.audit import log_action
 from ..services.login_guard import check_login_allowed
-from .deps import ROLES, get_current_user, require_session
+from .deps import get_current_user, require_session
+from ..services.permissions import caller_permissions, grantable_roles
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +98,24 @@ def _issuer_urls() -> dict[str, str]:
     return urls
 
 
-def _resolve_role(groups: list[str]) -> str:
+def _resolve_role(db: Session, groups: list[str]) -> str:
+    """The role an Authentik login lands on, from its groups.
+
+    Checked against the roles this installation actually has rather than
+    against a fixed list of three, so a group can be mapped to a role the
+    installation defined itself. A mapping naming a role that has since been
+    deleted is skipped rather than honoured — an unknown role grants nothing,
+    and silently signing somebody in with no permissions at all is a worse
+    answer than the configured default.
+    """
+    known = set(db.scalars(select(Role.slug)))
     mapping = settings.group_role_map
     for group in groups:
         role = mapping.get(group)
-        if role in ROLES:
+        if role in known:
             return role
-    return settings.authentik_default_role if settings.authentik_default_role in ROLES else "readonly"
+    fallback = settings.authentik_default_role
+    return fallback if fallback in known else "readonly"
 
 
 @router.post("/login", response_model=LoginOut)
@@ -130,12 +141,25 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     token = create_token(user.id, user.username, user.role)
     log_action(db, user, "auth.login", "auth", user.id, {"provider": "local"}, request)
     db.commit()
-    return LoginOut(access_token=token, user=UserOut.model_validate(user))
+    return LoginOut(access_token=token, user=_self(db, user))
+
+
+def _self(db: Session, user: User) -> UserOut:
+    """The signed-in user's own record, carrying what they may do.
+
+    Sent on login and from `/me` so the UI can hide the buttons the API would
+    refuse. It is resolved rather than stored in the token: a role edited while
+    someone is signed in takes effect on their next page load, not at their
+    next login.
+    """
+    out = UserOut.model_validate(user)
+    out.permissions = sorted(caller_permissions(db, user))
+    return out
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)):
-    return user
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return _self(db, user)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +188,20 @@ def list_api_keys(db: Session = Depends(get_db), user: User = Depends(require_se
     return [_key_out(k, now) for k in keys]
 
 
+@router.get("/api-key-roles", response_model=list[str])
+def list_api_key_roles(
+    db: Session = Depends(get_db), user: User = Depends(require_session),
+):
+    """The roles this user may put on a key they mint.
+
+    Offered to the key dialog so it never shows a choice the POST below would
+    refuse. Not a static list any more: which roles exist is an installation's
+    business, and which of them a given user may grant depends on what they
+    hold themselves (see `grantable_roles`).
+    """
+    return grantable_roles(db, caller_permissions(db, user))
+
+
 @router.post("/api-keys", response_model=ApiKeyCreated, status_code=201)
 def create_api_key(
     body: ApiKeyCreate,
@@ -172,7 +210,7 @@ def create_api_key(
     user: User = Depends(require_session),
 ):
     """Mint a key. The plaintext is in this response and nowhere else, ever."""
-    allowed = role_ceiling(user.role)
+    allowed = grantable_roles(db, caller_permissions(db, user))
     if body.role not in allowed:
         # Named explicitly rather than a bare 403: the UI offers only the
         # allowed roles, so anything reaching here is a direct API call whose
@@ -382,7 +420,7 @@ def oidc_callback(
     username = claims.get("preferred_username") or claims.get("username") or sub
     email = claims.get("email")
     groups = _extract_groups(claims, token_data.get("access_token"))
-    role = _resolve_role(groups)
+    role = _resolve_role(db, groups)
 
     user = db.scalar(select(User).where(User.authentik_sub == sub))
     if user is None:

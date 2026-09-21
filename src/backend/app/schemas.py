@@ -1,10 +1,11 @@
+import re
 from datetime import date, datetime
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .models.user import ROLE_RANK
 from .models.vendor_device import VENDOR_SUPPORT_STATUSES
+from .services.permissions import PERMISSION_KEYS
 
 T = TypeVar("T")
 
@@ -17,9 +18,18 @@ MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 
 
+# A role slug's shape. Which slugs *exist* is a question for the database —
+# roles are rows now, and an installation can define its own — so the endpoints
+# check that; this only refuses something that could never be one.
+ROLE_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]{0,49}$")
+
+
 def _validate_role(v: str) -> str:
-    if v not in ROLE_RANK:
-        raise ValueError(f"role must be one of {sorted(ROLE_RANK)}")
+    if not ROLE_SLUG_RE.fullmatch(v or ""):
+        raise ValueError(
+            "role must be a slug: lower-case letters, digits, hyphen or "
+            "underscore, starting with a letter"
+        )
     return v
 
 
@@ -112,12 +122,16 @@ class DeviceUpdate(BaseModel):
     checkout_purpose: str | None = None
     checkout_due: date | None = None
     misc_data: dict | None = None
+    # Absent leaves the device's link overrides alone; an object replaces them
+    # all. See services/device_schema.normalize_link_overrides for the shape.
+    link_overrides: dict | None = None
 
 
 class DeviceOut(DeviceBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    link_overrides: dict = {}
     device_type_key: str | None = None
     device_type_label: str | None = None
     checked_out_by: str | None = None
@@ -258,6 +272,13 @@ class SoftwareTestedDeviceOut(BaseModel):
 class SoftwareTestedDevicesOut(BaseModel):
     software_id: str
     devices: list[SoftwareTestedDeviceOut]
+    # Server-paged, so the window has to say how big the whole list is. The
+    # grid reading this uses an infinite row model, which only stops asking for
+    # the next block once it has been told where the end is — without `total`
+    # it pages on past the data forever.
+    total: int = 0
+    page: int = 1
+    page_size: int = 100
 
 
 class DeviceRelatedCountsOut(BaseModel):
@@ -265,9 +286,37 @@ class DeviceRelatedCountsOut(BaseModel):
 
     vendor_claims: int
     tests: int
-    total: int = 0
-    page: int = 1
-    page_size: int = 100
+    changelog: int = 0
+
+
+class ChangelogChange(BaseModel):
+    """One field a changelog entry reports as having changed."""
+
+    field: str
+    # The device type's own label for the field, resolved when the entry is
+    # read — so a renamed field reads by its current name rather than by
+    # whatever it was called on the day it changed.
+    label: str
+    old: Any = None
+    new: Any = None
+
+
+class ChangelogEntry(BaseModel):
+    """One thing that happened to one device.
+
+    A projection of an audit row, not the row: `detail` and `ip_address` are
+    the auditor's view and are filled in only for an admin (see
+    services/changelog.py for why the rest is built from a whitelist).
+    """
+
+    id: int
+    timestamp: datetime
+    username: str
+    action: str
+    summary: str
+    changes: list[ChangelogChange] = []
+    ip_address: str | None = None
+    detail: dict | None = None
 
 
 class DeviceCompatibleSoftwareOut(BaseModel):
@@ -339,6 +388,36 @@ class VendorDeviceOut(VendorDeviceBase):
     software_id: str
     created_at: datetime
     updated_at: datetime | None = None
+
+
+class VendorDeviceCatalogCreate(VendorDeviceCreate):
+    """A claim created from the catalogue, which has no software of its own.
+
+    On a software version's own page the software is the page. Here it is not,
+    so the row has to name the version it is a claim by — and it is required,
+    because a vendor device that belongs to no version is not a claim about
+    anything. The version is matched exactly; blank means the unversioned row.
+    """
+
+    software_name: str
+    software_version: str = ""
+
+
+class VendorDeviceCatalogOut(VendorDeviceOut):
+    """A vendor claim seen from outside the software version that holds it.
+
+    A vendor device is scoped to one software version, so on that version's own
+    page the software is the page and does not need saying. Searching the whole
+    catalog inverts that: the answer to "who claims to support a Cisco ISR?" is
+    a list of software, and a row that cannot say which one is not an answer.
+    """
+
+    # Filled in by the endpoint from the joined software row rather than read
+    # off the vendor device: reading it through the relationship would be one
+    # query per row, on the page where there are most rows.
+    software_name: str = ""
+    software_version: str = ""
+    software_is_latest: bool = True
 
 
 # ---------- Tests ----------
@@ -518,6 +597,11 @@ class UserOut(BaseModel):
     # True while the user's most recent login is still within the token TTL
     # (stateless JWTs: a login is "current" until its tokens expire).
     is_online: bool = False
+    # What the role grants, resolved at read time. Sent with the signed-in
+    # user's own record so the UI can hide what the API would refuse, rather
+    # than guessing from the role's name — which stops being a reliable guess
+    # the moment an installation defines a role of its own.
+    permissions: list[str] = Field(default_factory=list)
 
 
 class UserCreate(BaseModel):
@@ -556,6 +640,69 @@ class UserUpdate(BaseModel):
         return v if v is None else _validate_role(v)
 
 
+# ---------- Roles ----------
+
+class PermissionOut(BaseModel):
+    """One thing a role can grant, as the role editor lists it."""
+
+    key: str
+    label: str
+    description: str
+    group: str
+
+
+class RoleBase(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+    permissions: list[str] = Field(default_factory=list)
+
+    @field_validator("permissions")
+    @classmethod
+    def _known_permissions(cls, v: list[str]) -> list[str]:
+        unknown = sorted(set(v or []) - set(PERMISSION_KEYS))
+        if unknown:
+            raise ValueError(f"unknown permissions: {', '.join(unknown)}")
+        return list(v or [])
+
+
+class RoleCreate(RoleBase):
+    slug: str
+
+    @field_validator("slug")
+    def _check_slug(cls, v):
+        return _validate_role(v)
+
+
+class RoleUpdate(BaseModel):
+    """Everything about a role except its slug.
+
+    The slug is what users and API keys carry, so renaming one would silently
+    strip the role from everybody holding it. A role that needs a different
+    slug is a new role.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = None
+    permissions: list[str] | None = None
+
+    @field_validator("permissions")
+    @classmethod
+    def _known_permissions(cls, v):
+        return None if v is None else RoleBase._known_permissions(v)
+
+
+class RoleOut(RoleBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    slug: str
+    is_builtin: bool
+    # How many accounts hold it, so deleting one says what it would affect.
+    user_count: int = 0
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
 class PasswordReset(BaseModel):
     """An admin setting another local account's password.
 
@@ -581,9 +728,9 @@ class ApiKeyCreate(BaseModel):
     @field_validator("role")
     @classmethod
     def _role_known(cls, v: str) -> str:
-        if v not in ROLE_RANK:
-            raise ValueError(f"role must be one of {tuple(ROLE_RANK)}")
-        return v
+        # Shape only. Whether the role exists, and whether this user may put it
+        # on a key, are both decided in `api/auth.py` against the role table.
+        return _validate_role(v)
 
     @field_validator("label")
     @classmethod
@@ -695,10 +842,12 @@ class SearchResults(BaseModel):
     devices: list[DeviceOut]
     software: list[SoftwareOut]
     tests: list[TestOut]
+    vendor_devices: list["VendorDeviceCatalogOut"] = Field(default_factory=list)
     # Totals ignoring the per-group limit, so the UI can say "showing 50 of 132".
     devices_total: int = 0
     software_total: int = 0
     tests_total: int = 0
+    vendor_devices_total: int = 0
 
 
 # ---------- Suggestions ----------

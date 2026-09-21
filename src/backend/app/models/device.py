@@ -87,6 +87,19 @@ class Device(TimestampMixin, Base):
     # installation-defined and lives in the document.
     unique_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True)
     _data: Mapped[dict] = mapped_column("data", MutableDict.as_mutable(JSONB), default=dict)
+    # How this one device's linked fields differ from their schema defaults:
+    # `{"lan_ip": {"scheme": "https", "port": 8443}}`, keyed by field key.
+    #
+    # A column rather than a key in the document, because it is not a field
+    # value and must never be treated as one. Anything inside `data` is offered
+    # to plugins by role, and the address roles are read raw — a scheme in the
+    # value of `lan_ip` reaches `socket.create_connection` and takes the device
+    # offline. Keeping the link's opinion out here means the address stays an
+    # address. It is also why a key here can collide with nothing: field keys
+    # and envelope keys live in different namespaces.
+    link_overrides: Mapped[dict] = mapped_column(
+        MutableDict.as_mutable(JSONB), nullable=False, default=dict
+    )
     checked_out_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
     updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))

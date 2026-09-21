@@ -1,16 +1,17 @@
-"""Global search across devices, software and tests."""
+"""Global search across devices, software, tests and vendor claims."""
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Device, Test, Software, User
+from ..models import Device, Test, Software, User, VendorDevice
 from ..schemas import DeviceOut, SearchResults, TestOut, SoftwareOut
 from ..services.device_schema import device_field_expression, union_field_map
 from ..services.entity_fields import entity_field_expression, get_entity_fields
 from .devices import device_out
 from .deps import get_current_user
+from .vendor_devices import CATALOG_TEXT_FILTERS, _catalog_rows
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -72,15 +73,37 @@ def global_search(
         .order_by(Test.created_at.desc())
     )
 
+    # Vendor claims are the fourth thing a search term can be about, and the
+    # one that cannot be found any other way: a claim lives under one software
+    # version, so "who says they support this box?" has no page to start from.
+    # The software's name and version match too — a claim is identified by the
+    # pair, not by the hardware alone.
+    vendor_q = (
+        select(VendorDevice, Software)
+        .join(Software, VendorDevice.software_id == Software.id)
+        .where(
+            or_(
+                *[column.ilike(like) for column in CATALOG_TEXT_FILTERS.values()],
+                Software.name.ilike(like),
+            )
+        )
+        .order_by(Software.name, VendorDevice.match_key)
+    )
+
     devices = db.scalars(device_q.limit(limit)).all()
     software = db.scalars(software_q.limit(limit)).all()
     tests = db.scalars(tests_q.limit(limit)).all()
+    vendor_pairs = [tuple(row) for row in db.execute(vendor_q.limit(limit)).all()]
 
     return SearchResults(
         devices=[device_out(db, d, {}) for d in devices],
         software=[SoftwareOut.model_validate(t) for t in software],
         tests=[TestOut.model_validate(t) for t in tests],
+        vendor_devices=_catalog_rows(db, vendor_pairs),
         devices_total=_count(db, device_q) if len(devices) == limit else len(devices),
         software_total=_count(db, software_q) if len(software) == limit else len(software),
         tests_total=_count(db, tests_q) if len(tests) == limit else len(tests),
+        vendor_devices_total=(
+            _count(db, vendor_q) if len(vendor_pairs) == limit else len(vendor_pairs)
+        ),
     )

@@ -6,7 +6,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db import Base, TimestampMixin, new_uuid
 
-FILTER_ENTITIES = ("devices", "software", "tests", "audit", "users")
+FILTER_ENTITIES = (
+    "devices", "software", "tests", "audit", "users",
+    # The cross-software vendor claim catalogue. Unscoped, unlike the
+    # per-software "vendor_devices:<id>" below: this page is one list of
+    # every claim, so there is only ever one view of it to save.
+    "vendor_device_catalog",
+)
 
 # Device inventory pages differ per device type — a router page and a phone
 # page show different columns from the same table — so their saved views are

@@ -90,6 +90,9 @@ SCHEMA = {
         "notes": [
             "A vendor's compatibility CLAIM about hardware, attached to a piece of "
             "software. Not test evidence, and not necessarily hardware this fleet owns.",
+            "Asked from the software's end with `list_vendor_supported_devices`, and "
+            "from the hardware's end — across every software at once — with "
+            "`find_vendor_devices`.",
         ],
     },
     "audit_log": {

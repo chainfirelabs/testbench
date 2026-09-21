@@ -100,7 +100,8 @@ server, and every response echoes back what it resolved to.
 | `get_software(identifier, version?)` | Everything about one piece of software |
 | `list_software_versions(name)` | What versions of this exist? |
 | `list_devices_tested_with(software, version?, limit?)` | What has it **been run against**? |
-| `list_vendor_supported_devices(software, version?, ...)` | What does the **vendor claim**? |
+| `list_vendor_supported_devices(software, version?, ...)` | What does the **vendor claim** about this software? |
+| `find_vendor_devices(search?, software?, make?, model?, support_status?, ...)` | **Who claims** to support this hardware? |
 | `list_software_tested_on(device, limit?)` | What has been run **against this device**? |
 | `find_tests(device?, software?, outcome?, tag?, since?, until?, ...)` | Individual test runs |
 | `search_audit(user?, action?, entity?, since?, until?, ...)` | Who changed what (admin only) |
@@ -114,6 +115,12 @@ model, and they routinely disagree:
   claim. Possibly hardware nobody here owns, and carrying no test evidence.
 - **`list_devices_tested_with`** — devices it has actually been run against,
   with pass/fail/warn counts. Absence means *untested*, not *unsupported*.
+
+`find_vendor_devices` asks the claim question from the other end — "who says
+they support a Cisco ISR 4331?" — across every software version at once. No
+single software's list can answer that, and each row it returns names the
+software and version the claim belongs to, marking a claim on a superseded
+version as `software_is_latest: false`.
 
 A single `get_supported_devices` would have to pick one, and whichever it picked
 would be wrong half the time — silently, with the model presenting it

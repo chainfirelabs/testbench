@@ -2,8 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   deviceActionUnavailableReason,
+  deviceAddressUrl,
   deviceDownloadFilename,
+  deviceLinkTarget,
   fieldAppearsInDeviceList,
+  isDeviceAddressField,
   loadDevicePages,
 } from '../src/deviceInventory.ts'
 
@@ -62,7 +65,7 @@ test('type visibility overrides and permissions still block actions', () => {
   const hidden = new Map(schemas)
   hidden.set('router', routerFields.map((f) => ({ ...f, visible: f.key !== 'mgmt' })))
   assert.match(deviceActionUnavailableReason(action, router, hidden, true), /add a value/)
-  assert.match(deviceActionUnavailableReason(action, router, schemas, false), /write permission/)
+  assert.match(deviceActionUnavailableReason(action, router, schemas, false), /permission to edit devices/)
   assert.match(deviceActionUnavailableReason(action, { ...router, device_type_key: 'unknown' }, schemas, true), /not enabled/)
 })
 
@@ -77,4 +80,137 @@ test('list visibility is independent from complete field visibility', () => {
   assert.equal(fieldAppearsInDeviceList({ visible: true, list_visible: true }), true)
   assert.equal(fieldAppearsInDeviceList({ visible: true, list_visible: false }), false)
   assert.equal(fieldAppearsInDeviceList({ visible: false, list_visible: true }), false)
+})
+
+// ---------- address fields as links ----------
+
+test('a bare address becomes an http page', () => {
+  assert.equal(deviceAddressUrl('192.168.1.20'), 'http://192.168.1.20/')
+  assert.equal(deviceAddressUrl('  10.0.0.5  '), 'http://10.0.0.5/')
+  assert.equal(deviceAddressUrl('switch-4.lab.example.com'), 'http://switch-4.lab.example.com/')
+})
+
+test('a port or a path on the address is kept', () => {
+  assert.equal(deviceAddressUrl('10.0.0.5:8080'), 'http://10.0.0.5:8080/')
+  assert.equal(deviceAddressUrl('10.0.0.5/admin'), 'http://10.0.0.5/admin')
+})
+
+test('an address that carries its own scheme is honoured as written', () => {
+  assert.equal(deviceAddressUrl('https://10.0.0.5'), 'https://10.0.0.5/')
+  assert.equal(deviceAddressUrl('http://10.0.0.5:8443/ui'), 'http://10.0.0.5:8443/ui')
+})
+
+test('a bare IPv6 address is bracketed, a host:port is not', () => {
+  assert.equal(deviceAddressUrl('fd00::1'), 'http://[fd00::1]/')
+  assert.equal(deviceAddressUrl('[fd00::1]'), 'http://[fd00::1]/')
+  // One colon is host:port, which must not be mistaken for an address half.
+  assert.equal(deviceAddressUrl('10.0.0.5:443'), 'http://10.0.0.5:443/')
+})
+
+test('nothing that is not a web address becomes a link', () => {
+  for (const value of [
+    null, undefined, '', '   ',
+    'javascript:alert(1)',          // never a link, whatever it is stored as
+    'file:///etc/passwd',
+    'ftp://10.0.0.5',
+    'not a host',                   // whitespace
+    '10.0.0.5:notaport',
+  ]) {
+    assert.equal(deviceAddressUrl(value), null, `expected no link for ${JSON.stringify(value)}`)
+  }
+})
+
+test('linking is the schema flag, not the field name or its role', () => {
+  // Any field can be opted in — a "Vendor Page" URL is not an address — and an
+  // address field can be opted out. The role only decides the seeded default,
+  // which the backend applies once; by the time the UI sees a field the
+  // answer is already on it.
+  assert.equal(isDeviceAddressField({ opens_web_page: true }), true)
+  assert.equal(isDeviceAddressField({ opens_web_page: false }), false)
+  // Absent (an older server, or a payload that predates the column) is not a
+  // reason to start linking values.
+  assert.equal(isDeviceAddressField({}), false)
+  assert.equal(isDeviceAddressField({ opens_web_page: undefined }), false)
+})
+
+// ---------- the scheme and port a link uses ----------
+
+const lanIp = { key: 'lan_ip', link_scheme: 'http', link_port: null }
+const httpsField = { key: 'lan_ip', link_scheme: 'https', link_port: 8443 }
+
+test('a field with no link settings at all still resolves to plain http', () => {
+  // An older server, or a payload written before the columns existed.
+  assert.deepEqual(deviceLinkTarget(undefined, undefined), { scheme: 'http', port: null })
+  assert.deepEqual(deviceLinkTarget({ key: 'lan_ip' }, {}), { scheme: 'http', port: null })
+})
+
+test("the field's own default is used when the device says nothing", () => {
+  assert.equal(deviceAddressUrl('10.0.0.5', httpsField), 'https://10.0.0.5:8443/')
+  assert.equal(deviceAddressUrl('10.0.0.5', httpsField, {}), 'https://10.0.0.5:8443/')
+  // An override for a different field is not this field's business.
+  assert.equal(
+    deviceAddressUrl('10.0.0.5', lanIp, { wan_ip: { scheme: 'https' } }),
+    'http://10.0.0.5/',
+  )
+})
+
+test("a device's override beats the field's default", () => {
+  assert.equal(
+    deviceAddressUrl('10.0.0.5', lanIp, { lan_ip: { scheme: 'https', port: 8443 } }),
+    'https://10.0.0.5:8443/',
+  )
+  // And in the other direction: a field that defaults to https, on one device
+  // that answers plain http.
+  assert.equal(
+    deviceAddressUrl('10.0.0.5', httpsField, { lan_ip: { scheme: 'http', port: 80 } }),
+    'http://10.0.0.5/',
+  )
+})
+
+test('an override may set only one of the two, keeping the other', () => {
+  assert.equal(
+    deviceAddressUrl('10.0.0.5', httpsField, { lan_ip: { port: 9443 } }),
+    'https://10.0.0.5:9443/',
+  )
+  assert.equal(
+    deviceAddressUrl('10.0.0.5', httpsField, { lan_ip: { scheme: 'http' } }),
+    'http://10.0.0.5:8443/',
+  )
+})
+
+test('a scheme or port written into the value beats every configured default', () => {
+  // The most specific thing there is, and an operator typed it.
+  assert.equal(
+    deviceAddressUrl('https://10.0.0.5', lanIp, { lan_ip: { scheme: 'http' } }),
+    'https://10.0.0.5/',
+  )
+  assert.equal(
+    deviceAddressUrl('10.0.0.5:8080', httpsField, { lan_ip: { port: 9443 } }),
+    'https://10.0.0.5:8080/',
+  )
+  // Including a port that happens to be the scheme's own, which `url.port`
+  // reports as blank and so cannot be used to detect it.
+  assert.equal(
+    deviceAddressUrl('10.0.0.5:80', lanIp, { lan_ip: { port: 8080 } }),
+    'http://10.0.0.5/',
+  )
+})
+
+test('an override port applies to a bare IPv6 address', () => {
+  assert.equal(
+    deviceAddressUrl('fd00::1', lanIp, { lan_ip: { scheme: 'https', port: 8443 } }),
+    'https://[fd00::1]:8443/',
+  )
+  // A bracketed address that names its own port keeps it.
+  assert.equal(
+    deviceAddressUrl('[fd00::1]:8080', lanIp, { lan_ip: { port: 8443 } }),
+    'http://[fd00::1]:8080/',
+  )
+})
+
+test('an override cannot turn a value into something that is not a web page', () => {
+  // The whitelist is applied to the result, so neither half can smuggle one in.
+  assert.equal(deviceAddressUrl('javascript:alert(1)', lanIp, { lan_ip: { scheme: 'https' } }), null)
+  assert.equal(deviceAddressUrl('10.0.0.5', lanIp, { lan_ip: { scheme: 'ftp' } }), 'http://10.0.0.5/')
+  assert.equal(deviceAddressUrl('', lanIp, { lan_ip: { scheme: 'https' } }), null)
 })

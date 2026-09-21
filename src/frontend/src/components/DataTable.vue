@@ -10,6 +10,7 @@ import {
   type SelectionColumnDef,
 } from 'ag-grid-community'
 import { useIsCardList, useIsMobile } from '../breakpoints'
+import { ValueChecklistFilter } from '../valueChecklistFilter'
 import CardList, { type CardAction, type CardField } from './CardList.vue'
 
 // Keep all Community features available to dynamically generated column
@@ -136,6 +137,15 @@ const props = withDefaults(
     rows?: any[]
     /** Load only the requested window instead of retaining the full list. */
     remoteLoader?: (request: RemoteTableRequest) => Promise<RemoteTableResult>
+    /**
+     * Every distinct value a column holds, for its checklist filter.
+     *
+     * Only the page can answer this for a server-paged table — the browser
+     * holds one window of the rows, and the column has the rest. Return an
+     * empty array (or leave the prop off) for a column with no answer; the
+     * filter falls back to the values the loaded rows happen to carry.
+     */
+    filterValues?: (colId: string, colDef: any) => Promise<any[]> | any[]
     editable?: boolean
     /** Rows that have unsaved (dirty) changes, keyed by row id. */
     dirtyIds?: Set<string>
@@ -175,6 +185,7 @@ const props = withDefaults(
   {
     rows: () => [],
     remoteLoader: undefined,
+    filterValues: undefined,
     editable: false,
     dirtyIds: () => new Set<string>(),
     isRowDirty: null,
@@ -208,6 +219,21 @@ const selectedCount = ref(0)
 const isRemote = computed(() => !!props.remoteLoader)
 let remoteSearchTimer: ReturnType<typeof setTimeout> | null = null
 
+/*
+ * How many rows a server-paged table fetches at a time.
+ *
+ * Tracks the pagination page size rather than sitting at `defaultPageSize`
+ * forever. A block smaller than the page means the page is only ever partly
+ * loaded: the rows past the first block render as loading placeholders, and
+ * anything that walks the page's nodes — the select-all header below, the
+ * checklist filter's value harvest — sees only the rows that arrived. Picking
+ * 500 from the page-size selector and getting 100 selected rows was this.
+ *
+ * AG Grid resets the cache when this changes, which is what a new page size
+ * needs anyway.
+ */
+const remoteBlockSize = ref(props.defaultPageSize)
+
 const remoteDatasource = {
   async getRows(params: any) {
     if (!props.remoteLoader) return
@@ -219,10 +245,31 @@ const remoteDatasource = {
         sortModel: params.sortModel || [],
         filterModel: params.filterModel || {},
       })
+      /*
+       * The row count is what tells the grid where the list ends.
+       *
+       * Without one, an infinite row model only infers the end from a block
+       * coming back shorter than it asked for — so a list whose every block is
+       * full is a list with no end, and the grid keeps asking for the next one
+       * past the data. A loader whose endpoint forgot to report a total (the
+       * tested-devices response did, for one release) turned a long list into
+       * a table that paged forever.
+       *
+       * A short block is still the honest end, so it is used as the count;
+       * a full block with no total leaves the grid to keep asking, which is
+       * the only thing it can correctly do.
+       */
+      const rows = result.rows || []
+      const asked = Math.max(1, params.endRow - params.startRow)
+      const total = Number.isFinite(result.total)
+        ? result.total
+        : rows.length < asked
+          ? params.startRow + rows.length
+          : undefined
       if (typeof params.success === 'function') {
-        params.success({ rowData: result.rows, rowCount: result.total })
+        params.success({ rowData: rows, rowCount: total })
       } else {
-        params.successCallback(result.rows, result.total)
+        params.successCallback(rows, total)
       }
     } catch {
       if (typeof params.fail === 'function') params.fail()
@@ -488,129 +535,15 @@ const columnDefs = computed(() => {
   return cols
 })
 
-/** Community-edition equivalent of AG Grid's Enterprise Set Filter. */
-class ValueChecklistFilter {
-  private params: any
-  private gui!: HTMLDivElement
-  private list!: HTMLDivElement
-  private search!: HTMLInputElement
-  // Store excluded raw values so newly loaded values remain visible by default.
-  private excluded = new Map<string, any>()
-  private values = new Map<string, { value: any; label: string }>()
-
-  init(params: any) {
-    this.params = params
-    this.gui = document.createElement('div')
-    this.gui.className = 'value-checklist-filter'
-    this.search = document.createElement('input')
-    this.search.type = 'search'
-    this.search.placeholder = 'Find value…'
-    this.search.setAttribute('aria-label', 'Find filter value')
-    this.search.addEventListener('input', () => this.renderList())
-    this.gui.appendChild(this.search)
-
-    const actions = document.createElement('div')
-    actions.className = 'value-checklist-actions'
-    actions.append(this.actionButton('Select all', () => this.setAll(true)))
-    actions.append(this.actionButton('Clear', () => this.setAll(false)))
-    this.gui.appendChild(actions)
-    this.list = document.createElement('div')
-    this.list.className = 'value-checklist-options'
-    this.gui.appendChild(this.list)
-    this.refreshValues()
-  }
-
-  getGui() { return this.gui }
-  afterGuiAttached() { this.refreshValues(); this.search.focus() }
-  isFilterActive() { return this.excluded.size > 0 }
-  doesFilterPass(p: any) { return !this.excluded.has(this.key(this.params.getValue(p.node))) }
-  getModel() {
-    return this.isFilterActive()
-      ? { filterType: 'valueChecklist', excluded: [...this.excluded.values()] }
-      : null
-  }
-  setModel(model: any) {
-    this.excluded.clear()
-    for (const value of model?.excluded || []) this.excluded.set(this.key(value), value)
-    if (this.list) this.renderList()
-  }
-
-  private key(value: any): string {
-    if (value == null || value === '') return '__blank__'
-    if (typeof value === 'object') return `object:${JSON.stringify(value)}`
-    return `${typeof value}:${String(value)}`
-  }
-
-  private label(value: any): string {
-    if (value == null || value === '') return '(Blanks)'
-    const colDef = this.params.column?.getColDef?.()
-    if (typeof colDef?.valueFormatter === 'function') {
-      const formatted = colDef.valueFormatter({
-        value, data: null, node: null, column: this.params.column,
-        colDef, api: this.params.api, context: this.params.context,
-      })
-      if (formatted != null && formatted !== '') return String(formatted)
-    }
-    return typeof value === 'object' ? JSON.stringify(value) : String(value)
-  }
-
-  private refreshValues() {
-    const next = new Map<string, { value: any; label: string }>()
-    this.params.api.forEachLeafNode((node: any) => {
-      const value = this.params.getValue(node)
-      next.set(this.key(value), { value, label: this.label(value) })
-    })
-    // Infinite-row tables only have the currently cached windows in the row
-    // model. Keep values seen on earlier windows so opening a filter after
-    // paging does not make those choices disappear.
-    for (const [key, item] of this.values) if (!next.has(key)) next.set(key, item)
-    this.values = new Map([...next].sort((a, b) => a[1].label.localeCompare(b[1].label)))
-    this.renderList()
-  }
-
-  private actionButton(label: string, run: () => void): HTMLButtonElement {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.textContent = label
-    button.addEventListener('click', run)
-    return button
-  }
-
-  private setAll(selected: boolean) {
-    this.excluded.clear()
-    if (!selected) for (const [key, item] of this.values) this.excluded.set(key, item.value)
-    this.renderList()
-    this.params.filterChangedCallback()
-  }
-
-  private renderList() {
-    if (!this.list) return
-    this.list.replaceChildren()
-    const query = this.search?.value.trim().toLocaleLowerCase() || ''
-    for (const [key, item] of this.values) {
-      if (query && !item.label.toLocaleLowerCase().includes(query)) continue
-      const row = document.createElement('label')
-      row.className = 'value-checklist-option'
-      const checkbox = document.createElement('input')
-      checkbox.type = 'checkbox'
-      checkbox.checked = !this.excluded.has(key)
-      checkbox.addEventListener('change', () => {
-        if (checkbox.checked) this.excluded.delete(key)
-        else this.excluded.set(key, item.value)
-        this.params.filterChangedCallback()
-      })
-      const text = document.createElement('span')
-      text.textContent = item.label
-      row.append(checkbox, text)
-      this.list.appendChild(row)
-    }
-  }
-}
-
 const defaultColDef = computed(() => ({
   flex: 1,
   minWidth: 90,
   filter: ValueChecklistFilter,
+  // Handed to every column's filter, which asks it for the column's distinct
+  // values. Server-paged tables need it: the row model only ever holds the
+  // window on screen, so without it the checklist offers a page's worth of
+  // values and silently hides the rest of the column.
+  filterParams: { valuesProvider: props.filterValues || undefined },
   sortable: true,
   // Never editable in card mode: the grid is off-screen there and a cell edit
   // has no way to be seen, let alone saved.
@@ -885,11 +818,20 @@ class RemoteSelectAllHeader {
     this.params.api.removeEventListener('paginationChanged', this.changed)
   }
 
-  private pageNodes(): any[] {
+  /** How many rows this page holds, loaded or not. */
+  private pageSpan(): { first: number; last: number } {
     const api = this.params.api
     const size = api.paginationGetPageSize?.() || props.defaultPageSize
     const first = (api.paginationGetCurrentPage?.() || 0) * size
-    const last = Math.min(first + size, api.getDisplayedRowCount?.() || 0)
+    // `getDisplayedRowCount` counts the infinite model's placeholder row past
+    // the end of the data; the pagination row count does not.
+    const total = api.paginationGetRowCount?.() ?? api.getDisplayedRowCount?.() ?? 0
+    return { first, last: Math.min(first + size, total) }
+  }
+
+  private pageNodes(): any[] {
+    const api = this.params.api
+    const { first, last } = this.pageSpan()
     const nodes = []
     for (let index = first; index < last; index++) {
       const node = api.getDisplayedRowAtIndex(index)
@@ -905,10 +847,20 @@ class RemoteSelectAllHeader {
 
   private refresh() {
     const nodes = this.pageNodes()
+    const { first, last } = this.pageSpan()
+    const expected = Math.max(0, last - first)
+    // Rows still in flight cannot be selected, so a half-loaded page is not
+    // offered as one: ticking it would silently select fewer rows than it
+    // claims — the bug this header had when the block size lagged the page
+    // size. The listeners re-run this the moment the block lands.
+    const ready = nodes.length === expected
     const selected = nodes.filter((node) => node.isSelected()).length
-    this.input.checked = nodes.length > 0 && selected === nodes.length
-    this.input.indeterminate = selected > 0 && selected < nodes.length
-    this.input.disabled = nodes.length === 0
+    this.input.checked = ready && nodes.length > 0 && selected === nodes.length
+    this.input.indeterminate = selected > 0 && (!ready || selected < nodes.length)
+    this.input.disabled = !ready || nodes.length === 0
+    this.input.title = ready
+      ? 'Select all rows on this page'
+      : 'Loading this page…'
   }
 }
 
@@ -1073,6 +1025,9 @@ function onPaginationChanged(e: any) {
   // v32: getPaginationModel() was removed; read the page size directly
   const size = e.api.paginationGetPageSize?.()
   if (size) emit('page-size-change', size)
+  // A server-paged table fetches in blocks; keep a block and a page the same
+  // size so a whole page is always loaded together (see remoteBlockSize).
+  if (size && isRemote.value && size !== remoteBlockSize.value) remoteBlockSize.value = size
   syncCardRows()
 }
 
@@ -1111,8 +1066,25 @@ function onSelectionChanged() {
   emit('selection-change', rows)
 }
 
+/**
+ * Drop the selection, in the grid and in whatever the parent is holding.
+ *
+ * The grid is the one that keeps the selection: a parent that empties its own
+ * copy leaves the grid's row nodes ticked, and the next hundred rows the user
+ * ticks land on top of a hundred the grid still thinks are selected. That is
+ * what made a delete of 100 followed by a selection of 100 read as 200.
+ *
+ * `deselectAll` fires `selectionChanged`, so the count and the parent's copy
+ * both follow from the one call — but only while there is something selected,
+ * hence the explicit emit for the case where there is not.
+ */
 function clearSelection() {
-  gridApi.value?.deselectAll()
+  const api = gridApi.value
+  if (!api) return
+  api.deselectAll()
+  if (selectedCount.value) return
+  selectedCount.value = 0
+  emit('selection-change', [])
 }
 
 /*
@@ -1322,6 +1294,32 @@ function reapplyView() {
   syncCards()
 }
 
+/**
+ * Re-read the rows from scratch, including how many there are.
+ *
+ * The heavier sibling of `reapplyView`, for changes to *which rows exist*
+ * rather than to what they hold: a row created, deleted or imported. A
+ * server-paged table has to purge rather than refresh for those — a refresh
+ * reloads the blocks it already has and keeps the row count it was last told,
+ * so a new row lands beyond the end of a table that does not know it grew, and
+ * a deleted one leaves a gap. That is why a device added from the dialog only
+ * appeared after a browser reload.
+ *
+ * Purging blanks the table while the first block is refetched, which is why
+ * the periodic refreshes still use `reapplyView` — for those, the rows are the
+ * same rows and only their values have moved on.
+ */
+function reload() {
+  const api = gridApi.value
+  if (!api) return
+  if (isRemote.value) {
+    api.purgeInfiniteCache?.()
+    return
+  }
+  api.refreshClientSideRowModel('filter')
+  syncCards()
+}
+
 /** Is a cell editor open? Callers use this to hold off on writing to rows. */
 function isEditing(): boolean {
   return (gridApi.value?.getEditingCells?.() || []).length > 0
@@ -1333,6 +1331,8 @@ defineExpose({
   gridApi,
   refreshRows,
   reapplyView,
+  reload,
+  clearSelection,
   isEditing,
   getSelectedRows: () => gridApi.value?.getSelectedRows() || [],
 })
@@ -1415,7 +1415,7 @@ defineExpose({
         :columnDefs="columnDefs"
         :rowData="isRemote ? undefined : rows"
         :rowModelType="isRemote ? 'infinite' : 'clientSide'"
-        :cacheBlockSize="defaultPageSize"
+        :cacheBlockSize="remoteBlockSize"
         :maxBlocksInCache="isRemote ? 2 : undefined"
         :theme="theme"
         :loadThemeGoogleFonts="false"

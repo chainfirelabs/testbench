@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
-import { rolesUpTo } from '../constants'
 import { useAuthStore } from '../stores/auth'
 import { useNotificationsStore, type Notification } from '../stores/notifications'
 
@@ -30,9 +29,27 @@ const label = ref('')
 const role = ref('readonly')
 const expiresIn = ref<string>('90')
 
-// Only the roles this user may actually grant. The backend enforces the same
-// ceiling; this just keeps the UI from offering a choice that would 403.
-const roleOptions = computed(() => rolesUpTo(auth.user?.role))
+/*
+ * Only the roles this user may actually put on a key.
+ *
+ * Asked of the server rather than worked out here. Which roles exist is an
+ * installation's business now, and whether this user may grant one is a
+ * comparison of permission sets — `grantable_roles` in the backend — not a
+ * position on a three-rung ladder the browser could reconstruct. The POST
+ * applies the same rule, so this only keeps the dropdown from offering a
+ * choice that would 403.
+ */
+const roleOptions = ref<string[]>([])
+
+async function loadRoleOptions() {
+  try {
+    roleOptions.value = await api<string[]>('/auth/api-key-roles')
+  } catch {
+    // The dialog still works: "readonly" is the default and the least a role
+    // can grant, so it is the one choice that is always safe to offer.
+    roleOptions.value = ['readonly']
+  }
+}
 
 // The plaintext, held in memory only for as long as this page is open. There is
 // no endpoint that can return it again.
@@ -157,6 +174,7 @@ async function loadNotes(page = 1) {
 
 onMounted(() => {
   load()
+  loadRoleOptions()
   loadNotes()
   // Opening the archive is reading them. Leaving the badge up over a list the
   // user is looking at is the kind of thing that teaches people to ignore it.

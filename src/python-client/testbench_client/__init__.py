@@ -10,9 +10,10 @@ with TestBench.from_env() as tb:
 ```
 
 Authenticates with a TestBench API key (`tb_<prefix>_<secret>`), minted
-per user under Profile -> API keys. The key carries a role: a `readonly` one
-can list and inspect, and needs `tester` or better to check devices out or
-record results.
+per user under Profile -> API keys. The key carries a role, and a role is a set
+of permissions the installation defines — so what a key may do is
+`tb.whoami().permissions`, not the role's name. Reading needs nothing;
+`devices.edit` checks a device out and `tests.edit` records a result.
 """
 
 __version__ = "0.1.0"
@@ -32,17 +33,28 @@ from .errors import (
     ValidationError,
 )
 from .models import (
+    AUDIT_VIEW,
     DEVICE_STATUSES,
+    DEVICES_EDIT,
     FAIL,
     PASS,
+    PLUGINS_MANAGE,
+    SCHEMA_MANAGE,
+    SETTINGS_MANAGE,
+    SOFTWARE_EDIT,
     TEST_OUTCOMES,
     TEST_TAGS,
+    TESTS_EDIT,
+    USERS_MANAGE,
+    VENDOR_SUPPORT_STATUSES,
+    VIEWS_SAVE,
     WARN,
     Device,
     DeviceType,
     Identity,
     Software,
     Test,
+    VendorDevice,
 )
 
 __all__ = [
@@ -51,13 +63,24 @@ __all__ = [
     "DeviceType",
     "Software",
     "Test",
+    "VendorDevice",
     "Identity",
     "DEVICE_STATUSES",
     "TEST_OUTCOMES",
     "TEST_TAGS",
+    "VENDOR_SUPPORT_STATUSES",
     "PASS",
     "FAIL",
     "WARN",
+    "DEVICES_EDIT",
+    "SOFTWARE_EDIT",
+    "TESTS_EDIT",
+    "VIEWS_SAVE",
+    "AUDIT_VIEW",
+    "USERS_MANAGE",
+    "SCHEMA_MANAGE",
+    "PLUGINS_MANAGE",
+    "SETTINGS_MANAGE",
     "TestBenchError",
     "TransportError",
     "AuthenticationError",

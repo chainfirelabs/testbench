@@ -45,6 +45,18 @@ class DeviceFieldDefinition(TimestampMixin, Base):
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     indexed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     unique_value: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The value is a web address, so the UI offers it as a link to the device's
+    # own page. Presentation rather than meaning, but it belongs to the field
+    # rather than to one type's layout: a management address is an address
+    # wherever it appears.
+    opens_web_page: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # The installation's default for that link. Per field rather than per
+    # installation because the right answer differs between fields: a LAN
+    # address may be https on 8443 while a vendor support page is plain http.
+    # A single device that disagrees says so in its own `link_overrides`.
+    link_scheme: Mapped[str] = mapped_column(String(5), nullable=False, default="http")
+    # Null means the scheme's own default port, which is the usual case.
+    link_port: Mapped[int | None] = mapped_column(Integer)
     # The semantic name a plugin asks for, so plugins depend on meaning rather
     # than on one installation's choice of field names.
     plugin_role: Mapped[str | None] = mapped_column(String(50), index=True)

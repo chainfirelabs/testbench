@@ -16,7 +16,7 @@ from ..services.ai_configuration import (
 )
 from ..services.audit import log_action
 from ..services.plugin_host import registry
-from .deps import require_admin
+from .deps import require_settings_manage
 
 router = APIRouter(prefix="/ai", tags=["ai-providers"])
 
@@ -71,12 +71,12 @@ def _apply(item: AiProviderProfile, body: ProfileIn) -> None:
 
 
 @router.get("/providers")
-def list_profiles(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def list_profiles(db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     return [_out(item) for item in db.scalars(select(AiProviderProfile).order_by(AiProviderProfile.name))]
 
 
 @router.post("/providers", status_code=201)
-def create_profile(body: ProfileIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def create_profile(body: ProfileIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     item = AiProviderProfile()
     _apply(item, body)
     db.add(item)
@@ -90,7 +90,7 @@ def create_profile(body: ProfileIn, request: Request, db: Session = Depends(get_
 
 
 @router.put("/providers/{profile_id}")
-def update_profile(profile_id: str, body: ProfileIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def update_profile(profile_id: str, body: ProfileIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     item = db.get(AiProviderProfile, profile_id)
     if item is None: raise HTTPException(404, "AI provider not found")
     _apply(item, body)
@@ -104,7 +104,7 @@ def update_profile(profile_id: str, body: ProfileIn, request: Request, db: Sessi
 
 
 @router.delete("/providers/{profile_id}", status_code=204)
-def delete_profile(profile_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def delete_profile(profile_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     item = db.get(AiProviderProfile, profile_id)
     if item is None: raise HTTPException(404, "AI provider not found")
     if db.scalar(select(AiPluginDefault.plugin_id).where(AiPluginDefault.profile_id == profile_id)):
@@ -138,7 +138,7 @@ def _model_request(item: AiProviderProfile) -> tuple[str, dict[str, str]]:
 
 
 @router.post("/providers/{profile_id}/refresh-models")
-def refresh_models(profile_id: str, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def refresh_models(profile_id: str, db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     item = db.get(AiProviderProfile, profile_id)
     if item is None: raise HTTPException(404, "AI provider not found")
     try:
@@ -159,7 +159,7 @@ def refresh_models(profile_id: str, db: Session = Depends(get_db), user: User = 
 
 
 @router.get("/plugin-defaults")
-def list_defaults(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def list_defaults(db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     result = []
     for plugin_id in sorted(AI_PLUGINS):
         helm = helm_ai_configuration(registry.manifest(plugin_id))
@@ -175,7 +175,7 @@ def list_defaults(db: Session = Depends(get_db), user: User = Depends(require_ad
 
 
 @router.put("/plugin-defaults/{plugin_id}")
-def put_default(plugin_id: str, body: DefaultIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def put_default(plugin_id: str, body: DefaultIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_settings_manage)):
     if plugin_id not in AI_PLUGINS: raise HTTPException(404, "AI plugin not found")
     if helm_ai_configuration(registry.manifest(plugin_id)).get("locked"):
         raise HTTPException(409, "This plugin's AI settings are managed by Helm")

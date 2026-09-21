@@ -24,7 +24,8 @@ from ..services.device_schema import (
 from ..services.plugin_configuration import resolve_plugin_configuration, validate_plugin_configuration
 from ..services.ai_configuration import resolve_ai_configuration, validate_ai_profile_references
 from ..services.plugin_host import registry
-from .deps import get_current_user, require_admin, require_write
+from .deps import get_current_user, require_plugins_manage, require_devices_edit
+from ..services.permissions import caller_permissions, satisfies_role
 
 router = APIRouter(prefix="/plugins", tags=["plugins"])
 host_router = APIRouter(prefix="/plugin-host", tags=["plugin-host"])
@@ -147,7 +148,9 @@ def list_actions(
                 contributed["unavailable_reason"] = (
                     "this plugin is not enabled for any device type"
                 )
-            elif action.get("required_user_role") and user.role != action["required_user_role"]:
+            elif action.get("required_user_role") and not satisfies_role(
+                db, caller_permissions(db, user), action["required_user_role"]
+            ):
                 contributed["unavailable_reason"] = (
                     f"{action['required_user_role']} permission is required"
                 )
@@ -158,7 +161,7 @@ def list_actions(
 
 
 @router.get("/status")
-def plugin_status(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def plugin_status(db: Session = Depends(get_db), user: User = Depends(require_plugins_manage)):
     """Installed plugins, their health, and the device types each may act on."""
     types = list(db.scalars(select(DeviceType)))
     assignments = {item.key: get_allowed_plugins(db, item.id) for item in types}
@@ -177,7 +180,7 @@ def plugin_status(db: Session = Depends(get_db), user: User = Depends(require_ad
 
 
 @router.post("/refresh")
-def refresh_plugins(user: User = Depends(require_admin)):
+def refresh_plugins(user: User = Depends(require_plugins_manage)):
     registry.refresh()
     return registry.status()
 
@@ -189,7 +192,7 @@ def invoke_action(
     body: InvokeIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_write),
+    user: User = Depends(require_devices_edit),
 ):
     """Run one plugin action, after re-deciding whether it is allowed to run.
 
@@ -287,7 +290,7 @@ def _device_plugin_assignment(db: Session, plugin_id: str, device_id: str) -> tu
 
 @router.get("/{plugin_id}/devices/{device_id}/configuration")
 def get_device_plugin_configuration(
-    plugin_id: str, device_id: str, db: Session = Depends(get_db), user: User = Depends(require_admin),
+    plugin_id: str, device_id: str, db: Session = Depends(get_db), user: User = Depends(require_plugins_manage),
 ):
     device, assignment = _device_plugin_assignment(db, plugin_id, device_id)
     direct = (assignment.configuration or {}).get("_device_overrides", {}).get(device.id, {})
@@ -299,7 +302,7 @@ def get_device_plugin_configuration(
 @router.put("/{plugin_id}/devices/{device_id}/configuration")
 def put_device_plugin_configuration(
     plugin_id: str, device_id: str, body: DevicePluginConfigurationIn, request: Request,
-    db: Session = Depends(get_db), user: User = Depends(require_admin),
+    db: Session = Depends(get_db), user: User = Depends(require_plugins_manage),
 ):
     device, assignment = _device_plugin_assignment(db, plugin_id, device_id)
     if assignment.configuration_source == "yaml":
@@ -337,7 +340,7 @@ def put_device_plugin_configuration(
 @router.delete("/{plugin_id}/devices/{device_id}/configuration")
 def delete_device_plugin_configuration(
     plugin_id: str, device_id: str, request: Request, db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_plugins_manage),
 ):
     device, assignment = _device_plugin_assignment(db, plugin_id, device_id)
     if assignment.configuration_source == "yaml":
@@ -377,7 +380,7 @@ def run_status(plugin_id: str, run_id: str, user: User = Depends(get_current_use
 
 
 @router.delete("/{plugin_id}/runs/{run_id}")
-def cancel_run(plugin_id: str, run_id: str, user: User = Depends(require_write)):
+def cancel_run(plugin_id: str, run_id: str, user: User = Depends(require_devices_edit)):
     try:
         return registry.request(plugin_id, "DELETE", f"/plugin/v1/runs/{run_id}")
     except Exception as exc:  # noqa: BLE001
@@ -660,7 +663,7 @@ def _managed_artifact(plugin_id: str, artifact_type: str):
 @router.put("/device-artifacts/{device_id}/{plugin_id}/{artifact_type}")
 def update_device_artifact(
     device_id: str, plugin_id: str, artifact_type: str, body: ArtifactIn,
-    db: Session = Depends(get_db), user: User = Depends(require_write),
+    db: Session = Depends(get_db), user: User = Depends(require_devices_edit),
 ):
     _managed_artifact(plugin_id, artifact_type)
     if not db.get(Device, device_id):
@@ -682,7 +685,7 @@ def update_device_artifact(
 @router.delete("/device-artifacts/{device_id}/{plugin_id}/{artifact_type}", status_code=204)
 def delete_device_artifact(
     device_id: str, plugin_id: str, artifact_type: str,
-    db: Session = Depends(get_db), user: User = Depends(require_write),
+    db: Session = Depends(get_db), user: User = Depends(require_devices_edit),
 ):
     _managed_artifact(plugin_id, artifact_type)
     if not db.get(Device, device_id):

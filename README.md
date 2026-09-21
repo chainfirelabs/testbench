@@ -13,8 +13,11 @@ compatibility, and testing history into one web app.
   upcoming and overdue reminders.
 - **Software and tests:** track software versions, vendor compatibility claims,
   optional version-specific [software bundles](docs/software-bundles.md), and
-  actual test outcomes against individual devices.
-- **Team access:** admin, tester, and read-only roles, with an audit trail of changes.
+  actual test outcomes against individual devices. Search every vendor's
+  compatibility list at once from **Vendor Claims**, to answer "does anything
+  claim to support this hardware?".
+- **Team access:** [roles you define](docs/roles.md), each granting a set of
+  permissions, with an audit trail of changes and a per-device changelog.
 - **Data access:** spreadsheet-style editing, JSON/CSV import and export,
   additive DeviceSchema YAML import/export, a REST API, and an optional
   read-only MCP server for AI assistants.
@@ -22,7 +25,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.9.1`.
+`chainfirelabs/testbench` and tag `1.9.3`.
 
 | Image repository | Purpose |
 |---|---|
@@ -260,7 +263,7 @@ External MCP clients need a separately configured ingress or gateway.
 ## API client libraries
 
 - [Python client](src/python-client/README.md): queries, device checkout, and test result recording.
-- [Go client](src/go-client/README.md): API-token queries for inventory, software, tests, schemas, and device actions.
+- [Go client](src/go-client/README.md): API-token queries for inventory, software, vendor claims, tests, schemas, and device actions.
 
 ### TestBench Go command
 
@@ -275,6 +278,7 @@ export TB_API_KEY=tb_your_prefix_your_secret
 ./bin/testbench --devices --type router
 ./bin/testbench --devices --filter 'make=MikroTik'
 ./bin/testbench --software --search curl --latest
+./bin/testbench --vendor-devices --search 'ISR 4331'
 ./bin/testbench --tests --for-device dev-0042 --outcome fail
 ./bin/testbench --help
 ```

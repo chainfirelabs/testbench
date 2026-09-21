@@ -15,6 +15,7 @@
  * always be committed as-is.
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { visibleOptions } from '../suggestOptions'
 
 const props = withDefaults(
   defineProps<{
@@ -34,11 +35,13 @@ const open = ref(false)
 const filter = ref('')
 const filterInput = ref<HTMLInputElement | null>(null)
 
-const matches = computed(() => {
-  const q = filter.value.trim().toLowerCase()
-  if (!q) return props.options
-  return props.options.filter((o) => String(o.value).toLowerCase().includes(q))
-})
+/*
+ * What the sheet renders, and what the cap is holding back. Same limit and
+ * same reasoning as the desktop dropdown; see `suggestOptions`.
+ */
+const shown = computed(() => visibleOptions(props.options, filter.value))
+const matches = computed(() => shown.value.visible)
+const hiddenCount = computed(() => shown.value.hidden)
 
 /** True when the typed text is worth offering as its own answer. */
 const freeTextOffer = computed(() => {
@@ -141,6 +144,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
           {{ o.value }}
         </button>
 
+        <p v-if="hiddenCount" class="picker-more">
+          and {{ hiddenCount.toLocaleString() }} more — type to narrow
+        </p>
+
         <p v-if="!matches.length && !freeTextOffer" class="picker-empty">
           {{ options.length ? 'Nothing matches that.' : 'No suggestions available.' }}
         </p>
@@ -242,6 +249,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* Not an option: nothing to tap, so it must not look tappable. */
+.picker-more {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  color: var(--text-muted);
+  font-size: 13px;
 }
 
 .picker-option {

@@ -10,6 +10,8 @@ changing one needs an administrator, and every change is audited with what it
 was before and what it became.
 """
 
+from typing import Literal
+
 import yaml
 
 from ..services.plugin_configuration import validate_plugin_configuration
@@ -37,6 +39,7 @@ from ..services.device_schema import (
     KEY_RE,
     LOCKED_VISIBLE,
     PROTECTED_SYSTEM_FIELDS,
+    WEB_ADDRESS_ROLES,
     RESERVED_DOCUMENT_KEYS,
     analyze_schema,
     assignment_payload,
@@ -64,7 +67,7 @@ from ..services.device_schema_yaml import (
 from ..services.entity_fields import ensure_entity_field_indexes
 from ..services.io import download_response
 from ..services.plugin_host import registry
-from .deps import get_current_user, require_admin
+from .deps import get_current_user, require_schema_manage
 
 fields_router = APIRouter(prefix="/device-fields", tags=["device schema"])
 router = APIRouter(prefix="/device-schema", tags=["device schema"])
@@ -83,6 +86,16 @@ class FieldDefinitionIn(BaseModel):
     sensitive: bool = False
     indexed: bool = False
     unique_value: bool = False
+    # Unset means "decide from the role": a field carrying a scan address is a
+    # web page often enough to link by default, and an administrator adding
+    # `lan_ip` from the schema editor should not have to tick a second box to
+    # get what every other installation already has. Pass it explicitly to
+    # override in either direction.
+    opens_web_page: bool | None = None
+    # The installation's default for that link. A device may override both in
+    # its own `link_overrides`; these are what it overrides.
+    link_scheme: Literal["http", "https"] = "http"
+    link_port: int | None = Field(default=None, ge=1, le=65535)
     plugin_role: str | None = None
     # Convenience: create the field and make it global in one call, which is
     # what "add a column everyone should have" actually means.
@@ -99,6 +112,12 @@ class FieldDefinitionUpdate(BaseModel):
     sensitive: bool | None = None
     indexed: bool | None = None
     unique_value: bool | None = None
+    opens_web_page: bool | None = None
+    link_scheme: Literal["http", "https"] | None = None
+    # Explicit null clears the port back to the scheme's own, so the update
+    # distinguishes "leave it alone" (absent) from "no port" (null) the way
+    # every other nullable override on this model does.
+    link_port: int | None = Field(default=None, ge=1, le=65535)
     plugin_role: str | None = None
     enabled: bool | None = None
 
@@ -293,7 +312,7 @@ def create_device_field(
     body: FieldDefinitionIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     key = body.key.strip().lower()
     if not KEY_RE.fullmatch(key):
@@ -321,6 +340,12 @@ def create_device_field(
         default_value=body.default_value, sensitive=body.sensitive,
         # A unique field is always indexed: the index is what enforces it.
         indexed=body.indexed or body.unique_value, unique_value=body.unique_value,
+        opens_web_page=(
+            body.plugin_role in WEB_ADDRESS_ROLES
+            if body.opens_web_page is None
+            else body.opens_web_page
+        ),
+        link_scheme=body.link_scheme, link_port=body.link_port,
         plugin_role=body.plugin_role or None, protected_system_field=False,
         enabled=True, configuration_source="gui",
     )
@@ -348,7 +373,7 @@ def update_device_field(
     body: FieldDefinitionUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     definition = _definition_or_404(db, field_id)
     _require_gui_owned(definition.configuration_source, f"The {definition.label} field")
@@ -396,7 +421,7 @@ def delete_device_field(
     field_id: str,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Remove a definition entirely. Stored values are not touched.
 
@@ -479,7 +504,7 @@ def put_global_schema(
     body: AssignmentsIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Set the fields every device type inherits, now and in future."""
     before = _apply_assignments(db, None, body)
@@ -492,7 +517,7 @@ def put_type_schema(
     body: AssignmentsIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     item = _type_or_404(db, type_id)
     _require_gui_owned(item.configuration_source, f"Device type '{item.key}'")
@@ -610,6 +635,8 @@ def _assign_recommended_plugin_fields(
                 sensitive=bool(raw.get("sensitive", False)),
                 indexed=bool(raw.get("indexed", False) or raw.get("unique", False)),
                 unique_value=bool(raw.get("unique", False)),
+                opens_web_page=bool(raw.get("opens_web_page", role in WEB_ADDRESS_ROLES)),
+                link_scheme="http", link_port=None,
                 plugin_role=role,
                 protected_system_field=key in PROTECTED_SYSTEM_FIELDS,
                 enabled=True,
@@ -682,7 +709,7 @@ def put_type_plugins(
     body: PluginAssignmentsIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Set which plugins may act on this device type.
 
@@ -753,13 +780,13 @@ def put_type_plugins(
 # ---------------------------------------------------- validation and status
 
 @router.post("/validate")
-def validate_schema(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def validate_schema(db: Session = Depends(get_db), user: User = Depends(require_schema_manage)):
     """Check the published configuration against the devices already stored."""
     return {"revision": current_revision(db), **analyze_schema(db)}
 
 
 @router.get("/export")
-def export_schema(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def export_schema(db: Session = Depends(get_db), user: User = Depends(require_schema_manage)):
     """Download a ConfigMap that can bootstrap another TestBench deployment."""
     document = yaml.safe_dump(export_document(db), sort_keys=False, allow_unicode=True)
     indented = "".join(f"    {line}" if line.strip() else line for line in document.splitlines(keepends=True))
@@ -777,7 +804,7 @@ async def import_schema(
     file: UploadFile,
     dry_run: bool = Query(False),
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Preview or apply a GUI-owned, strictly additive DeviceSchema import."""
     content = await file.read(1_048_577)
@@ -821,7 +848,7 @@ async def import_schema(
 def publish_schema(
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Re-validate, bump the revision, and reconcile the managed indexes.
 
@@ -855,7 +882,7 @@ def reconciliation_status(user: User = Depends(get_current_user)):
 def reconcile_now(
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_schema_manage),
 ):
     """Re-read the mounted document and reconcile it again.
 
@@ -872,13 +899,13 @@ def reconcile_now(
 
 
 @router.get("/indexes")
-def list_indexes(db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def list_indexes(db: Session = Depends(get_db), user: User = Depends(require_schema_manage)):
     """Desired and applied state of the catalog's managed expression indexes."""
     return index_status(db)
 
 
 @router.get("/revisions")
-def list_revisions(limit: int = 25, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def list_revisions(limit: int = 25, db: Session = Depends(get_db), user: User = Depends(require_schema_manage)):
     rows = db.scalars(
         select(DeviceSchemaRevision).order_by(DeviceSchemaRevision.id.desc()).limit(min(limit, 200))
     ).all()

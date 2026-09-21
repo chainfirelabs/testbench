@@ -310,3 +310,117 @@ func TestTransportRetry(t *testing.T) {
 		t.Fatal(err, tr.calls)
 	}
 }
+
+func TestVendorDeviceFiltersTravelAsQueryParameters(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/api/v1/vendor-devices" {
+			t.Errorf("bad path %s", r.URL.Path)
+		}
+		if q.Get("search") != "ISR" || q.Get("make") != "Cisco" || q.Get("support_status") != "supported" || q.Get("software") != "Backup-Restore" {
+			t.Errorf("bad query %v", q)
+		}
+		fmt.Fprint(w, `{"items":[{"id":"vd1","make":"Cisco","software_name":"Backup-Restore","software_is_latest":false}],"total":1}`)
+	}, Options{})
+	rows, err := c.VendorDevices.List(context.Background(), VendorDeviceListOptions{
+		Search: "ISR", Make: "Cisco", SupportStatus: "supported", Software: "Backup-Restore",
+	})
+	if err != nil || len(rows) != 1 || rows[0].String("software_name") != "Backup-Restore" {
+		t.Fatalf("%v rows=%v", err, rows)
+	}
+	if latest, _ := rows[0]["software_is_latest"].(bool); latest {
+		t.Fatal("a claim on a superseded version should say so")
+	}
+}
+
+func TestVendorDeviceSupportStatusIsCheckedBeforeTheRequest(t *testing.T) {
+	// The list endpoints do not validate filter values: an unknown one returns
+	// an empty page, which reads as "nothing supports it" rather than as an
+	// error. So it is refused here, without a request.
+	calls := int32(0)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		fmt.Fprint(w, `{"items":[],"total":0}`)
+	}, Options{})
+	_, err := c.VendorDevices.List(context.Background(), VendorDeviceListOptions{SupportStatus: "maybe"})
+	if err == nil || atomic.LoadInt32(&calls) != 0 {
+		t.Fatalf("err=%v calls=%d", err, atomic.LoadInt32(&calls))
+	}
+}
+
+func TestVendorDevicesForSoftwareAsksTheCatalogueByID(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/software/Backup-Restore":
+			fmt.Fprint(w, `{"id":"sw-1","name":"Backup-Restore","version":"2.0","is_latest":true}`)
+		case "/api/v1/vendor-devices":
+			// By id, not by name: a name covers every version of it, and this
+			// is one version's own list.
+			if q := r.URL.Query(); q.Get("software_id") != "sw-1" || q.Get("search") != "Cisco" {
+				t.Errorf("bad query %v", q)
+			}
+			fmt.Fprint(w, `{"items":[{"id":"vd1","software_version":"2.0"}],"total":1}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}, Options{})
+	rows, err := c.VendorDevices.ForSoftware(context.Background(), "Backup-Restore", "", VendorDeviceListOptions{Search: "Cisco"})
+	if err != nil || len(rows) != 1 || rows[0].String("software_version") != "2.0" {
+		t.Fatalf("%v rows=%v", err, rows)
+	}
+}
+
+func TestVendorDevicesForDeviceSearchesByItsHardware(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/devices/dev-1":
+			fmt.Fprint(w, `{"id":"d1","unique_id":"dev-1","make":"Cisco","model":"ISR 4331"}`)
+		case "/api/v1/vendor-devices":
+			if q := r.URL.Query(); q.Get("make") != "Cisco" || q.Get("model") != "ISR 4331" || q.Get("support_status") != "supported" {
+				t.Errorf("bad query %v", q)
+			}
+			fmt.Fprint(w, `{"items":[{"id":"vd1"}],"total":1}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}, Options{})
+	rows, err := c.VendorDevices.ForDevice(context.Background(), "dev-1", VendorDeviceListOptions{SupportStatus: "supported"})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v rows=%v", err, rows)
+	}
+}
+
+func TestVendorDevicesForDeviceWithoutHardwareMatchesNothing(t *testing.T) {
+	calls := int32(0)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		if r.URL.Path == "/api/v1/devices/dev-1" {
+			fmt.Fprint(w, `{"id":"d1","unique_id":"dev-1"}`)
+			return
+		}
+		t.Errorf("the catalogue should not be searched: %s", r.URL.Path)
+	}, Options{})
+	rows, err := c.VendorDevices.ForDevice(context.Background(), "dev-1", VendorDeviceListOptions{})
+	if err != nil || len(rows) != 0 || atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("%v rows=%v calls=%d", err, rows, atomic.LoadInt32(&calls))
+	}
+}
+
+func TestVendorDeviceFilterSetTwiceIsRefused(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("no request should be made")
+	}, Options{})
+	_, err := c.VendorDevices.List(context.Background(), VendorDeviceListOptions{
+		ListOptions: ListOptions{Query: url.Values{"make": {"Cisco"}}}, Make: "Juniper",
+	})
+	if err == nil {
+		t.Fatal("a filter supplied twice should be refused, not silently resolved")
+	}
+	// Same rule for the ones these convenience methods set themselves.
+	if _, err = c.VendorDevices.ForDevice(context.Background(), "dev-1", VendorDeviceListOptions{Make: "Cisco"}); err == nil {
+		t.Fatal("ForDevice should refuse a caller-supplied make")
+	}
+	if _, err = c.VendorDevices.ForSoftware(context.Background(), "x", "", VendorDeviceListOptions{Software: "y"}); err == nil {
+		t.Fatal("ForSoftware should refuse a caller-supplied software")
+	}
+}
