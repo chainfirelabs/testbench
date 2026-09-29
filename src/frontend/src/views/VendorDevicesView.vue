@@ -34,6 +34,7 @@ import { detailCellRenderer } from '../detail'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
 import { router } from '../router'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { useImportProgress } from '../importProgress'
 import { invalidateSuggestions, makeFilterValues } from '../suggestions'
@@ -50,7 +51,7 @@ const rows = ref<any[]>([])
 const total = ref<number | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
-const { fields: vendorFields, loadFields: loadVendorFields } = useEntityFields('vendor_devices')
+const { fields: vendorFields, ready: columnsReady, loadFields: loadVendorFields } = useEntityFields('vendor_devices')
 
 /** Notes run to a paragraph, which is not a cell's worth of text. */
 const detail = ref<{ title: string; value: any } | null>(null)
@@ -193,7 +194,9 @@ const columns = computed(() => {
     .filter((field) => field.visible && field.list_visible)
     .map((field) => {
       const builtIn = baseColumns.find((column: any) => column.field === field.key)
-      return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+      const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+      if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
+      return column
     })
   // Before the catalog has loaded there is nothing to render but the software
   // columns, which would look like a broken grid — show the built-ins until it
@@ -204,15 +207,13 @@ const columns = computed(() => {
 const filterValues = makeFilterValues({
   entity: 'vendor-devices',
   local: (colId) => {
-    if (colId === 'support_status') return SUPPORT_VALUES
+    if (colId === 'support_status') return [null, ...SUPPORT_VALUES]
     const field = vendorFields.value.find((item: any) => item.key === colId)
-    if (field?.type === 'select') return field.options
+    if (field?.type === 'select') return [null, ...field.options]
+    if (field?.type === 'boolean') return [null, true, false]
     return undefined
   },
-  // The software columns come off the join, not from the vendor-device
-  // catalogue, so `/suggestions/vendor-devices` has no answer for them; the
-  // filter falls back to the values the loaded rows carry.
-  skip: ['software_name', 'software_version', 'notes', 'misc_data'],
+  skip: ['misc_data'],
 })
 
 /*
@@ -244,7 +245,7 @@ function clearFilters() {
 
 async function loadRemoteVendorDevices(request: RemoteTableRequest) {
   const params = remoteTableParams(request, urlFilters.value)
-  const page = await api<any>(`/vendor-devices?${params}`)
+  const page = await remoteTableApi(`/vendor-devices`, params)
   rows.value = page.items
   total.value = page.total
   return { rows: page.items, total: page.total }
@@ -713,6 +714,7 @@ async function onImportFile(e: Event) {
     <DataTable
       ref="table"
       :columns="columns"
+      :columns-ready="columnsReady"
       :rows="rows"
       :remote-loader="loadRemoteVendorDevices"
       :filter-values="filterValues"

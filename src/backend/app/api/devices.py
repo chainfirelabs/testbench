@@ -1,7 +1,9 @@
+from typing import Annotated
+
 import json
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -37,7 +39,7 @@ from ..services.checkout import overdue_clause, today
 from ..services.compat import compatible_software
 from ..services.hooks import emit_status_change
 from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
-from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.device_info import DockerError, launch_device_info, missing_required_fields
 from ..services.device_schema import (
@@ -492,6 +494,7 @@ def _query_devices(db: Session, filters: dict, search: str | None = None) -> sel
 # Declaring DeviceOut would make FastAPI coerce the projection back up to a
 # whole row, which is the cost this exists to avoid.
 @router.get("")
+@router.post("/query")
 def list_devices(
     request: Request,
     search: str | None = None,
@@ -515,6 +518,7 @@ def list_devices(
     offset: int | None = Query(None, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     """List devices, filtered by any combination of columns.
 
@@ -526,7 +530,7 @@ def list_devices(
     """
     requested = _requested_fields(db, fields)
     dynamic = {
-        key: value for key, value in request.query_params.items()
+        key: value for key, value in checklist_query(request, filters_body).items()
         if key not in {"search", "sort", "order", "page", "page_size", "offset", "fields"}
     }
     dynamic.update({

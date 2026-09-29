@@ -32,35 +32,42 @@ let loaded = false
 const isMobile = useIsMobile()
 const platform = computed(() => (isMobile.value ? 'mobile' : 'desktop'))
 
-async function load() {
-  try {
-    profiles.value = await api<any[]>(
-      `/saved_filters?entity=${props.entity}&platform=${platform.value}`,
-    )
-    loaded = true
-  } catch {
-    profiles.value = []
-  }
+const scope = computed(() => `${props.entity}/${platform.value}`)
+let inflight: { scope: string; promise: Promise<boolean> } | null = null
+let generation = 0
+
+async function load(): Promise<boolean> {
+  const key = scope.value
+  if (inflight?.scope === key) return inflight.promise
+  const current = ++generation
+  const promise = (async () => {
+    try {
+      const result = await api<any[]>(
+        `/saved_filters?entity=${encodeURIComponent(props.entity)}&platform=${platform.value}`,
+      )
+      if (current !== generation || key !== scope.value) return false
+      profiles.value = result
+      loaded = true
+      return true
+    } catch {
+      if (current === generation) profiles.value = []
+      return false
+    } finally {
+      if (inflight?.promise === promise) inflight = null
+    }
+  })()
+  inflight = { scope: key, promise }
+  return promise
 }
 
 onMounted(load)
 
-// Crossing the breakpoint changes which views exist. Reload rather than filter
-// what is already held: the two sets are disjoint, so there is nothing to keep.
-watch(platform, () => {
+watch(scope, async () => {
+  generation++
+  inflight = null
   loaded = false
   profiles.value = []
-  load()
-})
-
-// Detail pages reuse the same component instance while navigating between
-// records. Their scoped entity changes even though the platform does not.
-watch(() => props.entity, async () => {
-  loaded = false
-  profiles.value = []
-  await load()
-  const d = defaultProfile()
-  if (d) applyProfile(d)
+  await applyDefault()
 })
 
 function defaultProfile() {
@@ -69,7 +76,7 @@ function defaultProfile() {
 
 /** Apply the default view (loads profiles first if needed). */
 async function applyDefault() {
-  if (!loaded) await load()
+  if (!loaded && !await load()) return
   const d = defaultProfile()
   if (d) applyProfile(d)
 }

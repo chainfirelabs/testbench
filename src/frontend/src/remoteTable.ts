@@ -21,9 +21,8 @@ export function remoteTableParams(
   }
   for (const [field, model] of Object.entries<any>(request.filterModel || {})) {
     if (model?.filterType === 'valueChecklist') {
-      // The checklist sends whichever side of its selection is shorter, so the
-      // URL grows with what was picked rather than with how many distinct
-      // values the column happens to hold.
+      // Preserve the selected mode: converting between inclusion and exclusion
+      // using a partial option list changes which rows match.
       if (Array.isArray(model.included)) {
         params.set(`include__${field}`, JSON.stringify(model.included))
         continue
@@ -36,4 +35,21 @@ export function remoteTableParams(
     if (value !== undefined && value !== null && value !== '') params.set(field, String(value))
   }
   return params
+}
+
+/** Keep large checklist selections out of proxy-limited request URLs. */
+export function remoteTableQuery(path: string, params: URLSearchParams): { path: string; options?: RequestInit } {
+  const url = `${path}?${params}`
+  if (url.length < 6000) return { path: url }
+  const controls = new URLSearchParams(params)
+  const filters: Record<string, string> = {}
+  for (const [key, value] of params) {
+    if (!key.startsWith('include__') && !key.startsWith('exclude__')) continue
+    filters[key] = value
+    controls.delete(key)
+  }
+  return {
+    path: `${path}/query?${controls}`,
+    options: { method: 'POST', body: JSON.stringify(filters) },
+  }
 }

@@ -7,6 +7,7 @@ import RolesPanel from '../components/RolesPanel.vue'
 import { api } from '../api/client'
 import { MIN_PASSWORD_LENGTH } from '../constants'
 import { PERMISSION, useAuthStore } from '../stores/auth'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 
@@ -124,12 +125,11 @@ async function reloadRows() {
 const filterValues = makeFilterValues({
   entity: 'users',
   local: (colId) => (colId === 'is_online' ? [true, false] : undefined),
-  skip: ['created_at', 'last_login_at'],
 })
 
 async function loadRemoteUsers(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
-  const page = await api<any>(`/users/paged?${params}`)
+  const page = await remoteTableApi(`/users/paged`, params)
   rows.value = page.items
   return { rows: page.items, total: page.total }
 }

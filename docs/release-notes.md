@@ -1,5 +1,19 @@
 # Release notes
 
+## 1.9.4
+
+- Column checklists preserve their include or exclude selection while rows and
+  distinct values load. Saved views now restore filters after dynamic columns
+  are ready and save the search text used by server-paged tables.
+- Filtering **Online** by true and false no longer fails when blanks are also
+  available. Blank predicates respect boolean and numeric column types, and
+  failed table requests show an error with a Retry button.
+- Column options now include blanks and page through the full set of distinct
+  values. Large selections travel in a POST query body, avoiding URL limits.
+  Unsupported column filters are hidden, and Tested Devices accepts inclusion
+  filters as well as exclusions.
+- No database migration is required.
+
 ## 1.9.3
 
 - A device field can now be marked **Opens a web page** in Schema → Device

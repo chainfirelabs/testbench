@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -26,7 +28,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
-from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.versions import newest_version, version_key
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
@@ -366,6 +368,7 @@ def _software_fields(db: Session, fields: str | None) -> list[str] | None:
 # See the note on list_devices: the row shape depends on `fields`, so declaring
 # SoftwareOut would coerce a projection back up to a full row.
 @router.get("")
+@router.post("/query")
 def list_software(
     request: Request,
     search: str | None = None,
@@ -378,10 +381,11 @@ def list_software(
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     requested = _software_fields(db, fields)
     filters = {
-        key: value for key, value in request.query_params.items()
+        key: value for key, value in checklist_query(request, filters_body).items()
         if key not in {"search", "latest_only", "sort", "order", "page", "page_size", "fields"}
     }
     q = _query_software(db, search, latest_only, filters)
@@ -461,6 +465,7 @@ def get_software(software_id: str, db: Session = Depends(get_db), user: User = D
 
 
 @router.get("/{software_id}/tested-devices", response_model=SoftwareTestedDevicesOut)
+@router.post("/{software_id}/tested-devices/query", response_model=SoftwareTestedDevicesOut)
 def get_tested_devices(
     software_id: str,
     search: str | None = None,
@@ -471,6 +476,7 @@ def get_tested_devices(
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     """Devices this software has actually been tested against (from the tests table)."""
     software = _get_software(db, software_id)
@@ -501,17 +507,18 @@ def get_tested_devices(
         "component_name": SoftwareComponent.name,
         "component_version": SoftwareComponent.version,
     }
-    for key, value in request.query_params.items():
+    for key, value in checklist_query(request, filters_body).items():
         if key in {"search", "sort", "order", "page", "page_size"} or not value:
             continue
         excluded = key.startswith("exclude__")
-        field = key.removeprefix("exclude__") if excluded else key
+        included = key.startswith("include__")
+        field = key.removeprefix("exclude__" if excluded else "include__") if excluded or included else key
         expression = device_filters.get(field)
         if expression is None:
             expression = component_filters.get(field)
         if expression is not None:
-            if excluded:
-                clause = exclude_clause(expression, excluded_values(value))
+            if excluded or included:
+                clause = (exclude_clause if excluded else include_clause)(expression, excluded_values(value))
                 if clause is not None:
                     q = q.where(clause)
             else:

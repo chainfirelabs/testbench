@@ -36,13 +36,17 @@ export function invalidateEntityFields() { catalogPromise = null }
 
 export function useEntityFields(entity: 'devices' | 'software' | 'tests' | 'vendor_devices'): {
   fields: Ref<EntityField[]>
+  ready: Ref<boolean>
   loadFields: () => Promise<void>
 } {
   const fields = ref<EntityField[]>([])
+  const ready = ref(false)
   return {
     fields,
+    ready,
     loadFields: async () => {
       fields.value = (await catalog())[entity] || []
+      ready.value = true
     },
   }
 }

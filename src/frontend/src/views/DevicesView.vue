@@ -34,6 +34,7 @@ import { invokePluginAction, usePluginActions, type PluginAction } from '../plug
 import { actionConfirmation } from '../pluginActionConfirmation'
 import { deviceTypes, loadDeviceTypes } from '../deviceTypes'
 import { deviceActionUnavailableReason, deviceDownloadFilename } from '../deviceInventory'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 
 const auth = useAuthStore()
@@ -58,6 +59,7 @@ const pageTitle = computed(() =>
   activeTypeKey.value === UNCATEGORIZED ? 'Uncategorized Devices' : activeType.value?.label || 'Devices',
 )
 /** The fields of this page's type, or the global set on the all-devices page. */
+const columnsReady = ref(false)
 const deviceFields = ref<SchemaField[]>([])
 const fieldsByType = ref(new Map<string, SchemaField[]>())
 const loadProgress = ref<{ loaded: number; total: number } | null>(null)
@@ -264,15 +266,14 @@ async function reloadRows() {
 const filterValues = makeFilterValues({
   entity: 'devices',
   local: (colId) => {
-    if (colId === 'device_type_id') return deviceTypes.value.map((type) => type.id)
+    if (colId === 'device_type_id') return [null, ...deviceTypes.value.map((type) => type.id)]
     const field = [...deviceFields.value, ...otherTypeFields.value].find((f) => f.key === colId)
-    if (field?.type === 'select') return field.options
-    if (field?.type === 'boolean') return [true, false]
+    if (field?.type === 'select') return [null, ...field.options]
+    if (field?.type === 'boolean') return [null, true, false]
     return undefined
   },
-  // The rest of the document as one cell, and the two columns derived from a
-  // timestamp — none of them a value anyone filters by picking from a list.
-  skip: ['misc_data', 'created_at', 'updated_at', 'last_scanned_at', 'last_seen_online'],
+  // The JSON document and structural timestamps have no checklist predicate.
+  skip: ['misc_data', 'created_at', 'updated_at'],
 })
 
 async function loadRemoteDevices(request: RemoteTableRequest) {
@@ -284,7 +285,7 @@ async function loadRemoteDevices(request: RemoteTableRequest) {
     params.set('sort', 'unique_id')
     params.set('order', 'asc')
   }
-  const page = await api<any>(`/devices?${params}`)
+  const page = await remoteTableApi(`/devices`, params)
   rows.value = page.items
   return { rows: page.items, total: page.total }
 }
@@ -297,6 +298,7 @@ async function loadRemoteDevices(request: RemoteTableRequest) {
  * global schema, which is exactly what they have.
  */
 async function loadSchema() {
+  columnsReady.value = false
   const generation = ++schemaGeneration
   const scope = activeTypeKey.value
   const key = scope === UNCATEGORIZED ? undefined : scope
@@ -321,6 +323,7 @@ async function loadSchema() {
   deviceFields.value = schema.fields
   fieldsByType.value = schemas
   otherTypeFields.value = extra
+  columnsReady.value = true
 }
 
 function onGridReady(api: any) {
@@ -1353,6 +1356,7 @@ onBeforeUnmount(() => {
     <DataTable
       ref="table"
       :columns="columns"
+      :columns-ready="columnsReady"
       :rows="rows"
       :remote-loader="loadRemoteDevices"
       :filter-values="filterValues"

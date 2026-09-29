@@ -8,9 +8,11 @@ the software has actually been run against comes from `tests` instead
 
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import Boolean, Numeric, and_, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
@@ -35,11 +37,11 @@ from ..services.io import (
     strip_nulls,
     template_csv,
 )
-from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import order_by, row_error
 from ..services.versions import newest_version
 from ..services.entity_fields import (
-    field_payload, get_entity_fields, merge_extra_columns, project_fields,
+    coerce_query_value, field_payload, get_entity_fields, merge_extra_columns, project_fields,
     validate_custom_values,
 )
 from .deps import get_current_user, require_schema_manage, require_software_edit
@@ -231,6 +233,7 @@ def _firmware_key(item: dict):
 
 
 @router.get("/grouped")
+@router.post("/grouped/query")
 def list_grouped_vendor_devices(
     software_id: str,
     search: str | None = None,
@@ -241,24 +244,28 @@ def list_grouped_vendor_devices(
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     """Page the presentation groups while retaining every firmware member."""
     software = _get_software(db, software_id)
     source_query = _query(db, software, search)
     standard = {key for key in EDITABLE_FIELDS if key != "misc_data"}
-    custom = {field.key for field, _payload in _effective_fields(db, software) if field.storage == "data"}
-    for key, value in request.query_params.items():
+    custom = {field.key: field for field, _payload in _effective_fields(db, software) if field.storage == "data"}
+    for key, value in checklist_query(request, filters_body).items():
         if key in {"search", "sort", "order", "page", "page_size"} or not value:
             continue
         excluded = key.startswith("exclude__")
         included = key.startswith("include__")
         field = key.removeprefix("exclude__" if excluded else "include__") if excluded or included else key
         expression = (getattr(VendorDevice, field) if field in standard else
-                      VendorDevice.misc_data[field].astext if field in custom else None)
+                      _custom_filter_expression(custom[field]) if field in custom else None)
         if expression is None:
             continue
         if excluded or included:
-            clause = (exclude_clause if excluded else include_clause)(expression, excluded_values(value))
+            values = excluded_values(value)
+            if field in custom:
+                values = [coerce_query_value(custom[field], item) for item in values]
+            clause = (exclude_clause if excluded else include_clause)(expression, values)
             if clause is not None:
                 source_query = source_query.where(clause)
         else:
@@ -586,6 +593,13 @@ def delete_vendor_device(
 # The catalogue: vendor claims across every software version at once.
 # ---------------------------------------------------------------------------
 
+def _custom_filter_expression(field):
+    expression = VendorDevice.misc_data[field.key].astext
+    if field.field_type in {"boolean", "number"}:
+        expression = cast(func.nullif(expression, ""), Boolean if field.field_type == "boolean" else Numeric)
+    return expression
+
+
 # Columns a catalogue search matches on, and the ones it filters by exactly.
 CATALOG_TEXT_FILTERS = {
     "make": VendorDevice.make,
@@ -659,6 +673,8 @@ def _catalog_query(db: Session, search: str | None, params: dict):
             Software.version.ilike(like),
             *custom,
         ))
+    custom_fields = {field.key: field for field in get_entity_fields(db, "vendor_devices")
+                     if field.storage == "data" and field.field_type != "json"}
     # A software named rather than identified: the name covers every version of
     # it, which is what someone filtering by software means.
     name = params.get("software")
@@ -671,8 +687,12 @@ def _catalog_query(db: Session, search: str | None, params: dict):
             keeping = key.startswith("include__")
             field = key.removeprefix("include__" if keeping else "exclude__")
             expression = CATALOG_SORT_COLUMNS.get(field)
+            values = excluded_values(value)
+            if field in custom_fields:
+                expression = _custom_filter_expression(custom_fields[field])
+                values = [coerce_query_value(custom_fields[field], item) for item in values]
             pick = include_clause if keeping else exclude_clause
-            clause = pick(expression, excluded_values(value)) if expression is not None else None
+            clause = pick(expression, values) if expression is not None else None
             if clause is not None:
                 q = q.where(clause)
             continue
@@ -714,6 +734,7 @@ def _catalog_rows(db: Session, pairs: list[tuple[VendorDevice, Software]]) -> li
 
 
 @catalog_router.get("", response_model=Page[VendorDeviceCatalogOut])
+@catalog_router.post("/query", response_model=Page[VendorDeviceCatalogOut])
 def search_vendor_devices(
     request: Request,
     search: str | None = None,
@@ -731,6 +752,7 @@ def search_vendor_devices(
     offset: int | None = Query(None, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     """Search every vendor compatibility list at once.
 
@@ -742,7 +764,7 @@ def search_vendor_devices(
     `offset` takes precedence when given and counts in rows, which is what a
     caller resuming a sweep at the row it stopped on needs.
     """
-    q = _catalog_query(db, search, dict(request.query_params))
+    q = _catalog_query(db, search, checklist_query(request, filters_body))
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     column = CATALOG_SORT_COLUMNS.get(sort, VendorDevice.make)
     # Secondary sort keeps paging stable when the primary column repeats — and

@@ -15,6 +15,7 @@ import { useImportProgress } from '../importProgress'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityFields } from '../entityFields'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 
@@ -26,7 +27,7 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
 const { importState, runImport, closeImport } = useImportProgress()
-const { fields: softwareFields, loadFields } = useEntityFields('software')
+const { fields: softwareFields, ready: columnsReady, loadFields } = useEntityFields('software')
 
 /*
  * The field a "View …" cell is currently showing: these columns hold more than
@@ -132,6 +133,7 @@ const baseColumns = [
 
 const componentsColumn = {
   field: 'bundle_components',
+  filter: false,
   headerName: 'Components',
   editable: false,
   minWidth: 190,
@@ -175,7 +177,9 @@ const componentsColumn = {
 const columns = computed(() => {
   const configured = softwareFields.value.filter((field) => field.list_visible).map((field) => {
     const builtIn = baseColumns.find((column: any) => column.field === field.key)
-    return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+    const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+    if (field.type === 'json' || field.sensitive || ['vendor_device_count', 'version_count', 'misc_data', 'created_at', 'updated_at'].includes(field.key)) column.filter = false
+    return column
   })
   const versionIndex = configured.findIndex((column: any) => column.field === 'version')
   const nameIndex = configured.findIndex((column: any) => column.field === 'name')
@@ -236,8 +240,8 @@ const filterValues = makeFilterValues({
   entity: 'software',
   local: (colId) => {
     const field = softwareFields.value.find((f: any) => f.key === colId)
-    if (field?.type === 'select') return field.options
-    if (field?.type === 'boolean') return [true, false]
+    if (field?.type === 'select') return [null, ...field.options]
+    if (field?.type === 'boolean') return [null, true, false]
     return undefined
   },
   // Counts and the rest-of-the-document cell: nothing anyone picks off a list.
@@ -246,7 +250,7 @@ const filterValues = makeFilterValues({
 
 async function loadRemoteSoftware(request: RemoteTableRequest) {
   const params = remoteTableParams(request, { latest_only: true })
-  const page = await api<any>(`/software?${params}`)
+  const page = await remoteTableApi(`/software`, params)
   rows.value = page.items
   return { rows: page.items, total: page.total }
 }
@@ -724,6 +728,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
     <DataTable
       ref="table"
       :columns="columns"
+      :columns-ready="columnsReady"
       :rows="rows"
       :remote-loader="loadRemoteSoftware"
       :filter-values="filterValues"

@@ -159,6 +159,7 @@ function baseColumn(field: SchemaField) {
   return {
     field: field.key,
     headerName: field.label,
+    ...(field.type === 'json' || field.sensitive || field.storage === 'derived' || field.storage === 'virtual' ? { filter: false } : {}),
     editable: field.writable && field.storage !== 'derived',
     valueGetter: (p: any) => fieldValue(p.data, field),
     valueSetter: (p: any) => {

@@ -1,6 +1,8 @@
+from typing import Annotated
+
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,7 +13,7 @@ from ..db import as_utc, get_db, utcnow
 from ..models import Role, User
 from ..schemas import Page, PasswordReset, UserCreate, UserOut, UserUpdate
 from ..services.audit import field_diff, log_action
-from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from .deps import require_users_manage, require_users_manage_session
 from ..services.permissions import USERS_MANAGE, role_permissions
 
@@ -80,6 +82,7 @@ def list_users(db: Session = Depends(get_db), user: User = Depends(require_users
 
 
 @router.get("/paged", response_model=Page[UserOut])
+@router.post("/paged/query", response_model=Page[UserOut])
 def list_users_paged(
     request: Request,
     search: str | None = None,
@@ -89,6 +92,7 @@ def list_users_paged(
     page_size: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
     user: User = Depends(require_users_manage),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     q = select(User)
     if search:
@@ -100,7 +104,7 @@ def list_users_paged(
         "auth_provider": User.auth_provider, "created_at": User.created_at,
         "last_login_at": User.last_login_at,
     }
-    for key, value in request.query_params.items():
+    for key, value in checklist_query(request, filters_body).items():
         if not key.startswith(("exclude__", "include__")):
             continue
         keeping = key.startswith("include__")

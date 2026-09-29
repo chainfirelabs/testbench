@@ -14,9 +14,8 @@
  *    vocabulary is in the schema (a select field's options), and a structural
  *    column like Device Type is a list the page already loaded. No request,
  *    and the list is complete even for a column where every row is blank.
- * 2. `/suggestions/{entity}/{field}` — the distinct values of a text column,
- *    shared with the cell editors' autocomplete, so a filter and the editor
- *    under it never disagree about what is in the column.
+ * 2. `/suggestions/{entity}/{field}/filter-values` — the distinct values of a text column,
+ *    paginated independently of autocomplete and including blank values.
  *
  * A column neither can answer returns nothing, and the filter falls back to
  * the values the loaded rows happen to carry (see DataTable's
@@ -42,7 +41,7 @@ export interface FilterValueSource {
 }
 
 /** How a column's values are looked up when the page cannot answer itself. */
-export type ValueFetcher = (entity: SuggestEntity, field: string) => Promise<string[]>
+export type ValueFetcher = (entity: SuggestEntity, field: string) => Promise<any[]>
 
 /**
  * Which source answers for one column.
@@ -68,3 +67,17 @@ export async function resolveFilterValues(
  * Keeping this module free of it leaves the decision above testable on its own
  * and keeps "which source answers?" separate from "how do we ask?".
  */
+
+
+/** Fetch every page; a partial page is never mistaken for the full domain. */
+export async function fetchFilterValues(
+  fetchPage: (offset: number) => Promise<{ values: any[]; has_more: boolean }>,
+): Promise<any[]> {
+  const values: any[] = []
+  while (true) {
+    const page = await fetchPage(values.length)
+    values.push(...page.values)
+    if (!page.has_more) return values
+    if (!page.values.length) throw new Error('Filter values pagination made no progress')
+  }
+}

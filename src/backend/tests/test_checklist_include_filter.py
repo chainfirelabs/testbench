@@ -85,3 +85,147 @@ class DeviceIncludeFilterTests(SchemaCase):
         showing, because excluding only hides what it names."""
         self.assertEqual(self.listed('exclude__make=["Dell"]'), ["d-blank", "d-cisco"])
         self.assertEqual(self.listed('include__make=["Cisco"]'), ["d-cisco"])
+
+
+class BooleanChecklistTests(SchemaCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.make_visible("online_status")
+        from app.db import SessionLocal
+        from app.models import Device
+        from sqlalchemy import select
+        for name, value in (("online", True), ("offline", False), ("unknown", None)):
+            response = cls.post("/api/v1/devices", {"unique_id": name, "make": "Cisco"})
+            assert response.status_code == 201, response.text
+            with SessionLocal() as db:
+                device = db.scalar(select(Device).where(Device.unique_id == name))
+                device._data = {**device._data, "online_status": value}
+                db.commit()
+
+    def test_every_boolean_selection_and_its_exclusion_complement(self):
+        import itertools
+        import json
+        from urllib.parse import urlencode
+        domain = [True, False, None]
+        names = ["online", "offline", "unknown"]
+        for count in range(4):
+            for indices in itertools.combinations(range(3), count):
+                expected = sorted(names[i] for i in indices)
+                for mode, values in (
+                    ("include", [domain[i] for i in indices]),
+                    ("exclude", [domain[i] for i in range(3) if i not in indices]),
+                ):
+                    with self.subTest(mode=mode, values=values):
+                        query = urlencode({f"{mode}__online_status": json.dumps(values)})
+                        response = self.get(f"/api/v1/devices?{query}")
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(sorted(row["unique_id"] for row in response.json()["items"]), expected)
+
+    def test_empty_string_blank_is_not_coerced_to_false(self):
+        response = self.get('/api/v1/devices?exclude__online_status=[""]')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(sorted(row["unique_id"] for row in response.json()["items"]), ["offline", "online"])
+
+    def test_boolean_filter_combines_with_another_column(self):
+        response = self.get('/api/v1/devices?include__online_status=[true,false]&include__make=["Cisco"]')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["total"], 2)
+
+    def test_filter_values_preserve_boolean_types_and_blanks(self):
+        response = self.get('/api/v1/suggestions/devices/online_status/filter-values')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"values": [None, False, True], "has_more": False})
+
+    def test_filter_values_include_the_long_tail_after_500(self):
+        from app.db import SessionLocal
+        from app.models import Device
+        with SessionLocal() as db:
+            db.add_all(Device(unique_id=f"tail-{i:04}", _data={"location": f"rack-{i:04}"}) for i in range(503))
+            db.commit()
+        first = self.get('/api/v1/suggestions/devices/location/filter-values?limit=500').json()
+        self.assertEqual(len(first["values"]), 500)
+        self.assertIsNone(first["values"][0])
+        self.assertTrue(first["has_more"])
+        second = self.get('/api/v1/suggestions/devices/location/filter-values?offset=500&limit=500').json()
+        self.assertFalse(second["has_more"])
+        self.assertEqual(len(set(first["values"] + second["values"])), 504)
+        # Keep the shared class fixture unchanged for the other tests.
+        with SessionLocal() as db:
+            from sqlalchemy import delete
+            db.execute(delete(Device).where(Device.unique_id.like("tail-%")))
+            db.commit()
+
+    def test_filter_values_do_not_expose_sensitive_fields(self):
+        response = self.get('/api/v1/suggestions/devices/password/filter-values')
+        self.assertEqual(response.status_code, 404)
+
+
+class VendorCustomChecklistTests(SchemaCase):
+    def test_custom_boolean_filters_and_values_on_both_vendor_lists(self):
+        response = self.post('/api/v1/entity-fields/vendor_devices', {
+            'key': 'verified', 'label': 'Verified', 'field_type': 'boolean',
+        })
+        self.assertEqual(response.status_code, 201, response.text)
+        software = self.post('/api/v1/software', {'name': 'Vendor filter suite', 'version': '1'}).json()
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        for name, value in (('yes', True), ('no', False), ('blank', None)):
+            response = self.post(endpoint, {'make': name, 'model': 'R1', 'misc_data': {'verified': value}})
+            self.assertEqual(response.status_code, 201, response.text)
+        for endpoint in (f'{endpoint}/grouped', '/api/v1/vendor-devices'):
+            for query in ('include__verified=[true,false]', 'exclude__verified=[null]'):
+                response = self.get(f'{endpoint}?{query}')
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['total'], 2)
+        response = self.get('/api/v1/suggestions/vendor-devices/verified/filter-values')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['values'], [None, False, True])
+
+    def test_relationship_values_include_blanks(self):
+        response = self.get('/api/v1/suggestions/tests/component_name/filter-values')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(None, response.json()['values'])
+
+    def test_test_author_values_do_not_enumerate_unrelated_users(self):
+        response = self.get('/api/v1/suggestions/tests/created_by_username/filter-values')
+        self.assertEqual(response.status_code, 200, response.text)
+        # The seeded admin exists, but has authored no tests in this fixture.
+        self.assertNotIn('admin', response.json()['values'])
+
+
+class ChecklistQueryTransportTests(SchemaCase):
+    def test_post_and_get_use_identical_filters_on_every_grid_endpoint(self):
+        import json
+        from urllib.parse import urlencode
+        device = self.post('/api/v1/devices', {'unique_id': 'query-device', 'make': 'Cisco'}).json()
+        software = self.post('/api/v1/software', {'name': 'Query suite', 'version': '1'}).json()
+        response = self.post('/api/v1/tests', {'device_id': device['id'], 'software_id': software['id'], 'outcome': 'pass'})
+        self.assertEqual(response.status_code, 201, response.text)
+        vendor = f"/api/v1/software/{software['id']}/vendor-devices"
+        self.post(vendor, {'make': 'Cisco', 'model': 'R1'})
+        endpoints = [('/api/v1/devices', 'make'), ('/api/v1/software', 'name'),
+                     ('/api/v1/tests', 'outcome'), ('/api/v1/users/paged', 'username'),
+                     ('/api/v1/audit_logs', 'action'), ('/api/v1/vendor-devices', 'make'),
+                     (f'{vendor}/grouped', 'make'),
+                     (f"/api/v1/software/{software['id']}/tested-devices", 'make')]
+        for endpoint, field in endpoints:
+            with self.subTest(endpoint=endpoint):
+                self.assertGreater(self.get(endpoint).json()['total'], 0)
+                body = {f'include__{field}': json.dumps([])}
+                response = self.post(f'{endpoint}/query?page_size=25', body)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()['total'], 0)
+                expected = self.get(f'{endpoint}?page_size=25&{urlencode(body)}')
+                self.assertEqual(response.json(), expected.json())
+        # A large exclusion remains an exclusion, rather than its incomplete
+        # complement, without exposing a huge URL to the ingress proxy.
+        response = self.post('/api/v1/devices/query', {
+            'exclude__make': json.dumps([f'vendor {i}' for i in range(1000)]),
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['total'], 1)
+
+    def test_post_preserves_validation_and_authentication(self):
+        self.assertEqual(self.post('/api/v1/devices/query?page_size=0', {}).status_code, 422)
+        self.assertEqual(self.post('/api/v1/devices/query', {'page_size': '0'}).status_code, 422)
+        self.assertEqual(self.client.post('/api/v1/devices/query', json={}).status_code, 401)

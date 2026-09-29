@@ -27,8 +27,9 @@ export class ValueChecklistFilter {
   private list!: HTMLDivElement
   private search!: HTMLInputElement
   private status!: HTMLDivElement
-  // Store excluded raw values so newly loaded values remain visible by default.
-  private excluded = new Map<string, any>()
+  // Selection is independent of the values loaded for the dropdown.
+  private mode: 'included' | 'excluded' = 'excluded'
+  private selection = new Map<string, any>()
   private values = new Map<string, { value: any; label: string }>()
   /** Distinct values fetched from the server, once per filter instance. */
   private providerState: 'idle' | 'loading' | 'done' | 'failed' = 'idle'
@@ -63,60 +64,37 @@ export class ValueChecklistFilter {
   }
 
   getGui() { return this.gui }
-  afterGuiAttached() { this.refreshValues(); this.search.focus() }
-  isFilterActive() { return this.excluded.size > 0 }
-  doesFilterPass(p: any) { return !this.excluded.has(this.key(this.params.getValue(p.node))) }
-  /*
-   * The model carries whichever side of the selection is shorter.
-   *
-   * It travels in the query string. Unticking three values out of five hundred
-   * is three values to send; clearing the list and ticking one is four hundred
-   * and ninety-nine, which is sixteen kilobytes of URL and a 414 from the
-   * proxy long before it reaches the API — the grid then shows nothing at all,
-   * which looks exactly like a filter that matched nothing.
-   *
-   * The two are not quite the same statement. `excluded` hides what it names
-   * and lets anything else through, including a value this list has never
-   * seen; `included` shows only what it names. That difference is real but it
-   * falls where it should: someone who unticked a few means "not those", and
-   * someone who cleared the list and ticked two means "just these two".
-   */
+  afterGuiAttached() {
+    if (this.providerState !== 'loading') this.providerState = 'idle'
+    this.refreshValues()
+    this.search.focus()
+  }
+  isFilterActive() { return this.mode === 'included' || this.selection.size > 0 }
+  doesFilterPass(p: any) { return this.isSelected(this.key(this.params.getValue(p.node))) }
+
   getModel() {
     if (!this.isFilterActive()) return null
-    const included: any[] = []
-    for (const [key, item] of this.values) {
-      if (!this.excluded.has(key)) included.push(item.value)
-    }
-    return included.length < this.excluded.size
-      ? { filterType: 'valueChecklist', included }
-      : { filterType: 'valueChecklist', excluded: [...this.excluded.values()] }
+    return { filterType: 'valueChecklist', [this.mode]: [...this.selection.values()] }
   }
+
   setModel(model: any) {
-    this.excluded.clear()
-    if (Array.isArray(model?.included)) {
-      // Restored from the other form: everything known that is not named is
-      // excluded, which is what "show only these" means on the way back in.
-      this.absorb(model.included)
-      const keep = new Set(model.included.map((value: any) => this.key(value)))
-      for (const [key, item] of this.values) {
-        if (!keep.has(key)) this.excluded.set(key, item.value)
-      }
+    this.mode = Array.isArray(model?.included) ? 'included' : 'excluded'
+    this.selection.clear()
+    for (const value of model?.[this.mode] || []) {
+      this.selection.set(this.key(value), value == null || value === '' ? null : value)
     }
-    for (const value of model?.excluded || []) this.excluded.set(this.key(value), value)
-    /*
-     * An excluded value is always offered, whatever else is known.
-     *
-     * Otherwise the filter can reach a state it cannot be talked out of. The
-     * values come from the row model when a column has no provider — the
-     * software columns on the claims page, anything a page lists in `skip` —
-     * and a filter narrow enough to leave no rows leaves nothing to harvest.
-     * Rebuild the panel from there and it offers an empty list while still
-     * excluding things: every row hidden, and no checkbox to untick.
-     *
-     * Whatever this filter is hiding, it can say so and let it back.
-     */
-    this.absorb(this.excluded.values())
+    // Saved values must remain available even when no matching rows are loaded.
+    this.absorb(this.selection.values())
     if (this.list) this.renderList()
+  }
+
+  private isSelected(key: string) {
+    return this.mode === 'included' ? this.selection.has(key) : !this.selection.has(key)
+  }
+
+  private select(key: string, value: any, selected: boolean) {
+    if (selected === (this.mode === 'included')) this.selection.set(key, value == null || value === '' ? null : value)
+    else this.selection.delete(key)
   }
 
   private key(value: any): string {
@@ -129,11 +107,16 @@ export class ValueChecklistFilter {
     if (value == null || value === '') return '(Blanks)'
     const colDef = this.params.column?.getColDef?.()
     if (typeof colDef?.valueFormatter === 'function') {
-      const formatted = colDef.valueFormatter({
-        value, data: null, node: null, column: this.params.column,
-        colDef, api: this.params.api, context: this.params.context,
-      })
-      if (formatted != null && formatted !== '') return String(formatted)
+      try {
+        const formatted = colDef.valueFormatter({
+          value, data: null, node: null, column: this.params.column,
+          colDef, api: this.params.api, context: this.params.context,
+        })
+        if (formatted != null && formatted !== '') return String(formatted)
+      } catch {
+        // A row-dependent formatter cannot label a distinct value without a
+        // row. Keep the raw value usable instead of breaking the entire menu.
+      }
     }
     return typeof value === 'object' ? JSON.stringify(value) : String(value)
   }
@@ -178,9 +161,9 @@ export class ValueChecklistFilter {
     }
     this.providerState = 'loading'
     this.renderStatus()
-    Promise.resolve(provide(colId, this.params.colDef))
+    Promise.resolve().then(() => provide(colId, this.params.colDef))
       .then((values: any[]) => {
-        this.providerState = 'done'
+        this.providerState = values.length ? 'done' : 'failed'
         this.absorb(Array.isArray(values) ? values : [])
         this.renderList()
       })
@@ -215,9 +198,13 @@ export class ValueChecklistFilter {
   }
 
   private setAll(selected: boolean) {
-    for (const [key, item] of this.matching()) {
-      if (selected) this.excluded.delete(key)
-      else this.excluded.set(key, item.value)
+    if (!this.search.value.trim()) {
+      // A global Clear means "only what I tick next"; Select all removes the
+      // filter, including for values that have not arrived yet.
+      this.mode = selected ? 'excluded' : 'included'
+      this.selection.clear()
+    } else {
+      for (const [key, item] of this.matching()) this.select(key, item.value, selected)
     }
     this.renderList()
     this.params.filterChangedCallback()
@@ -225,7 +212,7 @@ export class ValueChecklistFilter {
 
   private renderStatus() {
     if (!this.status) return
-    if (this.providerState === 'loading' && !this.values.size) {
+    if (this.providerState === 'loading') {
       this.status.textContent = 'Loading values…'
     } else if (!this.values.size) {
       this.status.textContent = 'No values to filter on.'
@@ -245,10 +232,9 @@ export class ValueChecklistFilter {
       row.className = 'value-checklist-option'
       const checkbox = document.createElement('input')
       checkbox.type = 'checkbox'
-      checkbox.checked = !this.excluded.has(key)
+      checkbox.checked = this.isSelected(key)
       checkbox.addEventListener('change', () => {
-        if (checkbox.checked) this.excluded.delete(key)
-        else this.excluded.set(key, item.value)
+        this.select(key, item.value, checkbox.checked)
         this.params.filterChangedCallback()
       })
       const text = document.createElement('span')

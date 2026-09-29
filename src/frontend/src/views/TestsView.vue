@@ -16,6 +16,7 @@ import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityFields } from '../entityFields'
 import { loadAllPages } from '../pagination'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 
@@ -28,7 +29,7 @@ const toastError = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
-const { fields: testFields, loadFields } = useEntityFields('tests')
+const { fields: testFields, ready: columnsReady, loadFields } = useEntityFields('tests')
 const { importState, runImport, closeImport } = useImportProgress()
 
 /*
@@ -378,7 +379,9 @@ const baseColumns = [
 
 const columns = computed(() => testFields.value.filter((field) => field.list_visible).map((field) => {
   const builtIn = baseColumns.find((column: any) => column.field === field.key)
-  return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+  const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+    if (field.type === 'json' || field.sensitive || ['misc_data', 'created_at', 'updated_at'].includes(field.key)) column.filter = false
+    return column
 }))
 
 function showToast(msg: string, isError = false) {
@@ -475,8 +478,8 @@ const filterValues = makeFilterValues({
   entity: 'tests',
   local: (colId) => {
     const field = testFields.value.find((f: any) => f.key === colId)
-    if (field?.type === 'select') return field.options
-    if (field?.type === 'boolean') return [true, false]
+    if (field?.type === 'select') return [null, ...field.options]
+    if (field?.type === 'boolean') return [null, true, false]
     return undefined
   },
   skip: ['misc_data', 'created_at', 'updated_at'],
@@ -484,7 +487,7 @@ const filterValues = makeFilterValues({
 
 async function loadRemoteTests(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
-  const page = await api<any>(`/tests?${params}`)
+  const page = await remoteTableApi(`/tests`, params)
   rows.value = page.items
   return { rows: page.items, total: page.total }
 }
@@ -820,6 +823,7 @@ onMounted(loadFields)
     <DataTable
       ref="table"
       :columns="columns"
+      :columns-ready="columnsReady"
       :rows="rows"
       :remote-loader="loadRemoteTests"
       :filter-values="filterValues"

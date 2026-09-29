@@ -660,6 +660,8 @@ def device_field_expression(field: EffectiveField):
 
 
 def coerce_filter_value(field: EffectiveField, value: Any) -> Any:
+    if value is None or value == "":
+        return None
     if field.field_type == "boolean" and isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes"}
     if field.field_type == "number" and isinstance(value, str):

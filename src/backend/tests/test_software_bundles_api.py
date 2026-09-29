@@ -136,3 +136,24 @@ class VendorDeviceSchemaApiTests(SchemaCase):
         })
         self.assertEqual(accepted.status_code, 201, accepted.text)
         self.assertEqual(accepted.json()["misc_data"]["license_tier"], "enterprise")
+
+
+class TestedDeviceChecklistTests(SchemaCase):
+    def test_inclusions_and_exclusions_filter_the_same_devices(self):
+        software = self.post('/api/v1/software', {'name': 'Filter suite', 'version': '1'}).json()
+        for name in ('cisco', 'dell'):
+            self.post('/api/v1/devices', {'unique_id': name, 'make': name})
+        content = ('device_unique_id,software_name,software_version,outcome\n'
+                   'cisco,Filter suite,1,pass\n'
+                   'dell,Filter suite,1,fail\n')
+        response = self.client.post('/api/v1/tests/import', headers=self.headers,
+                                    files={'file': ('tests.csv', content, 'text/csv')})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['created'], 2)
+        endpoint = f"/api/v1/software/{software['id']}/tested-devices"
+        for query in ('include__make=["cisco"]', 'exclude__make=["dell"]'):
+            response = self.get(f'{endpoint}?{query}')
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['total'], 1)
+            self.assertEqual(response.json()['devices'][0]['device']['unique_id'], 'cisco')
+        self.assertEqual(self.get(f'{endpoint}?include__make=[]').json()['total'], 0)

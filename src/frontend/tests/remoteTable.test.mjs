@@ -58,3 +58,21 @@ test('an inclusion of nothing is still sent, because it means no rows', () => {
       make: { filterType: 'valueChecklist', included: [] } } }, {})
   assert.equal(params.get('include__make'), '[]')
 })
+
+const { remoteTableQuery } = await import('../src/remoteTable.ts')
+
+test('large checklists use a body without changing their meaning or page controls', () => {
+  const selection = Array.from({ length: 1000 }, (_, i) => `vendor ${i}`)
+  const params = new URLSearchParams({ page: '3', page_size: '100', search: 'router', include__make: JSON.stringify(selection), exclude__online_status: '[null]' })
+  const result = remoteTableQuery('/devices', params)
+  assert.equal(result.path, '/devices/query?page=3&page_size=100&search=router')
+  assert.equal(result.options.method, 'POST')
+  assert.deepEqual(JSON.parse(JSON.parse(result.options.body).include__make), selection)
+  assert.equal(JSON.parse(result.options.body).exclude__online_status, '[null]')
+  assert.equal(params.get('include__make'), JSON.stringify(selection))
+})
+
+test('ordinary selections keep the existing GET contract', () => {
+  const params = new URLSearchParams({ include__online_status: '[true,false]' })
+  assert.deepEqual(remoteTableQuery('/devices', params), { path: `/devices?${params}` })
+})

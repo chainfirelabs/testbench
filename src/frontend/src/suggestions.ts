@@ -18,7 +18,7 @@
  */
 import { ref, type Ref } from 'vue'
 import { api } from './api/client'
-import { resolveFilterValues, type FilterValueSource } from './filterValues'
+import { fetchFilterValues, resolveFilterValues, type FilterValueSource } from './filterValues'
 
 /** Matches the whitelist in `backend/app/api/suggestions.py`. */
 export type SuggestEntity =
@@ -121,17 +121,12 @@ export function invalidateSuggestions(entity: SuggestEntity): void {
   }
 }
 
-/**
- * A `filterValues` function for DataTable, bound to one collection.
- *
- * The policy — local vocabulary first, then the server, then nothing — is in
- * filterValues.ts; this is where it meets the request that answers it, which
- * is the cache above. That shared cache is the point: a column's filter and
- * the cell editor under it offer the same values, and one write invalidates
- * both.
- */
+/** Complete typed filter options have a separate endpoint from autocomplete. */
 export function makeFilterValues(
   source: FilterValueSource,
 ): (colId: string) => Promise<any[]> {
-  return (colId: string) => resolveFilterValues(source, colId, suggestionValues)
+  return (colId: string) => resolveFilterValues(source, colId, (entity, field) =>
+    fetchFilterValues((offset) => api(
+      `/suggestions/${entity}/${encodeURIComponent(field)}/filter-values?offset=${offset}&limit=500`,
+    )))
 }

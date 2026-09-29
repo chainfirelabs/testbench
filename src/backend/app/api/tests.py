@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -17,7 +19,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
-from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
 from .deps import get_current_user, require_tests_edit
@@ -236,6 +238,7 @@ def _query_tests(
 
 
 @router.get("", response_model=Page[TestOut])
+@router.post("/query", response_model=Page[TestOut])
 def list_tests(
     request: Request,
     search: str | None = None,
@@ -249,9 +252,10 @@ def list_tests(
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     filters = {
-        key: value for key, value in request.query_params.items()
+        key: value for key, value in checklist_query(request, filters_body).items()
         if key not in {"search", "device_id", "software_id", "outcome", "tag", "sort", "order", "page", "page_size"}
     }
     q = _query_tests(db, search, device_id, software_id, outcome, tag, filters)

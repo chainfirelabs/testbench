@@ -22,6 +22,7 @@ import {
   type EntityField, useEntityFields,
 } from '../entityFields'
 import { collapseVendorDevices, selectedVendorDeviceIds } from '../vendorDeviceGroups'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 
@@ -322,6 +323,7 @@ async function saveEdit() {
  */
 
 const vendorRows = ref<any[]>([])
+const vendorColumnsReady = ref(false)
 const vendorFields = ref<EntityField[]>([])
 const selectedFirmwareByGroup = ref<Record<string, string>>({})
 const vendorDisplayRows = computed(() => collapseVendorDevices(
@@ -462,7 +464,9 @@ const vendorColumns = computed(() => vendorFields.value
   .filter((field) => field.visible && field.list_visible)
   .map((field) => {
     const builtIn = baseVendorColumns.find((column: any) => column.field === field.key)
-    return builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+    const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
+    if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
+    return column
   }))
 
 // A computed (not a function called from the template): a fresh Set on every
@@ -509,8 +513,8 @@ const vendorFilterValues = makeFilterValues({
   entity: 'vendor-devices',
   local: (colId) => {
     const field = vendorFields.value.find((item) => item.key === colId)
-    if (field?.type === 'select') return field.options
-    if (field?.type === 'boolean') return [true, false]
+    if (field?.type === 'select') return [null, ...field.options]
+    if (field?.type === 'boolean') return [null, true, false]
     return undefined
   },
   skip: ['misc_data', 'created_at', 'updated_at'],
@@ -518,28 +522,33 @@ const vendorFilterValues = makeFilterValues({
 
 /*
  * The tested list is inventory devices, so its device columns are the device
- * columns — same values, same endpoint. What the grid derives from the tests
- * (the component, the outcome tallies, the counts) has no distinct-value list
- * to fetch and falls back to the rows on screen.
+ * columns — same values, same endpoint. Components use the tests' value
+ * endpoint; derived totals do not offer unsupported filter controls.
  */
-const testedFilterValues = makeFilterValues({
+const testedDeviceFilterValues = makeFilterValues({
   entity: 'devices',
   skip: ['component_name', 'component_version', 'outcomes', 'test_count', 'last_test_at'],
 })
 
+const testedComponentFilterValues = makeFilterValues({ entity: 'tests' })
+const testedFilterValues = (colId: string) => colId.startsWith('component_')
+  ? testedComponentFilterValues(colId) : testedDeviceFilterValues(colId)
+
 async function loadRemoteVendorDevices(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
-  const result = await api<any>(
-    `/software/${software.value.id}/vendor-devices/grouped?${params}`,
+  const result = await remoteTableApi(
+    `/software/${software.value.id}/vendor-devices/grouped`, params,
   )
   vendorRows.value = result.items.flatMap((row: any) => row._firmwareMembers || [row])
   return { rows: vendorDisplayRows.value, total: result.total }
 }
 
 async function loadVendorSchema() {
+  vendorColumnsReady.value = false
   vendorFields.value = await api<EntityField[]>(
     `/software/${software.value.id}/vendor-devices/schema`,
   )
+  vendorColumnsReady.value = true
 }
 
 function onVendorCellEdit(row: any, field: string, value: any) {
@@ -817,7 +826,7 @@ const testedColumns = [
   {
     field: 'component_name', headerName: 'Component', minWidth: 180,
     valueFormatter: (p: any) => p.value
-      ? `${p.value}${p.data.component_version ? ` ${p.data.component_version}` : ''}` : '',
+      ? `${p.value}${p.data?.component_version ? ` ${p.data?.component_version}` : ''}` : '',
   },
   {
     field: 'unique_id',
@@ -850,6 +859,7 @@ const testedColumns = [
   { field: 'architecture', headerName: 'Architecture' },
   {
     field: 'outcomes',
+    filter: false,
     headerName: 'Outcomes',
     minWidth: 190,
     // Sorting and the quick filter work off the flattened text; the renderer
@@ -871,9 +881,10 @@ const testedColumns = [
       return el
     },
   },
-  { field: 'test_count', headerName: 'Tests', maxWidth: 110 },
+  { field: 'test_count', filter: false, headerName: 'Tests', maxWidth: 110 },
   {
     field: 'last_test_at',
+    filter: false,
     headerName: 'Last Test',
     minWidth: 170,
     valueFormatter: (p: any) => (p.value ? new Date(p.value).toLocaleString() : ''),
@@ -889,7 +900,7 @@ async function loadTestedDeviceCount(softwareId: string) {
 
 async function loadRemoteTestedDevices(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
-  const res = await api<any>(`/software/${software.value.id}/tested-devices?${params}`)
+  const res = await remoteTableApi(`/software/${software.value.id}/tested-devices`, params)
   const rows = (res.devices || []).map((t: any) => ({
       id: `${t.component?.id || software.value.id}:${t.device.id}`,
       component_name: t.component?.name || '',
@@ -912,6 +923,7 @@ async function loadRemoteTestedDevices(request: RemoteTableRequest) {
 /* ---------------- Load ---------------- */
 
 async function load() {
+  vendorColumnsReady.value = false
   try {
     await loadFields()
     // Resolves a UUID or a name; a bare name gives the current version.
@@ -1109,6 +1121,7 @@ onMounted(load)
       <DataTable
         ref="vendorTable"
         :columns="vendorColumns"
+        :columns-ready="vendorColumnsReady"
         :rows="vendorDisplayRows"
         :remote-loader="loadRemoteVendorDevices"
         :filter-values="vendorFilterValues"

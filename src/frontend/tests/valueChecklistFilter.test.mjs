@@ -247,7 +247,7 @@ test('restoring a filter does not duplicate values the rows already supplied', (
   assert.deepEqual(shown(filter).map((o) => o.checked), [false, true])
 })
 
-// ---------- the model sends the shorter side ----------
+// ---------- actions establish an explicit inclusion or exclusion ----------
 
 test('unticking a few sends those few as exclusions', () => {
   const { filter, changes } = harness({ rows: ['Cisco', 'Juniper', 'Arista', 'Dell'] })
@@ -268,7 +268,7 @@ test('clearing and ticking one sends that one as an inclusion', () => {
   assert.deepEqual(changes.at(-1), { filterType: 'valueChecklist', included: ['Cisco'] })
 })
 
-test('the shorter side wins whichever it is', () => {
+test('clear then select preserves an inclusion list', () => {
   const values = Array.from({ length: 20 }, (_, i) => `v${i}`)
   const { filter, changes } = harness({ rows: values })
   clickAction(filter, 'Clear')
@@ -297,4 +297,70 @@ test('an inclusion naming a value the rows never showed still restores', () => {
   const { filter } = harness({ rows: [] })
   filter.setModel({ filterType: 'valueChecklist', included: ['Backup-Restore'] })
   assert.deepEqual(shown(filter).map((o) => [o.label, o.checked]), [['Backup-Restore', true]])
+})
+
+test('restoring either mode before rows arrive preserves its exact predicate', () => {
+  for (const model of [
+    { filterType: 'valueChecklist', excluded: ['Dell'] },
+    { filterType: 'valueChecklist', included: ['Cisco'] },
+    { filterType: 'valueChecklist', included: [] },
+  ]) {
+    const { filter } = harness()
+    filter.setModel(model)
+    assert.deepEqual(filter.getModel(), model)
+    assert.equal(filter.isFilterActive(), true)
+    assert.equal(filter.doesFilterPass({ node: { data: { make: 'Unseen' } } }), !!model.excluded)
+  }
+})
+
+test('late provider values do not change a restored inclusion or notify the grid', async () => {
+  let resolve
+  const { filter, changes } = harness({ provider: () => new Promise(r => { resolve = r }) })
+  const model = { filterType: 'valueChecklist', included: ['Cisco'] }
+  filter.setModel(model)
+  await Promise.resolve()
+  resolve(['Cisco', 'Dell', 'Juniper'])
+  await new Promise(r => setTimeout(r, 0))
+  assert.deepEqual(filter.getModel(), model)
+  assert.deepEqual(shown(filter).map(o => [o.label, o.checked]), [['Cisco', true], ['Dell', false], ['Juniper', false]])
+  assert.deepEqual(changes, [])
+})
+
+test('live boolean selection preserves both true and false without requiring blanks', () => {
+  const { filter } = harness({ rows: [true, false, null] })
+  clickAction(filter, 'Clear')
+  for (const label of ['true', 'false']) {
+    const { checkbox } = shown(filter).find(o => o.label === label)
+    checkbox.checked = true
+    checkbox.emit('change')
+  }
+  assert.deepEqual(filter.getModel(), { filterType: 'valueChecklist', included: [true, false] })
+  for (const value of [true, false]) assert.equal(filter.doesFilterPass({ node: { data: { make: value } } }), true)
+  assert.equal(filter.doesFilterPass({ node: { data: { make: null } } }), false)
+  clickAction(filter, 'Select all')
+  assert.equal(filter.getModel(), null)
+})
+
+test('excluding blanks keeps the exclusion even if the loaded page contains only blanks', () => {
+  const { filter } = harness({ rows: [null] })
+  const { checkbox } = shown(filter)[0]
+  checkbox.checked = false
+  checkbox.emit('change')
+  assert.deepEqual(filter.getModel(), { filterType: 'valueChecklist', excluded: [null] })
+  assert.equal(filter.doesFilterPass({ node: { data: { make: true } } }), true)
+})
+
+test('opening the filter on a new page does not change the saved selection', () => {
+  const rows = ['Dell', 'Cisco']
+  const { filter } = harness({ rows })
+  filter.setModel({ filterType: 'valueChecklist', included: ['Cisco'] })
+  rows.splice(0, rows.length, 'Juniper')
+  filter.afterGuiAttached()
+  assert.deepEqual(filter.getModel(), { filterType: 'valueChecklist', included: ['Cisco'] })
+  assert.equal(shown(filter).find(o => o.label === 'Juniper').checked, false)
+})
+
+test('row-dependent formatters cannot break distinct value options', () => {
+  const { filter } = harness({ rows: ['Cisco'], formatter: p => p.data.description })
+  assert.deepEqual(shown(filter).map(o => o.label), ['Cisco'])
 })

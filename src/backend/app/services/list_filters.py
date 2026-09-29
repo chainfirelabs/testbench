@@ -1,18 +1,11 @@
-"""Helpers shared by server-paged grid checklist filters.
-
-A checklist filter sends the side of its selection that is shorter. Unticking
-a couple of values out of hundreds sends `exclude__<field>`; clearing the lot
-and ticking one sends `include__<field>`. The two are not merely inverses —
-see `include_clause` — but the reason for having both is plain arithmetic: the
-list travels in the query string, and a column with five hundred distinct
-values cannot put four hundred and ninety-nine of them in a URL. nginx rejects
-the request at around eight kilobytes and the grid is left showing nothing.
-"""
+"""Typed predicates shared by server-paged grid checklist filters."""
 
 import json
 from typing import Any
 
-from sqlalchemy import and_, or_
+from fastapi import HTTPException, Request
+
+from sqlalchemy import String, and_, or_
 
 
 def excluded_values(raw: Any) -> list[Any]:
@@ -35,7 +28,9 @@ def exclude_clause(expression, values: list[Any]):
     if concrete:
         clauses.append(expression.notin_(concrete))
     if blanks:
-        clauses.extend((expression.is_not(None), expression != ""))
+        clauses.append(expression.is_not(None))
+        if isinstance(expression.type, String):
+            clauses.append(expression != "")
     return and_(*clauses) if clauses else None
 
 
@@ -55,8 +50,20 @@ def include_clause(expression, values: list[Any]):
     if concrete:
         clauses.append(expression.in_(concrete))
     if blanks:
-        clauses.append(or_(expression.is_(None), expression == ""))
+        clauses.append(
+            or_(expression.is_(None), expression == "")
+            if isinstance(expression.type, String) else expression.is_(None)
+        )
     if not clauses:
         # Nothing ticked at all: the honest answer is no rows, not every row.
         return expression.is_(None) & expression.is_not(None)
     return or_(*clauses)
+
+
+def checklist_query(request: Request, body: dict[str, str] | None = None) -> dict[str, str]:
+    """Large checklists may travel in a POST body; ordinary controls stay in
+    the query string and retain FastAPI's existing validation and defaults.
+    """
+    if body and any(not key.startswith(("include__", "exclude__")) for key in body):
+        raise HTTPException(422, "The query body may contain only checklist filters")
+    return {**request.query_params, **(body or {})}

@@ -1,6 +1,8 @@
+from typing import Annotated
+
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -9,7 +11,7 @@ from ..models import AuditLog, User
 from ..schemas import AuditOut, Page
 from ..services.audit import log_action
 from ..services.io import streaming_export_response
-from ..services.list_filters import exclude_clause, excluded_values, include_clause
+from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from .deps import require_audit_view
 
 router = APIRouter(prefix="/audit_logs", tags=["audit_logs"])
@@ -56,6 +58,7 @@ def _query_logs(
 
 
 @router.get("", response_model=Page[AuditOut])
+@router.post("/query", response_model=Page[AuditOut])
 def list_audit_logs(
     request: Request,
     search: str | None = None,
@@ -71,6 +74,7 @@ def list_audit_logs(
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     user: User = Depends(require_audit_view),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     q = _query_logs(db, username, action, entity_type, entity_id, date_from, date_to)
     if search:
@@ -85,7 +89,7 @@ def list_audit_logs(
         "action": AuditLog.action, "entity_type": AuditLog.entity_type,
         "entity_id": AuditLog.entity_id, "ip_address": AuditLog.ip_address,
     }
-    for key, value in request.query_params.items():
+    for key, value in checklist_query(request, filters_body).items():
         if not key.startswith(("exclude__", "include__")):
             continue
         keeping = key.startswith("include__")

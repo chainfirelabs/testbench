@@ -54,3 +54,23 @@ test('a local answer of false or zero still counts as an answer', async () => {
   assert.deepEqual(await resolveFilterValues(source, 'online', server.fetch), [true, false])
   assert.deepEqual(server.calls, [])
 })
+
+const { fetchFilterValues } = await import('../src/filterValues.ts')
+
+test('filter values enumerate beyond 500 and preserve blanks and booleans', async () => {
+  const values = [null, true, false, ...Array.from({ length: 1000 }, (_, i) => `v${i}`)]
+  const offsets = []
+  const actual = await fetchFilterValues(async offset => {
+    offsets.push(offset)
+    return { values: values.slice(offset, offset + 500), has_more: offset + 500 < values.length }
+  })
+  assert.deepEqual(actual, values)
+  assert.deepEqual(offsets, [0, 500, 1000])
+})
+
+test('a failed later page is reported instead of returning incomplete filter values', async () => {
+  await assert.rejects(fetchFilterValues(async offset => {
+    if (offset) throw new Error('offline')
+    return { values: ['Cisco'], has_more: true }
+  }), /offline/)
+})

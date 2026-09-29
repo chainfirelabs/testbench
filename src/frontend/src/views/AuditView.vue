@@ -6,6 +6,7 @@ import DetailModal from '../components/DetailModal.vue'
 import { detailCellRenderer } from '../detail'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 
@@ -38,6 +39,7 @@ const columns = [
   { field: 'ip_address', headerName: 'IP' },
   {
     field: 'detail',
+    filter: false,
     headerName: 'Detail',
     editable: false,
     minWidth: 200,
@@ -62,14 +64,13 @@ async function load() {
  */
 const filterValues = makeFilterValues({
   entity: 'audit_logs',
-  // Timestamps, opaque ids and the JSON detail blob: nothing anyone filters by
-  // ticking a value.
-  skip: ['timestamp', 'entity_id', 'detail'],
+  // The JSON detail blob has no server-side checklist predicate.
+  skip: ['detail'],
 })
 
 async function loadRemoteAudit(request: RemoteTableRequest) {
   const params = remoteTableParams(request)
-  const page = await api<any>(`/audit_logs?${params}`)
+  const page = await remoteTableApi(`/audit_logs`, params)
   rows.value = page.items
   return { rows: page.items, total: page.total }
 }

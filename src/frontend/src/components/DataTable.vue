@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { AgGridVue } from 'ag-grid-vue3'
 import {
   AllCommunityModule,
@@ -10,6 +10,7 @@ import {
   type SelectionColumnDef,
 } from 'ag-grid-community'
 import { useIsCardList, useIsMobile } from '../breakpoints'
+import { captureTableState, restoreTableState } from '../tableState'
 import { ValueChecklistFilter } from '../valueChecklistFilter'
 import CardList, { type CardAction, type CardField } from './CardList.vue'
 
@@ -134,6 +135,8 @@ export interface RemoteTableResult {
 const props = withDefaults(
   defineProps<{
     columns: any[]
+    /** Delay saved views until the dynamic schema has finished loading. */
+    columnsReady?: boolean
     rows?: any[]
     /** Load only the requested window instead of retaining the full list. */
     remoteLoader?: (request: RemoteTableRequest) => Promise<RemoteTableResult>
@@ -184,6 +187,7 @@ const props = withDefaults(
   }>(),
   {
     rows: () => [],
+    columnsReady: true,
     remoteLoader: undefined,
     filterValues: undefined,
     editable: false,
@@ -214,6 +218,8 @@ const emit = defineEmits<{
 }>()
 
 const quickFilter = ref('')
+const remoteError = ref('')
+let remoteRequest = 0
 const gridApi = ref<GridApi | null>(null)
 const selectedCount = ref(0)
 const isRemote = computed(() => !!props.remoteLoader)
@@ -237,6 +243,7 @@ const remoteBlockSize = ref(props.defaultPageSize)
 const remoteDatasource = {
   async getRows(params: any) {
     if (!props.remoteLoader) return
+    const request = ++remoteRequest
     try {
       const result = await props.remoteLoader({
         startRow: params.startRow,
@@ -259,6 +266,7 @@ const remoteDatasource = {
        * a full block with no total leaves the grid to keep asking, which is
        * the only thing it can correctly do.
        */
+      if (request === remoteRequest) remoteError.value = ''
       const rows = result.rows || []
       const asked = Math.max(1, params.endRow - params.startRow)
       const total = Number.isFinite(result.total)
@@ -271,7 +279,8 @@ const remoteDatasource = {
       } else {
         params.successCallback(rows, total)
       }
-    } catch {
+    } catch (error: any) {
+      if (request === remoteRequest) remoteError.value = `Could not load rows: ${error?.message || 'Request failed'}`
       if (typeof params.fail === 'function') params.fail()
       else params.failCallback?.()
     }
@@ -545,6 +554,9 @@ const defaultColDef = computed(() => ({
   // values and silently hides the rest of the column.
   filterParams: { valuesProvider: props.filterValues || undefined },
   sortable: true,
+  // Our custom filter owns its types; inference can defer saved models until
+  // rows arrive, which creates a circular dependency for remote filtering.
+  cellDataType: false,
   // Never editable in card mode: the grid is off-screen there and a cell edit
   // has no way to be seen, let alone saved.
   editable: () => props.editable && !isCardList.value,
@@ -1019,6 +1031,7 @@ function onGridReady(e: any) {
   syncCards()
   syncCardSort()
   emit('grid-ready', e.api)
+  void applyPendingState()
 }
 
 function onPaginationChanged(e: any) {
@@ -1198,42 +1211,36 @@ watch(showColPicker, (open) => {
 
 // ---------- state capture / restore (used by filter profiles) ----------
 
+let pendingState: any = null
+
 function getState(): any {
-  const api = gridApi.value
-  if (!api) return null
-  const column = api.getColumnState()
-  // Keep every part of a saved view explicit and JSON-friendly.
-  return {
-    filter: api.getFilterModel?.() || {},
-    // AG Grid 36 keeps sort in column state; preserve the saved-filter wire
-    // shape as a compact, ordered sort model for existing API consumers.
-    sort: column
-      .filter((item) => item.sort)
-      .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
-      .map((item) => ({ colId: item.colId, sort: item.sort })),
-    column,
-    quick_filter: api.getQuickFilter?.() || '',
-    page_size: api.paginationGetPageSize?.() || props.defaultPageSize,
-  }
+  if (!gridApi.value || !props.columnsReady || pendingState) return null
+  return captureTableState(gridApi.value, quickFilter.value, props.defaultPageSize)
 }
 
 function applyState(s: any) {
+  if (!s) return
+  pendingState = s
+  void applyPendingState()
+}
+
+async function applyPendingState() {
+  // Vue must deliver the new definitions to AG Grid before restoring them.
+  await nextTick()
   const api = gridApi.value
-  if (!api || !s) return
-  // Column state carries order, widths, visibility and sort
-  if (s.column?.length) api.applyColumnState({ state: s.column, applyOrder: true })
-  if (s.filter) api.setFilterModel(s.filter)
-  quickFilter.value = s.quick_filter || ''
-  api.setGridOption('quickFilterText', s.quick_filter || '')
-  if (s.page_size) api.setGridOption('paginationPageSize', s.page_size)
-  // A view has now said what this table should show, so the fallback stops
-  // owning any of it.
+  if (!api || !props.columnsReady || !pendingState) return
+  const expected = props.columns.map((c) => c.colId || c.field).filter(Boolean)
+  if (expected.some((id) => !api.getColumn(id))) return
+  const state = pendingState
+  pendingState = null
+  quickFilter.value = state.quick_filter || ''
+  restoreTableState(api, state, isRemote.value)
   keepCurrentState()
-  // A saved view can change every one of the things a card shows — which
-  // fields, their order, the sort and the page size.
   syncCardSort()
   syncCards()
 }
+
+watch(() => props.columnsReady, () => { void applyPendingState() })
 
 /**
  * Repaint rows whose data changed underneath the grid.
@@ -1340,6 +1347,9 @@ defineExpose({
 
 <template>
   <div class="data-table">
+    <p v-if="remoteError" role="alert">
+      {{ remoteError }} <button class="btn" @click="reload">Retry</button>
+    </p>
     <div class="table-toolbar">
       <input v-model="quickFilter" class="quick-filter" placeholder="Quick filter..." />
       <span v-if="selectionEnabled && selectedCount" class="selection-count">
@@ -1438,6 +1448,7 @@ defineExpose({
         @columnVisible="onColumnStateChanged"
         @columnMoved="onColumnStateChanged"
         @gridReady="onGridReady"
+        @newColumnsLoaded="applyPendingState"
       />
     </div>
 
