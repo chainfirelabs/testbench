@@ -992,6 +992,24 @@ function confirmPluginAction(action: PluginAction, row?: any): boolean {
   return !message || confirm(message)
 }
 
+/**
+ * Paint scan results while a network scan is still running.
+ *
+ * The scan worker reports devices in batches as it reaches them, and each
+ * batch raises `scanned`; that is the cue to patch the online columns, so the
+ * dots flip during the sweep instead of all at once when it ends.
+ */
+function watchScanProgress(action: PluginAction): (status: any) => void {
+  let seen = 0
+  return (status) => {
+    if (action.plugin_id !== 'network-scan' || status.state !== 'running') return
+    if ((status.scanned || 0) > seen) {
+      seen = status.scanned
+      void refreshOnlineState()
+    }
+  }
+}
+
 async function runPluginAction(action: PluginAction, row?: any) {
   const key = `${action.plugin_id}:${action.id}:${row?.id || 'collection'}`
   if (!pluginRunning.value.has(key) && !confirmPluginAction(action, row)) return
@@ -1018,10 +1036,12 @@ async function runPluginAction(action: PluginAction, row?: any) {
         activePluginRuns.set(key, view)
         pluginRun.value = view
       }
+      const onProgress = watchScanProgress(action)
       const deadline = Date.now() + 30 * 60 * 1000
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 2000))
         const status = await api<any>(`/plugins/${action.plugin_id}/runs/${result.run_id}`)
+        onProgress(status)
         if (showRun) {
           const active = activePluginRuns.get(key)
           if (active?.status.run_id === result.run_id) {
@@ -1054,10 +1074,12 @@ async function runPluginAction(action: PluginAction, row?: any) {
 async function monitorRestoredPluginRun(key: string, action: PluginAction, view: PluginRunView) {
   try {
     const runId = view.status.run_id
+    const onProgress = watchScanProgress(action)
     const deadline = Date.now() + 30 * 60 * 1000
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const status = await api<any>(`/plugins/${action.plugin_id}/runs/${runId}`)
+      onProgress(status)
       const current = activePluginRuns.get(key) || view
       const updated = { ...current, status }
       activePluginRuns.set(key, updated)

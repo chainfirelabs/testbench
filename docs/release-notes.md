@@ -1,5 +1,15 @@
 # Release notes
 
+## 1.9.5
+
+- **Scan all** now updates each device's online state as the sweep reaches it.
+  The scan worker reports results in batches during the run, and the Devices
+  page repaints the online columns as progress advances instead of waiting for
+  the whole scan to finish.
+- The online-state poll no longer fails when the fleet includes devices that
+  have never been scanned.
+- No database migration is required.
+
 ## 1.9.4
 
 - Column checklists preserve their include or exclude selection while rows and

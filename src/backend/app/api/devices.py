@@ -581,7 +581,9 @@ def scan_results(db: Session = Depends(get_db), user: User = Depends(get_current
     rows = db.execute(
         select(
             Device.id,
-            Device.online_status.label("online_status"),
+            # A device never scanned has no `online_status` key, and the SQL
+            # side of the hybrid reads that as NULL, not the Python default.
+            func.coalesce(Device.online_status, False).label("online_status"),
             Device.last_seen_online.label("last_seen_online"),
             Device.last_scanned_at.label("last_scanned_at"),
         )

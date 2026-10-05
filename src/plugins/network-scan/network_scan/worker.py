@@ -62,9 +62,31 @@ def main():
     run_id, base = os.environ["TB_SCAN_RUN_ID"], os.environ["TB_SCAN_CONTROLLER_URL"].rstrip("/")
     headers = {"Authorization": f"Bearer {os.environ['TB_SCAN_RUN_TOKEN']}"}
     entities = httpx.get(f"{base}/worker/v1/runs/{run_id}", headers=headers, timeout=30).json()["entities"]
+    timeout = float(os.getenv("TB_SCAN_TIMEOUT_SECONDS", "2"))
     print(f"Starting scan of {len(entities)} device(s)", flush=True)
+    online_count, total, batch = 0, 0, []
+
+    def flush():
+        # Report as devices finish, so the fleet view updates during the sweep.
+        if batch:
+            httpx.post(f"{base}/worker/v1/runs/{run_id}/results", headers=headers,
+                       json={"items": batch}, timeout=60).raise_for_status()
+            batch.clear()
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=int(os.getenv("TB_SCAN_CONCURRENCY", "10"))) as pool:
-        items = list(pool.map(lambda item: probe(item, float(os.getenv("TB_SCAN_TIMEOUT_SECONDS", "2"))), entities))
-    online_count = sum(bool(item["online"]) for item in items)
-    print(f"Scan complete: {online_count}/{len(items)} device(s) online", flush=True)
-    httpx.post(f"{base}/worker/v1/runs/{run_id}/complete", headers=headers, json={"items": items}, timeout=60).raise_for_status()
+        pending = {pool.submit(probe, entity, timeout) for entity in entities}
+        last_flush = time.monotonic()
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending, timeout=1, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                item = future.result()
+                batch.append(item)
+                total += 1
+                online_count += bool(item["online"])
+            if len(batch) >= 25 or time.monotonic() - last_flush >= 1:
+                flush()
+                last_flush = time.monotonic()
+    flush()
+    print(f"Scan complete: {online_count}/{total} device(s) online", flush=True)
+    httpx.post(f"{base}/worker/v1/runs/{run_id}/complete", headers=headers, json={"items": []}, timeout=60).raise_for_status()

@@ -93,3 +93,32 @@ def test_cancel_revokes_token_and_failure_cannot_reopen_it(server):
     assert server.RUNS['run']['state'] == 'cancelled'
     with pytest.raises(HTTPException):
         server.worker_input('run', None)
+
+
+def test_batches_land_as_they_arrive_and_cannot_repeat_a_device(server):
+    server.RUNS['run']['entities'].append({'id': 'device-2', '_scan_addresses': {}})
+    assert server.worker_results('run', {'items': [{
+        'device_id': 'device-1', 'probed': True, 'online': True,
+    }]}, 'Bearer worker-token') == {'scanned': 1}
+    assert server.httpx.post.call_args.kwargs['json']['run_id'] == 'run-1'
+    assert server.RUNS['run']['scanned'] == 1
+    assert server.RUNS['run']['state'] == 'running'
+    with pytest.raises(HTTPException) as error:
+        server.worker_results('run', {'items': [{'device_id': 'device-1'}]}, 'Bearer worker-token')
+    assert error.value.status_code == 422
+    server.worker_complete('run', {'items': [{
+        'device_id': 'device-2', 'probed': True, 'online': False,
+    }]}, 'Bearer worker-token')
+    assert server.httpx.post.call_args.kwargs['json']['run_id'] == 'run-2'
+    assert server.RUNS['run']['state'] == 'completed'
+    assert server.RUNS['run']['scanned'] == 2
+    assert server.RUNS['run']['result'] == {'updated': ['device-1', 'device-1']}
+    assert 'reported' not in server.status('run', 'network-scan', 'controller-secret')
+
+
+def test_empty_completion_after_batches_sends_nothing_more(server):
+    server.worker_results('run', {'items': [{
+        'device_id': 'device-1', 'probed': True, 'online': True,
+    }]}, 'Bearer worker-token')
+    assert server.worker_complete('run', {'items': []}, 'Bearer worker-token') == {'updated': ['device-1']}
+    assert server.httpx.post.call_count == 1

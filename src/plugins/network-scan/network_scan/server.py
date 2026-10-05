@@ -144,7 +144,7 @@ def invoke(action_id: str, body: dict, x_testbench_plugin: str | None = Header(N
 def list_runs(x_testbench_plugin: str | None = Header(None), x_testbench_plugin_secret: str | None = Header(None)):
     _auth(x_testbench_plugin, x_testbench_plugin_secret)
     return {"runs": [{
-        **{k: v for k, v in run.items() if k not in {"entities", "token"}},
+        **{k: v for k, v in run.items() if k not in {"entities", "token", "reported"}},
         "entity_ids": [str(entity.get("id")) for entity in run.get("entities", []) if entity.get("id")],
     } for run in RUNS.values() if run.get("state") in {"starting", "running"}]}
 
@@ -153,7 +153,7 @@ def list_runs(x_testbench_plugin: str | None = Header(None), x_testbench_plugin_
 def status(run_id: str, x_testbench_plugin: str | None = Header(None), x_testbench_plugin_secret: str | None = Header(None)):
     _auth(x_testbench_plugin, x_testbench_plugin_secret)
     if run_id not in RUNS: raise HTTPException(404, "Run not found")
-    return {k: v for k, v in RUNS[run_id].items() if k not in {"entities", "token"}}
+    return {k: v for k, v in RUNS[run_id].items() if k not in {"entities", "token", "reported"}}
 
 
 @app.delete("/plugin/v1/runs/{run_id}")
@@ -163,7 +163,7 @@ def cancel(run_id: str, x_testbench_plugin: str | None = Header(None), x_testben
         run = RUNS.get(run_id)
         if not run: raise HTTPException(404, "Run not found")
         if run.get("state") not in {"starting", "running"}:
-            return {k: v for k, v in run.items() if k not in {"entities", "token"}}
+            return {k: v for k, v in run.items() if k not in {"entities", "token", "reported"}}
         run.update(state="cancelled", token="", finished_at=datetime.now(timezone.utc).isoformat())
     config.load_incluster_config()
     try: client.BatchV1Api().delete_namespaced_job(f"scan-{run_id}", WORKER_NAMESPACE, propagation_policy="Background")
@@ -171,7 +171,7 @@ def cancel(run_id: str, x_testbench_plugin: str | None = Header(None), x_testben
         if exc.status != 404: raise
     try: client.CoreV1Api().delete_namespaced_secret(f"scan-run-{run_id}", WORKER_NAMESPACE)
     except Exception: pass
-    return {k: v for k, v in run.items() if k not in {"entities", "token"}}
+    return {k: v for k, v in run.items() if k not in {"entities", "token", "reported"}}
 
 
 def _worker_run(run_id: str, authorization: str | None):
@@ -194,32 +194,63 @@ def worker_input(run_id: str, authorization: str | None = Header(None)):
         return {"entities": run["entities"]}
 
 
+def _submit_items(run_id: str, run: dict, items) -> None:
+    """Validate a batch of worker results and land it on the backend.
+
+    Called with RUNS_LOCK held. A device may be reported once per run, across
+    every batch, and the addresses sent on are the controller's snapshot.
+    """
+    entities = {entity["id"]: entity for entity in run["entities"]}
+    if not isinstance(items, list):
+        raise HTTPException(422, "items must be an array")
+    reported = run.setdefault("reported", set())
+    submitted = set()
+    authorized_items = []
+    for item in items:
+        device_id = item.get("device_id") if isinstance(item, dict) else None
+        if (not isinstance(device_id, str) or device_id not in entities
+                or device_id in submitted or device_id in reported):
+            raise HTTPException(422, "Each result must name a distinct device from this run")
+        submitted.add(device_id)
+        # The controller owns the snapshot, not the reporting worker.
+        authorized_items.append({
+            **item, "starting_addresses": entities[device_id].get("_scan_addresses", {}),
+        })
+    if not authorized_items:
+        return
+    # Each batch is its own backend receipt, so batches stay idempotent
+    # without one swallowing the next.
+    batch = run.get("batches", 0) + 1
+    response = httpx.post(f"{TESTBENCH_URL}/plugin-host/network-scan/device-results",
+        headers={"X-TestBench-Plugin": PLUGIN_ID, "X-TestBench-Plugin-Secret": SHARED_SECRET},
+        json={"run_id": f"{run_id}-{batch}", "items": authorized_items}, timeout=30)
+    response.raise_for_status()
+    reported.update(submitted)
+    result = run.setdefault("result", {})
+    for key, values in response.json().items():
+        result.setdefault(key, []).extend(values)
+    run.update(batches=batch, scanned=len(reported))
+
+
+@app.post("/worker/v1/runs/{run_id}/results")
+def worker_results(run_id: str, body: dict, authorization: str | None = Header(None)):
+    # Results land as the worker produces them, so the fleet view sees each
+    # device go online or offline during the sweep rather than at its end.
+    with RUNS_LOCK:
+        run = _worker_run(run_id, authorization)
+        _submit_items(run_id, run, body.get("items", []))
+        return {"scanned": run.get("scanned", 0)}
+
+
 @app.post("/worker/v1/runs/{run_id}/complete")
 def worker_complete(run_id: str, body: dict, authorization: str | None = Header(None)):
     # Serialize final submission with cancellation: after cancellation wins,
     # no worker can use its former token to submit a result or reopen the run.
     with RUNS_LOCK:
         run = _worker_run(run_id, authorization)
-        entities = {entity["id"]: entity for entity in run["entities"]}
-        items = body.get("items", [])
-        if not isinstance(items, list):
-            raise HTTPException(422, "items must be an array")
-        submitted = set()
-        authorized_items = []
-        for item in items:
-            device_id = item.get("device_id") if isinstance(item, dict) else None
-            if not isinstance(device_id, str) or device_id not in entities or device_id in submitted:
-                raise HTTPException(422, "Each result must name a distinct device from this run")
-            submitted.add(device_id)
-            # The controller owns the snapshot, not the reporting worker.
-            authorized_items.append({
-                **item, "starting_addresses": entities[device_id].get("_scan_addresses", {}),
-            })
-        response = httpx.post(f"{TESTBENCH_URL}/plugin-host/network-scan/device-results",
-            headers={"X-TestBench-Plugin": PLUGIN_ID, "X-TestBench-Plugin-Secret": SHARED_SECRET},
-            json={"run_id": run_id, "items": authorized_items}, timeout=30)
-        response.raise_for_status()
-        run.update(state="completed", scanned=len(authorized_items), result=response.json(),
+        _submit_items(run_id, run, body.get("items", []))
+        run.update(state="completed", scanned=len(run.get("reported", ())),
+                   result=run.get("result", {}),
                    token="", finished_at=datetime.now(timezone.utc).isoformat())
     try:
         config.load_incluster_config()
