@@ -223,7 +223,7 @@ const CellValue = defineComponent({
 
 .card-fields {
   display: grid;
-  grid-template-columns: minmax(88px, 34%) 1fr;
+  grid-template-columns: minmax(88px, 34%) minmax(0, 1fr);
   gap: 5px 12px;
   margin: 11px 0 0;
   font-size: 13.5px;
@@ -239,11 +239,15 @@ const CellValue = defineComponent({
 }
 
 .card-fields dd {
+  min-width: 0;
   margin: 0;
   color: var(--text);
-  word-break: break-word;
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
+
+.card-cell { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.card-cell select { max-width: 100%; }
 
 .card-actions {
   display: flex;

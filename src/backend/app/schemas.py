@@ -347,6 +347,27 @@ def _validate_support_status(v: str | None) -> str | None:
     return v
 
 
+class VendorComponentSupportIn(BaseModel):
+    component_id: str | None = None
+    component_name: str | None = None
+    component_version: str | None = None
+    support_status: str
+
+    @field_validator("support_status")
+    @classmethod
+    def _check_support_status(cls, value):
+        return _validate_support_status(value)
+
+
+class VendorComponentSupportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    component_id: str
+    component_name: str
+    component_version: str
+    support_status: str
+
+
 class VendorDeviceBase(BaseModel):
     make: str | None = None
     model: str | None = None
@@ -357,6 +378,7 @@ class VendorDeviceBase(BaseModel):
     source: str | None = None
     notes: str | None = None
     misc_data: dict = Field(default_factory=dict)
+    component_support: list[VendorComponentSupportIn] = Field(default_factory=list)
 
 
 class VendorDeviceCreate(VendorDeviceBase):
@@ -379,6 +401,7 @@ class VendorDeviceUpdate(BaseModel):
     source: str | None = None
     notes: str | None = None
     misc_data: dict | None = None
+    component_support: list[VendorComponentSupportIn] | None = None
 
 
 class VendorDeviceOut(VendorDeviceBase):
@@ -386,6 +409,7 @@ class VendorDeviceOut(VendorDeviceBase):
 
     id: str
     software_id: str
+    component_support: list[VendorComponentSupportOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime | None = None
 

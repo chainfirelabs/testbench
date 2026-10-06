@@ -1,5 +1,21 @@
 # Release notes
 
+## 1.9.6
+
+- Software suites now group components with the same name. On a suite's Details
+  tab, expand a component name to see its versions. The Components dropdown
+  on the Software list shows only the highest version for each component name.
+- Vendor device support claims can optionally set a separate support status
+  for each component version. Claims without component links and components
+  without an override continue to use the general support status.
+- Device Info preserves populated hardware versions and LAN/WAN MAC addresses,
+  including when an AI result arrives after inventory changes. It fills missing
+  values and continues to update firmware when a new version is discovered.
+- Long text and wide tables wrap or scroll within frontend pages on narrow
+  screens.
+- Database migration 0010 adds optional component support links to vendor
+  device claims.
+
 ## 1.9.5
 
 - **Scan all** now updates each device's online state as the sweep reaches it.

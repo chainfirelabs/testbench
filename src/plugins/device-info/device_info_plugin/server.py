@@ -379,7 +379,7 @@ def _protect_saved_recipe(result: dict, selection: str) -> dict:
     return result
 
 
-MAC_DISCOVERY_ROLES = {"discovery_lan_mac", "discovery_wan_mac"}
+FILL_ONLY_DISCOVERY_ROLES = {"discovery_hardware", "discovery_lan_mac", "discovery_wan_mac"}
 
 
 def _has_inventory_value(value) -> bool:
@@ -387,7 +387,7 @@ def _has_inventory_value(value) -> bool:
 
 
 def _discovery_roles_to_request(roles: dict, configured: list[str] | None = None) -> list[str]:
-    """Configured outputs, excluding MAC fields that inventory already has."""
+    """Configured outputs, excluding fill-only fields that inventory already has."""
     allowed = set(configured) if configured is not None else {
         "discovery_hardware", "discovery_firmware",
         "discovery_lan_mac", "discovery_wan_mac",
@@ -398,16 +398,16 @@ def _discovery_roles_to_request(roles: dict, configured: list[str] | None = None
             "discovery_lan_mac", "discovery_wan_mac",
         )
         if role in roles and role in allowed
-        and (role not in MAC_DISCOVERY_ROLES or not _has_inventory_value(roles[role]))
+        and (role not in FILL_ONLY_DISCOVERY_ROLES or not _has_inventory_value(roles[role]))
     ]
 
 
-def _drop_existing_mac_findings(result: dict, roles: dict) -> None:
-    """Do not let a model overwrite a MAC that existed when research began."""
+def _drop_existing_fill_only_findings(result: dict, roles: dict) -> None:
+    """Do not let a model overwrite hardware or MAC values present at research start."""
     findings = result.get("findings")
     if not isinstance(findings, dict):
         return
-    for role in MAC_DISCOVERY_ROLES:
+    for role in FILL_ONLY_DISCOVERY_ROLES:
         if _has_inventory_value(roles.get(role)):
             findings.pop(role, None)
 
@@ -425,8 +425,8 @@ def _submit_result(marker: str, entity: dict, roles: dict, requested_roles: list
     result = _protect_saved_recipe(
         _normalize_result(_parse_marker(marker), provider, model, selection), selection
     )
-    # Enforce the prompt policy in case the model returns a populated MAC role.
-    _drop_existing_mac_findings(result, roles)
+    # Enforce the fill-only policy even if the model returns a populated role.
+    _drop_existing_fill_only_findings(result, roles)
     _drop_unrequested_findings(result, requested_roles)
     method_attempts = method_attempts or []
     for attempt in method_attempts:

@@ -160,6 +160,7 @@ def vendor_device_brief(v: dict) -> dict:
         "hardware_version": v.get("hardware_version"),
         "architecture": v.get("architecture"),
         "support_status": v.get("support_status"),
+        "component_support": v.get("component_support") or None,
         "source": v.get("source"),
         "notes": _preview(v.get("notes")),
         "custom_fields": custom,

@@ -459,8 +459,12 @@ def device_info_results(
             rejected[role] = "role was not requested for this device"
             continue
         current = (device._data or {}).get(field.key)
-        if role in {"discovery_lan_mac", "discovery_wan_mac"} and current is not None and str(current).strip():
-            rejected[role] = "existing MAC addresses are protected"
+        if (role in {"discovery_hardware", "discovery_lan_mac", "discovery_wan_mac"}
+                and current is not None and str(current).strip()):
+            rejected[role] = (
+                "existing hardware version is protected" if role == "discovery_hardware"
+                else "existing MAC addresses are protected"
+            )
             continue
         if current != finding.starting_value:
             conflicts[role] = {"current": current, "starting": finding.starting_value}

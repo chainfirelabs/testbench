@@ -307,6 +307,7 @@ h3 {
 
 .content {
   flex: 1;
+  min-width: 0;
   padding: 16px;
   padding-left: max(16px, env(safe-area-inset-left));
   padding-right: max(16px, env(safe-area-inset-right));
@@ -328,6 +329,8 @@ h3 {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
   background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: var(--r-lg);
@@ -366,6 +369,7 @@ h3 {
   margin: 0;
   font-size: 19px;
   font-weight: 620;
+  overflow-wrap: anywhere;
 }
 
 .toolbar {
@@ -576,11 +580,15 @@ label {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
+
+.data-table > [role='alert'] { overflow-wrap: anywhere; }
 
 .data-table .table-toolbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 10px;
 }
@@ -1198,6 +1206,7 @@ label {
   padding: 12px 16px;
   border-radius: var(--r-md);
   max-width: 400px;
+  overflow-wrap: anywhere;
   font-size: 13px;
   box-shadow: var(--shadow-lg);
   z-index: 1000;
@@ -1457,7 +1466,7 @@ label {
 
 .kv {
   display: grid;
-  grid-template-columns: 190px 1fr;
+  grid-template-columns: 190px minmax(0, 1fr);
   gap: 0 16px;
   max-width: 760px;
 }
@@ -1469,10 +1478,11 @@ label {
 }
 
 .kv dd {
+  min-width: 0;
   margin: 0;
   padding: 7px 0;
   border-bottom: 1px solid var(--border-soft);
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .json-editor {
@@ -1533,11 +1543,13 @@ label {
 
 .form-grid {
   display: grid;
-  grid-template-columns: 150px 1fr;
+  grid-template-columns: 150px minmax(0, 1fr);
   gap: 10px 14px;
   align-items: center;
   max-width: 580px;
 }
+
+.form-grid > * { min-width: 0; }
 
 .form-grid label {
   color: var(--text-muted);
@@ -1572,6 +1584,7 @@ label {
   max-width: 480px;
   max-height: 100%;
   overflow: auto;
+  overflow-wrap: anywhere;
   box-shadow: var(--shadow-lg);
 }
 
@@ -1623,6 +1636,7 @@ td {
 .data-list td {
   padding: 9px 10px;
   border-bottom: 1px solid var(--border-soft);
+  overflow-wrap: anywhere;
 }
 
 .data-list th {
@@ -1994,6 +2008,8 @@ td {
 
 .table-scroll {
   max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
 
 /*

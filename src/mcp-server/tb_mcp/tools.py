@@ -413,8 +413,9 @@ async def list_vendor_supported_devices(
     this fleet owns and they carry no test evidence whatsoever. For devices
     actually run against, call `list_devices_tested_with` instead.
 
-    `support_status` on each row is one of supported, partial, unsupported,
-    planned — that is the vendor's claim, not a test result.
+    `support_status` on each row is the general vendor claim (supported,
+    partial, unsupported, or planned). Optional `component_support` entries
+    override it for specific component versions; neither is a test result.
     """
     limit = clamp_limit(limit)
     try:

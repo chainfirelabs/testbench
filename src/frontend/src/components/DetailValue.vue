@@ -134,7 +134,7 @@ defineExpose({ isStructured, hasRows: computed(() => rows.value.length > 0), asT
 .detail-list {
   display: grid;
   /* The label column sizes to the longest label but never crowds the value. */
-  grid-template-columns: minmax(120px, max-content) 1fr;
+  grid-template-columns: minmax(120px, 35%) minmax(0, 1fr);
   gap: 6px 16px;
   margin: 0;
   align-items: baseline;
@@ -148,6 +148,7 @@ defineExpose({ isStructured, hasRows: computed(() => rows.value.length > 0), asT
 }
 
 .detail-list dd {
+  min-width: 0;
   margin: 0;
   font-size: 13px;
   /* Values are the reason this exists: keep newlines, wrap the rest. */

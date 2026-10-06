@@ -183,7 +183,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page page-flow">
     <div class="page-header">
       <h2>Profile</h2>
     </div>
@@ -471,6 +471,7 @@ onMounted(() => {
 .keys-table td {
   padding: 9px 10px;
   border-bottom: 1px solid var(--border-soft);
+  overflow-wrap: anywhere;
 }
 .keys-table tr.dim td {
   color: var(--text-muted);

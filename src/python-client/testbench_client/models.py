@@ -461,6 +461,7 @@ class VendorDevice:
     hardware_version: str | None = None
     architecture: str | None = None
     support_status: str = ""
+    component_support: list[dict] = field(default_factory=list)
     source: str | None = None
     notes: str | None = None
     misc_data: dict = field(default_factory=dict)
@@ -482,6 +483,7 @@ class VendorDevice:
             hardware_version=data.get("hardware_version"),
             architecture=data.get("architecture"),
             support_status=data.get("support_status", ""),
+            component_support=data.get("component_support") or [],
             source=data.get("source"),
             notes=data.get("notes"),
             misc_data=data.get("misc_data") or {},

@@ -18,6 +18,7 @@ import { customColumn, customFormField, dataValue, mergeCustomValues, useEntityF
 import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
+import { groupBundleComponents } from '../bundleComponentGroups'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -150,20 +151,22 @@ const componentsColumn = {
       return empty
     }
 
+    const groups = groupBundleComponents(components)
     const select = document.createElement('select')
     select.className = 'component-list'
-    select.title = components
-      .map((item: any) => `${item.name}${item.version ? ` ${item.version}` : ''}`)
+    select.title = groups
+      .map((group) => `${group.name}: ${group.versions[0].version || '(unversioned)'}`)
       .join('\n')
     select.setAttribute('aria-label', `Components for ${p.data.name}`)
     const summary = document.createElement('option')
-    summary.textContent = `${components.length} component${components.length === 1 ? '' : 's'}`
+    summary.textContent = `${groups.length} component${groups.length === 1 ? '' : 's'}`
     summary.value = ''
     select.appendChild(summary)
-    for (const component of components) {
+    for (const group of groups) {
+      const latest = group.versions[0]
       const option = document.createElement('option')
-      option.textContent = `${component.name}${component.version ? ` — ${component.version}` : ''}`
-      option.value = component.id
+      option.textContent = `${group.name} — ${latest.version || '(unversioned)'}`
+      option.value = latest.id || ''
       select.appendChild(option)
     }
     // This is a compact list, not an editor. Always return to the count after

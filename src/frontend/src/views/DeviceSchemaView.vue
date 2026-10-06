@@ -1282,6 +1282,7 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div class="table-scroll">
         <table class="data-list layout-table">
           <thead>
             <tr>
@@ -1359,6 +1360,7 @@ onMounted(async () => {
             </tr>
           </tbody>
         </table>
+        </div>
 
         <!-- Moving a field is the one edit whose consequence is not visible in
              the row it happened to, so it is worth saying before rather than
@@ -1394,6 +1396,7 @@ onMounted(async () => {
           <button class="btn btn-primary" @click="newField()">+ New field</button>
         </div>
       </div>
+      <div class="table-scroll">
       <table class="data-list">
         <thead>
           <tr>
@@ -1429,6 +1432,7 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
+      </div>
     </section>
 
     <!-- Software and tests have one layout each. Relationship and application
@@ -1443,6 +1447,7 @@ onMounted(async () => {
           <button class="btn btn-primary" @click="newEntityField">+ New field</button>
         </div>
       </div>
+      <div class="table-scroll">
       <table class="data-list">
         <thead><tr><th class="grip-col"></th><th>Key</th><th>Label</th><th>Type</th><th class="visibility-col">Shown</th><th>Required</th><th>Storage</th><th></th></tr></thead>
         <tbody>
@@ -1461,6 +1466,7 @@ onMounted(async () => {
           </tr>
         </tbody>
       </table>
+      </div>
     </section>
 
     <!-- --------------------------------------------------------- plugins -->
@@ -2031,6 +2037,7 @@ onMounted(async () => {
 .scope-rail { display: grid; gap: 4px; align-content: start; }
 .scope-rail button {
   display: grid;
+  overflow-wrap: anywhere;
   gap: 2px;
   padding: 9px 11px;
   text-align: left;
@@ -2168,9 +2175,10 @@ tr.disabled td { opacity: 0.55; }
 .info-command-row > .btn { justify-self: end; min-width: 88px; }
 .rule-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 14px; }
 .plugin-rule { display: grid; grid-template-columns: 28px minmax(120px, 1fr) 110px minmax(130px, 1fr) minmax(150px, 1fr); gap: 7px; align-items: center; padding: 10px; border: 1px solid var(--border-soft); border-radius: var(--r-md); }
+.plugin-rule > input, .plugin-rule > select { min-width: 0; width: 100%; }
 .rule-order { font-weight: 700; text-align: center; }
 .plugin-rule > .check, .plugin-rule > .rule-actions { grid-column: 2 / -1; }
-.rule-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.rule-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.65); }
 .editor { width: min(680px, 100%); max-height: 90vh; overflow: auto; padding: 22px; }
 .editor > label:not(.check) { display: grid; gap: 5px; margin: 12px 0; }
@@ -2192,5 +2200,7 @@ tr.disabled td { opacity: 0.55; }
   .scope-actions { margin-left: 0; }
   .info-command-row { grid-template-columns: minmax(0, 1fr); }
   .info-command-row > .btn { justify-self: start; }
+  .plugin-rule { grid-template-columns: 28px minmax(0, 1fr); }
+  .plugin-rule > :not(.rule-order) { grid-column: 2; }
 }
 </style>

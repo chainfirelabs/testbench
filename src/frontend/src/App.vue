@@ -664,12 +664,14 @@ onBeforeUnmount(() => {
 .bell-item-title {
   font-size: 13px;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .bell-item-body {
   font-size: 12px;
   color: var(--text-muted);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .bell-item-time {
@@ -851,12 +853,14 @@ onBeforeUnmount(() => {
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 .search-item-sub {
   display: block;
   color: var(--text-dim);
   font-size: 12px;
   margin-top: 1px;
+  overflow-wrap: anywhere;
 }
 .user-name {
   text-decoration: none;

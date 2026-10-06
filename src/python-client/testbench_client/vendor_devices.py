@@ -59,9 +59,9 @@ class VendorDevices:
         made by 1.0 and one made by 2.0 are separate rows, and both come back.
         Use `for_software()` to read one version's list on its own.
 
-        `support_status` is the vendor's word: supported, partial, unsupported
-        or planned. `unsupported` rows are returned like any other, because
-        "the vendor says no" is an answer.
+        `support_status` filters the general vendor claim: supported, partial,
+        unsupported or planned. Per-component overrides are available on each
+        returned row's `component_support` list.
         """
         return list(self.iter(
             search=search, software=software, make=make, model=model,

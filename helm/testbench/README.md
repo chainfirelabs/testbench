@@ -110,7 +110,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.9.5`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.9.6`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -270,9 +270,10 @@ and device override precedence. The agent tries HTTPS followed by HTTP.
 The same precedence applies to `discovery_roles` and `prompt_addendum`.
 Administrators can request hardware, firmware, LAN MAC, and/or WAN MAC by
 device type, first matching rule, or individual device. The resolved role list
-is enforced by the worker and backend, and existing MAC values remain
-protected. A prompt addendum supplements the global prompt without replacing
-the protected security and structured-result instructions.
+is enforced by the worker and backend. Existing hardware and MAC values remain
+protected, while discovered firmware can be updated. A prompt addendum
+supplements the global prompt without replacing the protected security and
+structured-result instructions.
 
 ## Plugin prompt variables
 

@@ -1150,7 +1150,8 @@ watch(() => detail.value?.device_type_id, () => {
           <p v-if="!compatItems.length" class="muted">
             Every match for this device is marked unsupported by its vendor.
           </p>
-          <table v-else class="data-list">
+          <div v-else class="table-scroll">
+          <table class="data-list">
             <thead>
               <tr>
                 <th></th>
@@ -1233,6 +1234,7 @@ watch(() => detail.value?.device_type_id, () => {
               </template>
             </tbody>
           </table>
+          </div>
         </template>
       </template>
     </div>
@@ -1390,7 +1392,7 @@ watch(() => detail.value?.device_type_id, () => {
   gap: 8px;
 }
 
-.changelog-summary { font-weight: 550; }
+.changelog-summary { font-weight: 550; overflow-wrap: anywhere; }
 
 .changelog-meta {
   color: var(--text-muted);
@@ -1424,10 +1426,11 @@ watch(() => detail.value?.device_type_id, () => {
 .changelog-old {
   color: var(--text-muted);
   text-decoration: line-through;
+  overflow-wrap: anywhere;
 }
 
 .changelog-arrow { color: var(--text-muted); }
-.changelog-new { color: var(--text); }
+.changelog-new { color: var(--text); overflow-wrap: anywhere; }
 
 .changelog-detail { margin-top: 8px; }
 .changelog-detail summary { color: var(--text-muted); cursor: pointer; font-size: 12px; }
@@ -1451,7 +1454,7 @@ watch(() => detail.value?.device_type_id, () => {
 .actions-pane h3 { margin: 0 0 8px; font-size: 14px; }
 .action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .action-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: var(--r-md); }
-.action-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.action-name { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
 .action-ok { color: var(--green, #16a34a); }
 /* inline-flex for the same reason as the tags on the Device Schema page: an
    inline box does not grow for vertical padding, so the rounded background

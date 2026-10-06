@@ -6,6 +6,7 @@ from .device_type import DeviceType
 from .software import Software
 from .software_component import SoftwareComponent
 from .vendor_device import VendorDevice
+from .vendor_device_component_support import VendorDeviceComponentSupport
 from .vendor_device_field_override import VendorDeviceFieldOverride
 from .test import Test
 from .saved_filter import SavedFilter
@@ -31,6 +32,7 @@ __all__ = [
     "Software",
     "SoftwareComponent",
     "VendorDevice",
+    "VendorDeviceComponentSupport",
     "VendorDeviceFieldOverride",
     "Test",
     "SavedFilter",

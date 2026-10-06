@@ -38,3 +38,32 @@ device_unique_id,software_name,software_version,component_name,component_version
 A test import reuses a matching component under the selected suite, or creates
 it there if it does not exist. Both results remain tests of Microsoft 365 and
 appear only on Microsoft 365's **Tested Devices** view, separated by component.
+
+## Component-specific vendor support
+
+A vendor device claim still belongs to one software version and has a general
+`support_status`. It can also carry optional support statuses for individual
+component versions. The same claimed hardware may therefore be supported by
+one component version and unsupported by another. A claim with no component
+links works exactly as before; a component without an override uses the general
+claim status.
+
+On the software version's **Vendor Claims** tab, or in **Vendor Claims** across
+all software, open a claim and choose the component versions whose support
+differs. Each selected version has its own status. The API uses
+`component_support`:
+
+```json
+{
+  "make": "Acme",
+  "model": "R1",
+  "support_status": "supported",
+  "component_support": [
+    {"component_name": "Microsoft Outlook", "component_version": "16.2", "support_status": "unsupported"}
+  ]
+}
+```
+
+An API write may use `component_id` instead of name and version. The component
+must belong to the claim's software version. Exports include names and versions
+so CSV and JSON imports can restore the links on another installation.

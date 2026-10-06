@@ -16,7 +16,8 @@ from sqlalchemy import Boolean, Numeric, and_, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
-from ..models import EntityField, Software, User, VendorDevice, VendorDeviceFieldOverride
+from ..models import (EntityField, Software, SoftwareComponent, User, VendorDevice,
+                      VendorDeviceComponentSupport, VendorDeviceFieldOverride)
 from ..models.vendor_device import build_match_key
 from ..schemas import (
     BulkIds,
@@ -27,6 +28,7 @@ from ..schemas import (
     VendorDeviceCreate,
     VendorDeviceOut,
     VendorDeviceUpdate,
+    VendorComponentSupportIn,
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import (
@@ -62,6 +64,7 @@ EXPORT_COLUMNS = [
     "hardware_version",
     "architecture",
     "support_status",
+    "component_support",
     "source",
     "notes",
     "misc_data",
@@ -81,12 +84,14 @@ EDITABLE_FIELDS = [
     "misc_data",
 ]
 
+COMPONENT_SUPPORT_FIELD = "component_support"
+
 # Fields the API owns; an import file carrying them is ignored rather than rejected.
 IMPORT_IGNORED = {"id", "software_id", "vendor", "match_key", "created_at", "updated_at", "created_by", "updated_by"}
 
 # The columns an import template offers. None is required on its own, but a row
 # has to say something about which device it describes (see build_match_key).
-TEMPLATE_COLUMNS = EDITABLE_FIELDS
+TEMPLATE_COLUMNS = EDITABLE_FIELDS + [COMPONENT_SUPPORT_FIELD]
 
 SEARCH_FIELDS = ("make", "model", "firmware_version", "hardware_version", "architecture", "source", "notes")
 
@@ -183,6 +188,43 @@ def _apply(vd: VendorDevice, values: dict) -> None:
     for field, value in values.items():
         setattr(vd, field, value)
     vd.match_key = build_match_key({f: getattr(vd, f) for f in EDITABLE_FIELDS})
+
+
+def _resolve_component_support(
+    db: Session, software: Software, entries: list[VendorComponentSupportIn],
+) -> list[tuple[SoftwareComponent, str]]:
+    """Validate links before writing a claim; components must belong to its version."""
+    resolved = []
+    seen = set()
+    for entry in entries:
+        component = db.get(SoftwareComponent, entry.component_id) if entry.component_id else None
+        if (component is None or component.software_id != software.id) and entry.component_name:
+            component = db.scalar(select(SoftwareComponent).where(
+                SoftwareComponent.software_id == software.id,
+                func.lower(SoftwareComponent.name) == entry.component_name.strip().lower(),
+                SoftwareComponent.version == (entry.component_version or "").strip(),
+            ))
+        if component is None or component.software_id != software.id:
+            raise ValueError("component must belong to the selected software version")
+        if component.id in seen:
+            raise ValueError("component support contains a duplicate component")
+        seen.add(component.id)
+        resolved.append((component, entry.support_status))
+    return resolved
+
+
+def _replace_component_support(
+    vd: VendorDevice, entries: list[tuple[SoftwareComponent, str]],
+) -> None:
+    existing = {row.component_id: row for row in vd.component_support}
+    updated = []
+    for component, status in entries:
+        row = existing.get(component.id)
+        if row is None:
+            row = VendorDeviceComponentSupport(component_id=component.id, support_status=status)
+        row.support_status = status
+        updated.append(row)
+    vd.component_support = updated
 
 
 def _find_duplicate(db: Session, software: Software, match_key: str, exclude_id: str | None = None) -> VendorDevice | None:
@@ -380,7 +422,13 @@ def export_vendor_devices(
     software = _get_software(db, software_id)
     items = db.scalars(_query(db, software, search).order_by(VendorDevice.match_key)).all()
     fields = [field for field, payload in _effective_fields(db, software) if payload["visible"]]
-    rows = [project_fields(_vd_dict(v), fields, "misc_data") for v in items]
+    rows = []
+    for item in items:
+        payload = _vd_dict(item)
+        rows.append({
+            **project_fields(payload, fields, "misc_data"),
+            COMPONENT_SUPPORT_FIELD: payload[COMPONENT_SUPPORT_FIELD],
+        })
     log_action(
         db, user, "software.vendor_devices.export", "software", software.id,
         {"format": format, "count": len(rows)}, request,
@@ -388,7 +436,10 @@ def export_vendor_devices(
     db.commit()
     # The stem carries a software name, which is free text: safe_filename keeps a
     # quote or newline in it from breaking out of the Content-Disposition header.
-    return streaming_export_response(rows, [field.key for field in fields], format, f"{software.name}-vendor-devices")
+    return streaming_export_response(
+        rows, [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD],
+        format, f"{software.name}-vendor-devices",
+    )
 
 
 @router.get("/template")
@@ -400,7 +451,7 @@ def vendor_device_template(software_id: str, db: Session = Depends(get_db), user
         field.key for field, payload in _effective_fields(db, software)
         if payload["visible"] and field.writable and field.key != "misc_data"
     ]
-    return download_response(template_csv(columns), name, "text/csv")
+    return download_response(template_csv(columns + [COMPONENT_SUPPORT_FIELD]), name, "text/csv")
 
 
 @router.post("/import", response_model=ImportResult)
@@ -424,26 +475,28 @@ async def import_vendor_devices(
     # Validate the whole file before touching the database: rolling a bad row
     # back mid-file would also undo the rows already applied from it, while the
     # counts kept claiming they had landed.
-    parsed: list[tuple[str, dict]] = []
+    parsed: list[tuple[str, dict, list[tuple[SoftwareComponent, str]] | None]] = []
     fields = get_entity_fields(db, "vendor_devices")
     # JSON-backed catalog fields (and still-unknown spreadsheet columns) are
     # folded into misc_data; only physical columns remain top-level.
     known = {
         field.key for field in fields if field.storage != "data"
-    } | IMPORT_IGNORED | {"misc_data"}
+    } | IMPORT_IGNORED | {"misc_data", COMPONENT_SUPPORT_FIELD}
     for i, row in enumerate(rows):
         try:
             if not isinstance(row, dict):
                 raise ValueError("row must be an object")
             row = merge_extra_columns(row, known, "misc_data")
-            data = VendorDeviceCreate(
+            supplied = row.get(COMPONENT_SUPPORT_FIELD) is not None
+            body = VendorDeviceCreate(
                 **strip_nulls({k: v for k, v in row.items() if k not in IMPORT_IGNORED})
-            ).model_dump()
-            data = _validate_values(db, software, data)
+            )
+            links = _resolve_component_support(db, software, body.component_support) if supplied else None
+            data = _validate_values(db, software, body.model_dump(exclude={COMPONENT_SUPPORT_FIELD}))
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": i, "error": row_error(exc)})
             continue
-        parsed.append((build_match_key(data), data))
+        parsed.append((build_match_key(data), data, links))
 
     existing = {
         vd.match_key: vd
@@ -452,7 +505,7 @@ async def import_vendor_devices(
     # Rows this file has already applied, so a file listing the same device
     # twice updates one row instead of tripping the unique constraint.
     touched: set[str] = set()
-    for key, data in parsed:
+    for key, data, links in parsed:
         vd = existing.get(key)
         is_new = vd is None
         if is_new:
@@ -460,6 +513,8 @@ async def import_vendor_devices(
             db.add(vd)
             existing[key] = vd
         _apply(vd, data)
+        if links is not None:
+            _replace_component_support(vd, links)
         vd.updated_by = user.id
         if not is_new:
             vd.updated_at = utcnow()
@@ -514,7 +569,8 @@ def create_vendor_device(
 ):
     software = _get_software(db, software_id)
     try:
-        data = _validate_values(db, software, body.model_dump())
+        data = _validate_values(db, software, body.model_dump(exclude={COMPONENT_SUPPORT_FIELD}))
+        links = _resolve_component_support(db, software, body.component_support)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     key = build_match_key(data)
@@ -525,6 +581,7 @@ def create_vendor_device(
         )
     vd = VendorDevice(software_id=software.id, created_by=user.id, updated_by=user.id)
     _apply(vd, data)
+    _replace_component_support(vd, links)
     db.add(vd)
     log_action(
         db, user, "software.vendor_device.create", "vendor_device", vd.id,
@@ -547,11 +604,20 @@ def update_vendor_device(
     software = _get_software(db, software_id)
     vd = _get_vd(db, software, vd_id)
     old = {f: getattr(vd, f) for f in EDITABLE_FIELDS}
+    old[COMPONENT_SUPPORT_FIELD] = [
+        (item.component_id, item.support_status) for item in vd.component_support
+    ]
     try:
-        data = _validate_values(db, software, body.model_dump(exclude_unset=True), partial=True)
+        data = _validate_values(
+            db, software, body.model_dump(exclude_unset=True, exclude={COMPONENT_SUPPORT_FIELD}), partial=True,
+        )
+        links = (_resolve_component_support(db, software, body.component_support or [])
+                 if COMPONENT_SUPPORT_FIELD in body.model_fields_set else None)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _apply(vd, data)
+    if links is not None:
+        _replace_component_support(vd, links)
     if _find_duplicate(db, software, vd.match_key, exclude_id=vd.id):
         db.rollback()
         raise HTTPException(
@@ -561,9 +627,13 @@ def update_vendor_device(
         )
     vd.updated_by = user.id
     vd.updated_at = utcnow()
+    new = {f: getattr(vd, f) for f in EDITABLE_FIELDS}
+    new[COMPONENT_SUPPORT_FIELD] = [
+        (item.component_id, item.support_status) for item in vd.component_support
+    ]
     log_action(
         db, user, "software.vendor_device.update", "vendor_device", vd.id,
-        {"software_id": software.id, "diff": field_diff(old, {f: getattr(vd, f) for f in EDITABLE_FIELDS})},
+        {"software_id": software.id, "diff": field_diff(old, new)},
         request,
     )
     db.commit()
@@ -804,7 +874,7 @@ def export_vendor_device_catalog(
     q = q.order_by(Software.name.asc(), VendorDevice.match_key.asc())
     pairs = [tuple(row) for row in db.execute(q).all()]
     fields = _catalog_export_fields(db)
-    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
+    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD]
     rows = []
     for item in _catalog_rows(db, pairs):
         row = item.model_dump(mode="json")
@@ -812,6 +882,7 @@ def export_vendor_device_catalog(
             "software_name": row["software_name"],
             "software_version": row["software_version"],
             **project_fields(row, fields, "misc_data"),
+            COMPONENT_SUPPORT_FIELD: row[COMPONENT_SUPPORT_FIELD],
         })
     log_action(db, user, "vendor_devices.catalog_export", "vendor_device", None,
                {"format": format, "count": len(rows)}, request)
@@ -867,7 +938,7 @@ def vendor_device_catalog_template(db: Session = Depends(get_db), user: User = D
     that invites someone to fill it in for nothing.
     """
     fields = [field for field in _catalog_export_fields(db) if field.writable]
-    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
+    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD]
     return download_response(
         template_csv(columns), "vendor-devices-template.csv", "text/csv",
     )
@@ -884,12 +955,16 @@ def create_vendor_device_from_catalog(
     values = body.model_dump()
     name = values.pop("software_name")
     version = values.pop("software_version", "")
+    component_support = values.pop(COMPONENT_SUPPORT_FIELD, [])
     try:
         software = _software_by_name_version(db, name, version)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         data = _validate_values(db, software, values)
+        links = _resolve_component_support(
+            db, software, [VendorComponentSupportIn(**item) for item in component_support],
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     key = build_match_key(data)
@@ -900,6 +975,7 @@ def create_vendor_device_from_catalog(
         )
     vd = VendorDevice(software_id=software.id, created_by=user.id, updated_by=user.id)
     _apply(vd, data)
+    _replace_component_support(vd, links)
     db.add(vd)
     log_action(
         db, user, "software.vendor_device.create", "vendor_device", vd.id,
@@ -931,12 +1007,12 @@ async def import_vendor_device_catalog(
     fields = get_entity_fields(db, "vendor_devices")
     known = {
         field.key for field in fields if field.storage != "data"
-    } | IMPORT_IGNORED | {"misc_data"} | set(CATALOG_SOFTWARE_COLUMNS)
+    } | IMPORT_IGNORED | {"misc_data", COMPONENT_SUPPORT_FIELD} | set(CATALOG_SOFTWARE_COLUMNS)
 
     # The whole file is validated before anything is written, for the reason
     # the per-software import gives: rolling one bad row back mid-file would
     # undo the rows already applied while the counts still claimed them.
-    parsed: list[tuple[Software, str, dict]] = []
+    parsed: list[tuple[Software, str, dict, list[tuple[SoftwareComponent, str]] | None]] = []
     for i, row in enumerate(rows):
         try:
             if not isinstance(row, dict):
@@ -946,16 +1022,19 @@ async def import_vendor_device_catalog(
             software = _software_by_name_version(
                 db, cleaned.pop("software_name", ""), cleaned.pop("software_version", ""),
             )
-            data = _validate_values(db, software, VendorDeviceCreate(**cleaned).model_dump())
+            supplied = cleaned.get(COMPONENT_SUPPORT_FIELD) is not None
+            body = VendorDeviceCreate(**cleaned)
+            links = _resolve_component_support(db, software, body.component_support) if supplied else None
+            data = _validate_values(db, software, body.model_dump(exclude={COMPONENT_SUPPORT_FIELD}))
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": i, "error": row_error(exc)})
             continue
-        parsed.append((software, build_match_key(data), data))
+        parsed.append((software, build_match_key(data), data, links))
 
     # Loaded once per software the file actually names, rather than once per
     # row: a file is usually a handful of versions and a great many claims.
     existing: dict[str, dict[str, VendorDevice]] = {}
-    for software, _key, _data in parsed:
+    for software, _key, _data, _links in parsed:
         if software.id in existing:
             continue
         existing[software.id] = {
@@ -965,7 +1044,7 @@ async def import_vendor_device_catalog(
         }
 
     touched: set[tuple[str, str]] = set()
-    for software, key, data in parsed:
+    for software, key, data, links in parsed:
         rows_for_software = existing[software.id]
         vd = rows_for_software.get(key)
         is_new = vd is None
@@ -974,6 +1053,8 @@ async def import_vendor_device_catalog(
             db.add(vd)
             rows_for_software[key] = vd
         _apply(vd, data)
+        if links is not None:
+            _replace_component_support(vd, links)
         vd.updated_by = user.id
         if not is_new:
             vd.updated_at = utcnow()

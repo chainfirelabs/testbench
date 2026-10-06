@@ -28,6 +28,7 @@ import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import DetailModal from '../components/DetailModal.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
+import ComponentSupportEditor from '../components/ComponentSupportEditor.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import { detailCellRenderer } from '../detail'
@@ -174,6 +175,15 @@ const baseColumns = [
   },
 ]
 
+const componentSupportText = (row: any) => (row?.component_support || [])
+  .map((item: any) => `${item.component_name} ${item.component_version || '(unversioned)'}: ${supportLabel(item.support_status)}`)
+  .join(', ')
+
+const componentSupportColumn = {
+  field: 'component_support', headerName: 'Component Support', editable: false,
+  filter: false, minWidth: 230, valueGetter: (p: any) => componentSupportText(p.data),
+}
+
 /*
  * The grid's columns: the two software ones, then the field catalog.
  *
@@ -201,7 +211,10 @@ const columns = computed(() => {
   // Before the catalog has loaded there is nothing to render but the software
   // columns, which would look like a broken grid — show the built-ins until it
   // arrives, exactly as they were before.
-  return claim.length ? [...software, ...claim] : baseColumns
+  const columns = claim.length ? [...software, ...claim] : [...baseColumns]
+  const supportIndex = columns.findIndex((column: any) => column.field === 'support_status')
+  columns.splice(supportIndex + 1, 0, componentSupportColumn)
+  return columns
 })
 
 const filterValues = makeFilterValues({
@@ -293,7 +306,7 @@ const editTarget = ref<any>(null)
 const editValues = ref<Record<string, any>>({})
 const savingEdit = ref(false)
 /** Every software version, so a new claim can name the one making it. */
-const softwareVersions = ref<{ name: string; version: string }[]>([])
+const softwareVersions = ref<{ id: string; name: string; version: string; bundle_components: any[] }[]>([])
 
 function showToast(message: string, isError = false) {
   toast.value = message
@@ -313,14 +326,15 @@ const { downloading, download } = useDownload(showToast)
  */
 async function loadSoftwareVersions() {
   try {
-    // Two fields, not the whole row: this fills a picker, and a software
-    // list carries its bundle components and version counts with it.
+    // Components are needed for the optional per-version support editor.
     const page = await api<any>(
-      '/software?page_size=1000&sort=name&order=asc&fields=name,version',
+      '/software?page_size=1000&sort=name&order=asc&fields=id,name,version,bundle_components',
     )
     softwareVersions.value = (page.items || []).map((item: any) => ({
+      id: item.id,
       name: item.name,
       version: item.version || '',
+      bundle_components: item.bundle_components || [],
     }))
   } catch {
     // A picker that cannot be filled is reported when the dialog is opened,
@@ -353,6 +367,13 @@ function versionOptionsFor(name: string) {
     .filter((item) => item.name === name)
     .map((item) => ({ value: item.version, label: item.version || '(unversioned)' }))
 }
+
+const newClaimComponents = computed(() => softwareVersions.value.find((item) =>
+  item.name === newClaim.value?.software_name
+  && item.version === (newClaim.value?.software_version || '')
+)?.bundle_components || [])
+
+const editClaimComponents = ref<any[]>([])
 
 /** What the Software field says underneath itself as it is filled in. */
 function softwareHint(): string {
@@ -426,6 +447,7 @@ function openNewClaim() {
   }
   newClaim.value = Object.fromEntries(NEW_CLAIM_FIELDS.value.map((field) => [field.key, '']))
   newClaim.value.support_status = 'supported'
+  newClaim.value.component_support = []
   newClaim.value.misc_data = '{}'
 }
 
@@ -452,6 +474,7 @@ function hasAnyIdentity(values: Record<string, any>): boolean {
 function onNewClaimChange(key: string, value: any) {
   if (!newClaim.value) return
   newClaim.value[key] = value
+  if (key === 'software_name' || key === 'software_version') newClaim.value.component_support = []
   if (key !== 'software_name') return
   const versions = versionOptionsFor(String(value || ''))
   if (!versions.some((option) => option.value === newClaim.value!.software_version)) {
@@ -467,6 +490,7 @@ async function createClaim(values: Record<string, any>) {
   creating.value = true
   try {
     const payload = mergeCustomValues(values, vendorFields.value, 'misc_data')
+    payload.component_support = newClaim.value?.component_support || []
     await api<any>('/vendor-devices', { method: 'POST', body: JSON.stringify(payload) })
     invalidateSuggestions('vendor-devices')
     newClaim.value = null
@@ -506,13 +530,27 @@ const EDIT_CLAIM_FIELDS = computed<FormField[]>(() => NEW_CLAIM_FIELDS.value.map
     ? { ...field, disabled: true, required: false, hint: 'Set when the claim was created.' }
     : field))
 
-function openEdit(row: any) {
+async function openEdit(row: any) {
+  const cached = softwareVersions.value.find((item) => item.id === row.software_id)
+  if (cached) editClaimComponents.value = cached.bundle_components
+  else {
+    try {
+      const software = await api<any>(`/software/${row.software_id}`)
+      editClaimComponents.value = software.bundle_components || []
+    } catch (error: any) {
+      showToast(error.message, true)
+      return
+    }
+  }
   editValues.value = Object.fromEntries(EDIT_CLAIM_FIELDS.value.map((field) => {
     if (field.key === 'misc_data') return [field.key, JSON.stringify(row.misc_data || {}, null, 2)]
     const definition = vendorFields.value.find((item) => item.key === field.key)
     return [field.key, definition?.storage === 'data'
       ? row.misc_data?.[field.key] ?? ''
       : row[field.key] ?? '']
+  }))
+  editValues.value.component_support = (row.component_support || []).map((item: any) => ({
+    component_id: item.component_id, support_status: item.support_status,
   }))
   editTarget.value = row
 }
@@ -530,6 +568,7 @@ async function saveEdit(values: Record<string, any>) {
     // they are not this dialog's to send in either case.
     const { software_name, software_version, ...claim } = values
     const payload = mergeCustomValues(claim, vendorFields.value, 'misc_data')
+    payload.component_support = editValues.value.component_support || []
     const updated = await api<any>(
       `/software/${row.software_id}/vendor-devices/${row.id}`,
       { method: 'PATCH', body: JSON.stringify(payload) },
@@ -765,7 +804,10 @@ async function onImportFile(e: Event) {
       @change="onNewClaimChange"
       @submit="createClaim"
       @cancel="newClaim = null"
-    />
+    >
+      <ComponentSupportEditor v-model="newClaim.component_support"
+        :components="newClaimComponents" />
+    </FormModal>
     <FormModal
       v-if="editTarget"
       :title="`Edit vendor device — ${editTarget.software_name} ${editTarget.software_version || ''}`.trim()"
@@ -775,7 +817,10 @@ async function onImportFile(e: Event) {
       submit-label="Save changes"
       @submit="saveEdit"
       @cancel="editTarget = null"
-    />
+    >
+      <ComponentSupportEditor v-model="editValues.component_support"
+        :components="editClaimComponents" />
+    </FormModal>
     <ImportProgressModal :state="importState" @close="closeImport" />
     <div v-if="toast" class="toast" :class="{ 'toast-error': toastError }">{{ toast }}</div>
   </div>

@@ -5,6 +5,7 @@ import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
+import ComponentSupportEditor from '../components/ComponentSupportEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
@@ -25,6 +26,7 @@ import { collapseVendorDevices, selectedVendorDeviceIds } from '../vendorDeviceG
 import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
+import { groupBundleComponents } from '../bundleComponentGroups'
 
 const route = useRoute()
 const router = useRouter()
@@ -114,6 +116,7 @@ const NEW_COMPONENT_FIELDS: FormField[] = [
 ]
 
 const versionLabel = (v: any) => v.version || '(unversioned)'
+const componentGroups = computed(() => groupBundleComponents(software.value?.bundle_components || []))
 
 function openNewVersion() {
   newVersion.value = { version: '', copy_vendor_devices: 'yes' }
@@ -460,14 +463,26 @@ const baseVendorColumns = [
   },
 ]
 
-const vendorColumns = computed(() => vendorFields.value
+const componentSupportText = (row: any) => (row?.component_support || [])
+  .map((item: any) => `${item.component_name} ${item.component_version || '(unversioned)'}: ${SUPPORT_LABELS[item.support_status] || item.support_status}`)
+  .join(', ')
+
+const vendorColumns = computed(() => {
+  const columns = vendorFields.value
   .filter((field) => field.visible && field.list_visible)
   .map((field) => {
     const builtIn = baseVendorColumns.find((column: any) => column.field === field.key)
     const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
     if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
     return column
-  }))
+  })
+  const supportIndex = columns.findIndex((column: any) => column.field === 'support_status')
+  columns.splice(supportIndex + 1, 0, {
+    field: 'component_support', headerName: 'Component Support', editable: false,
+    filter: false, minWidth: 230, valueGetter: (p: any) => componentSupportText(p.data),
+  } as any)
+  return columns
+})
 
 // A computed (not a function called from the template): a fresh Set on every
 // render would look like a change to the grid and trigger needless refreshes.
@@ -624,6 +639,7 @@ const NEW_VENDOR_FIELDS = computed<FormField[]>(() => vendorFields.value
 
 function openNewVendor() {
   newVendor.value = Object.fromEntries(NEW_VENDOR_FIELDS.value.map((f) => [f.key, '']))
+  newVendor.value.component_support = []
   newVendor.value.support_status = 'supported'
   newVendor.value.misc_data = '{}'
   showNewVendor.value = true
@@ -637,6 +653,7 @@ async function createVendorDevice(values: Record<string, any>) {
   creatingVendor.value = true
   try {
     const payload = mergeCustomValues(values, vendorFields.value, 'misc_data')
+    payload.component_support = newVendor.value.component_support || []
     await api<any>(`/software/${software.value.id}/vendor-devices`, {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -666,6 +683,9 @@ function openVendorEdit(row: any) {
       ? row.misc_data?.[field.key] ?? ''
       : row[field.key] ?? '']
   }))
+  vendorEditValues.value.component_support = (row.component_support || []).map((item: any) => ({
+    component_id: item.component_id, support_status: item.support_status,
+  }))
   vendorEditTarget.value = row
 }
 
@@ -679,6 +699,7 @@ async function saveVendorEdit(values: Record<string, any>) {
   savingVendorEdit.value = true
   try {
     const payload = mergeCustomValues(values, vendorFields.value, 'misc_data')
+    payload.component_support = vendorEditValues.value.component_support || []
     const updated = await api<any>(`/software/${software.value.id}/vendor-devices/${row.id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
@@ -965,7 +986,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page" v-if="software">
+  <div class="page" :class="{ 'page-flow': tab === 'details' }" v-if="software">
     <div class="page-header">
       <h2>{{ software.name }}</h2>
       <div class="version-picker">
@@ -1013,7 +1034,7 @@ onMounted(load)
     </div>
 
     <!-- Details -->
-    <div v-if="tab === 'details'" class="tab-panel">
+    <div v-if="tab === 'details'" class="tab-panel tab-panel-flow">
       <form v-if="editing" class="form-grid" @submit.prevent>
         <template v-for="field in softwareFields.filter((item) => item.writable)" :key="field.key">
           <label>{{ field.label }}</label>
@@ -1047,10 +1068,18 @@ onMounted(load)
             </span>
           </dd>
           <dt>Bundle Components</dt>
-          <dd v-if="software.bundle_components?.length">
-            <span v-for="(component, i) in software.bundle_components" :key="component.id">
-              {{ component.name }} {{ component.version }}<span v-if="i < software.bundle_components.length - 1">, </span>
-            </span>
+          <dd v-if="componentGroups.length" class="component-groups">
+            <div v-for="group in componentGroups" :key="group.name.toLocaleLowerCase()">
+              <details v-if="group.versions.length > 1" class="component-group">
+                <summary>{{ group.name }} <span class="muted">({{ group.versions.length }} versions)</span></summary>
+                <ul>
+                  <li v-for="component in group.versions" :key="component.id || component.version">
+                    {{ versionLabel(component) }}
+                  </li>
+                </ul>
+              </details>
+              <span v-else>{{ group.name }} — {{ versionLabel(group.versions[0]) }}</span>
+            </div>
           </dd>
           <dd v-else>—</dd>
           <dt>Vendor Claims</dt>
@@ -1233,7 +1262,10 @@ onMounted(load)
       submit-label="Save changes"
       @submit="saveVendorEdit"
       @cancel="vendorEditTarget = null"
-    />
+    >
+      <ComponentSupportEditor v-model="vendorEditValues.component_support"
+        :components="software.bundle_components || []" />
+    </FormModal>
 
     <FormModal
       v-if="showNewVendor"
@@ -1244,7 +1276,10 @@ onMounted(load)
       submit-label="Add"
       @submit="createVendorDevice"
       @cancel="showNewVendor = false"
-    />
+    >
+      <ComponentSupportEditor v-model="newVendor.component_support"
+        :components="software.bundle_components || []" />
+    </FormModal>
 
     <DetailModal
       v-if="detail"
@@ -1269,6 +1304,8 @@ onMounted(load)
   flex: 1;
   min-height: 0;
 }
+
+.tab-panel-flow { flex: 0 0 auto; min-height: auto; }
 
 .panel-header {
   display: flex;
@@ -1316,6 +1353,10 @@ onMounted(load)
   max-width: 70ch;
   font-size: 12.5px;
 }
+
+.component-groups { display: grid; gap: 6px; }
+.component-group summary { cursor: pointer; }
+.component-group ul { margin: 6px 0 4px 18px; padding: 0; }
 
 .schema-field-list {
   display: grid;

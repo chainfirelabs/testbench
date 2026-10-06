@@ -1,9 +1,144 @@
 """Software bundles against a real PostgreSQL (skipped when unavailable)."""
 
+import json
+
 from test_device_schema_api import SchemaCase
 
 
 class SoftwareBundleApiTests(SchemaCase):
+    def test_vendor_claim_support_can_differ_by_component_version_or_be_general(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Component Matrix', 'version': '1.0',
+            'bundle_components': [
+                {'name': 'Engine', 'version': '1'},
+                {'name': 'Engine', 'version': '2'},
+            ],
+        }).json()
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        general = self.post(endpoint, {
+            'make': 'Acme', 'model': 'R1', 'support_status': 'supported',
+        })
+        self.assertEqual(general.status_code, 201, general.text)
+        self.assertEqual(general.json()['component_support'], [])
+        components = software['bundle_components']
+        updated = self.patch_(f"{endpoint}/{general.json()['id']}", {
+            'component_support': [
+                {'component_id': components[0]['id'], 'support_status': 'unsupported'},
+                {'component_id': components[1]['id'], 'support_status': 'partial'},
+            ],
+        })
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()['support_status'], 'supported')
+        self.assertEqual({(item['component_version'], item['support_status'])
+                          for item in updated.json()['component_support']},
+                         {('1', 'unsupported'), ('2', 'partial')})
+        catalog = self.get('/api/v1/vendor-devices').json()['items']
+        self.assertEqual(len(next(item for item in catalog if item['id'] == general.json()['id'])['component_support']), 2)
+        clone = self.post(f"/api/v1/software/{software['id']}/versions", {
+            'version': '2.0', 'copy_vendor_devices': True,
+        })
+        self.assertEqual(clone.status_code, 201, clone.text)
+        copied = self.get(f"/api/v1/software/{clone.json()['id']}/vendor-devices").json()['items'][0]
+        self.assertEqual({(item['component_version'], item['support_status'])
+                          for item in copied['component_support']},
+                         {('1', 'unsupported'), ('2', 'partial')})
+        self.assertTrue(all(item['component_id'] in
+                            {component['id'] for component in clone.json()['bundle_components']}
+                            for item in copied['component_support']))
+        exported = self.get(f'{endpoint}/export?format=json')
+        self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(len(exported.json()[0]['component_support']), 2)
+        imported = self.client.post(
+            f'{endpoint}/import', headers=self.headers,
+            files={'file': ('claims.json', exported.content, 'application/json')},
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(imported.json()['errors'], [])
+        software_export = self.get('/api/v1/software/export?format=json')
+        self.assertEqual(software_export.status_code, 200, software_export.text)
+        software_rows = [row for row in software_export.json()
+                         if row['name'] == 'Component Matrix' and row['version'] == '1.0']
+        self.assertEqual(len(software_rows), 1)
+        self.assertEqual(len(software_rows[0]['vendor_devices'][0]['component_support']), 2)
+        software_import = self.client.post(
+            '/api/v1/software/import', headers=self.headers,
+            files={'file': ('software.json', json.dumps(software_rows).encode(), 'application/json')},
+        )
+        self.assertEqual(software_import.status_code, 200, software_import.text)
+        self.assertEqual(software_import.json()['errors'], [])
+        restored = {**software_rows[0], 'name': 'Restored Component Matrix'}
+        restored_import = self.client.post(
+            '/api/v1/software/import', headers=self.headers,
+            files={'file': ('restored.json', json.dumps([restored]).encode(), 'application/json')},
+        )
+        self.assertEqual(restored_import.status_code, 200, restored_import.text)
+        self.assertEqual(restored_import.json()['errors'], [])
+        restored_software = self.get('/api/v1/software/lookup/by-name?name=Restored%20Component%20Matrix').json()
+        restored_claim = self.get(f"/api/v1/software/{restored_software['id']}/vendor-devices").json()['items'][0]
+        self.assertEqual(len(restored_claim['component_support']), 2)
+        cleared = self.patch_(f"{endpoint}/{general.json()['id']}", {'component_support': []})
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertEqual(cleared.json()['component_support'], [])
+    def test_vendor_claim_rejects_component_from_another_software_version(self):
+        first = self.post('/api/v1/software', {
+            'name': 'Scoped Matrix', 'version': '1',
+            'bundle_components': [{'name': 'Engine', 'version': '1'}],
+        }).json()
+        second = self.post(f"/api/v1/software/{first['id']}/versions", {
+            'version': '2', 'copy_vendor_devices': False,
+        }).json()
+        response = self.post(f"/api/v1/software/{first['id']}/vendor-devices", {
+            'make': 'Acme', 'model': 'R2',
+            'component_support': [{
+                'component_id': second['bundle_components'][0]['id'],
+                'support_status': 'unsupported',
+            }],
+        })
+        self.assertEqual(response.status_code, 422, response.text)
+        invalid = self.post(f"/api/v1/software/{first['id']}/vendor-devices", {
+            'make': 'Acme', 'model': 'R2',
+            'component_support': [{
+                'component_id': first['bundle_components'][0]['id'],
+                'support_status': 'sometimes',
+            }],
+        })
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+
+    def test_catalog_claim_accepts_optional_component_support(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Catalog Component Matrix', 'version': '3',
+            'bundle_components': [{'name': 'Scanner', 'version': '4'}],
+        }).json()
+        component = software['bundle_components'][0]
+        created = self.post('/api/v1/vendor-devices', {
+            'software_name': software['name'], 'software_version': software['version'],
+            'make': 'Acme', 'model': 'C1', 'support_status': 'supported',
+            'component_support': [{
+                'component_id': component['id'], 'support_status': 'unsupported',
+            }],
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()['component_support'][0]['component_name'], 'Scanner')
+        exported = self.get('/api/v1/vendor-devices/export?format=json')
+        rows = [row for row in exported.json() if row['software_name'] == software['name']]
+        self.assertEqual(len(rows[0]['component_support']), 1)
+        imported = self.client.post(
+            '/api/v1/vendor-devices/import', headers=self.headers,
+            files={'file': ('claims.json', json.dumps(rows).encode(), 'application/json')},
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(imported.json()['errors'], [])
+
+    def test_software_without_components_accepts_a_general_vendor_claim(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Standalone Claim Matrix', 'version': '1',
+        }).json()
+        created = self.post(f"/api/v1/software/{software['id']}/vendor-devices", {
+            'make': 'Acme', 'model': 'S1', 'support_status': 'partial',
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()['component_support'], [])
+
     def test_software_template_contains_only_flat_software_fields(self):
         response = self.get("/api/v1/software/template")
         self.assertEqual(response.status_code, 200, response.text)
@@ -33,13 +168,13 @@ class SoftwareBundleApiTests(SchemaCase):
 
     def test_test_import_keeps_components_under_the_suite(self):
         software = self.post("/api/v1/software", {
-            "name": "Microsoft 365", "version": "2026.1",
+            "name": "Microsoft 365 Import", "version": "2026.1",
         }).json()
         self.post("/api/v1/devices", {"unique_id": "suite-device"})
         content = (
             "device_unique_id,software_name,software_version,component_name,component_version,outcome\n"
-            "suite-device,Microsoft 365,2026.1,Microsoft Outlook,16.2,pass\n"
-            "suite-device,Microsoft 365,2026.1,Microsoft Word,16.4,fail\n"
+            "suite-device,Microsoft 365 Import,2026.1,Microsoft Outlook,16.2,pass\n"
+            "suite-device,Microsoft 365 Import,2026.1,Microsoft Word,16.4,fail\n"
         )
         imported = self.client.post(
             "/api/v1/tests/import", headers=self.headers,
@@ -52,7 +187,7 @@ class SoftwareBundleApiTests(SchemaCase):
         tests = self.get(f"/api/v1/tests?software_id={software['id']}").json()["items"]
         self.assertEqual(
             {(item["software_name"], item["component_name"]) for item in tests},
-            {("Microsoft 365", "Microsoft Outlook"), ("Microsoft 365", "Microsoft Word")},
+            {("Microsoft 365 Import", "Microsoft Outlook"), ("Microsoft 365 Import", "Microsoft Word")},
         )
         tested_page = self.get(
             f"/api/v1/software/{software['id']}/tested-devices?page=1&page_size=1"

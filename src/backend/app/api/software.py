@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
 from ..models import (
-    Device, Test, Software, SoftwareComponent, User, VendorDevice,
+    Device, Test, Software, SoftwareComponent, User, VendorDevice, VendorDeviceComponentSupport,
     VendorDeviceFieldOverride,
 )
 from ..models.vendor_device import build_match_key
@@ -25,6 +25,7 @@ from ..schemas import (
     SoftwareTestedDevicesOut,
     SoftwareUpdate,
     VendorDeviceCreate,
+    VendorComponentSupportIn,
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
@@ -87,8 +88,12 @@ def _copy_vendor_devices(db: Session, source: Software, target: Software, actor_
     row leaves the original alone.
     """
     copied = 0
+    target_components = {
+        (item.name.casefold(), item.version): item
+        for item in db.scalars(select(SoftwareComponent).where(SoftwareComponent.software_id == target.id))
+    }
     for vd in source.vendor_devices:
-        db.add(VendorDevice(
+        copy = VendorDevice(
             software_id=target.id,
             make=vd.make,
             model=vd.model,
@@ -104,7 +109,13 @@ def _copy_vendor_devices(db: Session, source: Software, target: Software, actor_
             match_key=vd.match_key,
             created_by=actor_id,
             updated_by=actor_id,
-        ))
+        )
+        copy.component_support = [VendorDeviceComponentSupport(
+            component_id=target_components[(link.component.name.casefold(), link.component.version)].id,
+            support_status=link.support_status,
+        ) for link in vd.component_support
+            if (link.component.name.casefold(), link.component.version) in target_components]
+        db.add(copy)
         copied += 1
     return copied
 
@@ -213,7 +224,12 @@ def _software_dict(t: Software) -> dict:
 def _vendor_device_rows(software: Software) -> list[dict]:
     """A software's compatibility list, as it travels inside an export row."""
     return [
-        {f: getattr(vd, f) for f in VENDOR_DEVICE_FIELDS}
+        {**{f: getattr(vd, f) for f in VENDOR_DEVICE_FIELDS},
+         "component_support": [{
+             "component_name": link.component.name,
+             "component_version": link.component.version,
+             "support_status": link.support_status,
+         } for link in vd.component_support]}
         for vd in sorted(software.vendor_devices, key=lambda v: v.match_key)
     ]
 
@@ -238,7 +254,7 @@ def _apply_vendor_devices(db: Session, software: Software, rows: list, actor_id:
         # ids and timestamps this has no use for.
         data = VendorDeviceCreate(
             **strip_nulls({k: v for k, v in entry.items() if k in VENDOR_DEVICE_FIELDS})
-        ).model_dump()
+        ).model_dump(exclude={"component_support"})
         key = build_match_key(data)
         vd = existing.get(key)
         if vd is None:
@@ -251,6 +267,47 @@ def _apply_vendor_devices(db: Session, software: Software, rows: list, actor_id:
         vd.updated_by = actor_id
         touched += 1
     return touched
+
+
+def _apply_vendor_component_support(db: Session, software: Software, rows: list) -> None:
+    """Restore nested support links after the software's components exist."""
+    db.flush()
+    components = {
+        (item.name.casefold(), item.version): item
+        for item in db.scalars(select(SoftwareComponent).where(SoftwareComponent.software_id == software.id))
+    }
+    claims = {
+        item.match_key: item for item in db.scalars(
+            select(VendorDevice).where(VendorDevice.software_id == software.id)
+        )
+    }
+    for entry in rows:
+        if "component_support" not in entry:
+            continue
+        claim = claims.get(build_match_key(entry))
+        if claim is None:
+            raise ValueError("vendor device for component support was not found")
+        links = []
+        seen = set()
+        for raw in entry["component_support"] or []:
+            item = VendorComponentSupportIn(**raw)
+            key = ((item.component_name or "").strip().casefold(),
+                   (item.component_version or "").strip())
+            component = components.get(key)
+            if component is None:
+                raise ValueError(f"component {item.component_name} {item.component_version or ''} is not on this software version")
+            if component.id in seen:
+                raise ValueError("component support contains a duplicate component")
+            seen.add(component.id)
+            links.append((component, item.support_status))
+        existing = {link.component_id: link for link in claim.component_support}
+        claim.component_support = [
+            existing.get(component.id) or VendorDeviceComponentSupport(
+                component_id=component.id, support_status=status,
+            ) for component, status in links
+        ]
+        for link, (_, status) in zip(claim.component_support, links):
+            link.support_status = status
 
 
 def _latest_of(db: Session, name: str) -> Software | None:
@@ -603,13 +660,13 @@ def create_version(
     db.add(software)
     db.flush()  # the copies below need the new row's id
 
-    copied = _copy_vendor_devices(db, source, software, user.id) if body.copy_vendor_devices else 0
     schema_overrides_copied = _copy_vendor_device_schema(db, source, software)
     source_components = _bundle_components(db, {source.id}).get(source.id, [])
     if source_components:
         _replace_bundle_components(db, software, [SoftwareBundleComponentIn(
             name=item.name, version=item.version, required=item.required, position=item.position,
         ) for item in source_components])
+    copied = _copy_vendor_devices(db, source, software, user.id) if body.copy_vendor_devices else 0
 
     log_action(
         db, user, "software.version.create", "software", software.id,
@@ -839,6 +896,7 @@ async def import_software(
     result = ImportResult(created=0, updated=0, errors=[])
     vendor_applied = 0
     pending_bundles: list[tuple[int, Software, list[SoftwareBundleComponentIn]]] = []
+    pending_vendor_support: list[tuple[int, Software, list]] = []
     for i, row in enumerate(rows):
         try:
             with row_scope(db):
@@ -870,6 +928,7 @@ async def import_software(
                 # vendor devices; absent, the inheritance rule below applies.
                 vendor_devices = row.get("vendor_devices") if isinstance(row, dict) else None
 
+                components_applied = False
                 if software is not None:
                     for field, value in data.items():
                         setattr(software, field, value)
@@ -887,6 +946,17 @@ async def import_software(
                     if previous is not None:
                         db.flush()  # the copies need the new row's id
                         _copy_vendor_device_schema(db, previous, software)
+                        # The vendor links copied below need corresponding
+                        # components on the new software version first.
+                        copied_components = (parsed_software.bundle_components
+                                             if parsed_software.bundle_components is not None else
+                                             [SoftwareBundleComponentIn(
+                                                 name=item.name, version=item.version,
+                                                 required=item.required, position=item.position,
+                                             ) for item in _bundle_components(db, {previous.id}).get(previous.id, [])])
+                        if copied_components:
+                            _replace_bundle_components(db, software, copied_components)
+                        components_applied = True
                         # Skipped when the file states the list itself: inheriting
                         # the previous version's rows *and* applying the file's
                         # would leave the union of two lists, which is neither.
@@ -899,7 +969,8 @@ async def import_software(
                     vendor_applied += _apply_vendor_devices(
                         db, software, vendor_devices, user.id
                     )
-                if row.get("bundle_components") is not None:
+                    pending_vendor_support.append((i, software, vendor_devices))
+                if row.get("bundle_components") is not None and not components_applied:
                     # Applied after the software row exists because components
                     # are owned by that specific suite/version.
                     pending_bundles.append((i, software, parsed_software.bundle_components or []))
@@ -914,6 +985,12 @@ async def import_software(
             with row_scope(db):
                 _replace_bundle_components(db, software, components)
                 bundles_applied += len(components)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append({"row": row_index, "error": row_error(exc)})
+    for row_index, software, vendor_devices in pending_vendor_support:
+        try:
+            with row_scope(db):
+                _apply_vendor_component_support(db, software, vendor_devices)
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": row_index, "error": row_error(exc)})
     log_action(db, user, "software.import", "software", None,

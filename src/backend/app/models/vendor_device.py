@@ -73,6 +73,10 @@ class VendorDevice(TimestampMixin, Base):
     updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
 
     software: Mapped["Software"] = relationship("Software", back_populates="vendor_devices")
+    component_support: Mapped[list["VendorDeviceComponentSupport"]] = relationship(
+        "VendorDeviceComponentSupport", cascade="all, delete-orphan", lazy="selectin",
+    )
 
 
 from .software import Software  # noqa: E402,F401  (for type checkers)
+from .vendor_device_component_support import VendorDeviceComponentSupport  # noqa: E402,F401

@@ -126,16 +126,18 @@ def test_successful_discovery_retains_nonempty_steps():
     ]
 
 
-def test_populated_mac_roles_are_not_requested_for_discovery():
+def test_populated_hardware_and_mac_roles_are_not_requested_for_discovery():
     roles = {
         "discovery_hardware": "R7450",
+        "discovery_firmware": "1.0",
         "discovery_lan_mac": "94:a6:7e:e3:fb:73",
         "discovery_wan_mac": None,
     }
 
     requested = server._discovery_roles_to_request(roles)
 
-    assert "discovery_hardware" in requested
+    assert "discovery_hardware" not in requested
+    assert "discovery_firmware" in requested
     assert "discovery_lan_mac" not in requested
     assert "discovery_wan_mac" in requested
 
@@ -163,22 +165,28 @@ def test_unrequested_model_findings_are_discarded():
     assert set(result["findings"]) == {"discovery_firmware"}
 
 
-def test_model_cannot_overwrite_a_mac_that_already_exists():
+def test_model_cannot_overwrite_hardware_or_mac_that_already_exists():
     result = {
         "findings": {
+            "discovery_hardware": {"value": "Rev B"},
+            "discovery_firmware": {"value": "2.0"},
             "discovery_lan_mac": {"value": "00:11:22:33:44:55"},
             "discovery_wan_mac": {"value": "66:77:88:99:aa:bb"},
         }
     }
     roles = {
+        "discovery_hardware": "Rev A",
+        "discovery_firmware": "1.0",
         "discovery_lan_mac": "94:a6:7e:e3:fb:73",
         "discovery_wan_mac": "",
     }
 
-    server._drop_existing_mac_findings(result, roles)
+    server._drop_existing_fill_only_findings(result, roles)
 
+    assert "discovery_hardware" not in result["findings"]
     assert "discovery_lan_mac" not in result["findings"]
     assert "discovery_wan_mac" in result["findings"]
+    assert "discovery_firmware" in result["findings"]
 
 
 def test_manifest_offers_collection_device_info_action():

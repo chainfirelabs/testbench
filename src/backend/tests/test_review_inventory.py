@@ -94,7 +94,7 @@ def test_lan_and_wan_mac_findings_update_their_own_fields():
         field('lan_mac', role='discovery_lan_mac'),
         field('wan_mac', role='discovery_wan_mac'),
     )
-    device = NS(id='d', unique_id='router-1', _data={})
+    device = NS(id='d', unique_id='router-1', device_type_id='router-id', _data={})
     db = Mock()
     db.scalar.return_value = None
     db.get.return_value = device
@@ -118,6 +118,72 @@ def test_lan_and_wan_mac_findings_update_their_own_fields():
     }
     assert result['accepted']['discovery_lan_mac']['field'] == 'lan_mac'
     assert result['accepted']['discovery_wan_mac']['field'] == 'wan_mac'
+
+
+def test_discovery_preserves_existing_hardware_and_macs_but_updates_firmware():
+    fields = tuple(field(key, role=role) for key, role in (
+        ('hardware_version', 'discovery_hardware'),
+        ('firmware_version', 'discovery_firmware'),
+        ('lan_mac', 'discovery_lan_mac'),
+        ('wan_mac', 'discovery_wan_mac'),
+    ))
+    original = {
+        'hardware_version': 'Rev A', 'firmware_version': '1.0',
+        'lan_mac': '00:11:22:33:44:55', 'wan_mac': '66:77:88:99:aa:bb',
+    }
+    device = NS(id='d', unique_id='router-1', device_type_id='router-id', _data=original.copy())
+    db = Mock()
+    db.scalar.return_value = None
+    db.get.return_value = device
+    findings = {
+        role: {'value': value, 'confidence': 1.0, 'source': 'test', 'starting_value': original[key]}
+        for key, role, value in (
+            ('hardware_version', 'discovery_hardware', 'Rev B'),
+            ('firmware_version', 'discovery_firmware', '2.0'),
+            ('lan_mac', 'discovery_lan_mac', 'aa:bb:cc:dd:ee:01'),
+            ('wan_mac', 'discovery_wan_mac', 'aa:bb:cc:dd:ee:02'),
+        )
+    }
+    body = plugins.DiscoveryResultIn(device_id='d', run_id='run', findings=findings)
+
+    with patch.object(plugins, 'fields_for_device', return_value=fields):
+        result = plugins.device_info_results(body, db, 'device-info-agent')
+
+    assert device._data == {**original, 'firmware_version': '2.0'}
+    assert set(result['rejected']) == {'discovery_hardware', 'discovery_lan_mac', 'discovery_wan_mac'}
+    assert set(result['accepted']) == {'discovery_firmware'}
+
+
+def test_discovery_fills_null_hardware_firmware_and_macs():
+    fields = tuple(field(key, role=role) for key, role in (
+        ('hardware_version', 'discovery_hardware'),
+        ('firmware_version', 'discovery_firmware'),
+        ('lan_mac', 'discovery_lan_mac'),
+        ('wan_mac', 'discovery_wan_mac'),
+    ))
+    device = NS(id='d', unique_id='router-1', device_type_id='router-id', _data={field.key: None for field in fields})
+    db = Mock()
+    db.scalar.return_value = None
+    db.get.return_value = device
+    findings = {
+        role: {'value': value, 'confidence': 1.0, 'source': 'test', 'starting_value': None}
+        for role, value in (
+            ('discovery_hardware', 'Rev A'),
+            ('discovery_firmware', '1.0'),
+            ('discovery_lan_mac', '00-11-22-33-44-55'),
+            ('discovery_wan_mac', '66-77-88-99-AA-BB'),
+        )
+    }
+    body = plugins.DiscoveryResultIn(device_id='d', run_id='run', findings=findings)
+
+    with patch.object(plugins, 'fields_for_device', return_value=fields):
+        result = plugins.device_info_results(body, db, 'device-info-agent')
+
+    assert device._data == {
+        'hardware_version': 'Rev A', 'firmware_version': '1.0',
+        'lan_mac': '00:11:22:33:44:55', 'wan_mac': '66:77:88:99:aa:bb',
+    }
+    assert set(result['accepted']) == set(findings)
 
 
 def _streamed(response) -> bytes:
