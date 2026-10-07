@@ -53,6 +53,22 @@ match. Adding the same hardware to another component version joins that link
 to the existing suite/device claim; it does not erase earlier component links.
 Separate import rows for that hardware and different component versions merge
 in the same way. Editing a claim can still remove a link by unselecting it.
+For a Vendor Claims CSV import, use one row per component and repeat the same
+software and hardware identity fields. `component_name` and `component_version`
+identify the component; `component_status` is its support status. If
+`component_status` is blank, the row's general `support_status` applies to that
+component too. All named components must already belong to that software
+version. The global Vendor Claims import also needs `software_name` and
+`software_version`:
+
+```csv
+software_name,software_version,make,model,support_status,component_name,component_version,component_status
+Microsoft 365,2026.1,Acme,R1,supported,Microsoft Outlook,16.2,supported
+Microsoft 365,2026.1,Acme,R1,supported,Microsoft Word,16.4,unsupported
+```
+
+The older `component_support` JSON column remains supported for importing
+several components in one row.
 The Vendor Claims lists show one suite/device row with an expandable Components
 section. Open it to see each explicit component version and its support status.
 Filter either list by component name, version, and status. The status filter

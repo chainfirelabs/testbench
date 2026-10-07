@@ -1,12 +1,22 @@
 # Release notes
 
+## 1.9.8
+
+- Vendor Claims CSV and JSON imports accept one component per row with
+  `component_name`, `component_version`, and optional `component_status`.
+  Rows for the same software version and hardware merge their component claims.
+- Vendor Claims import templates include the flat component columns; the
+  existing `component_support` list format remains supported.
+- The Python client can import Vendor Claims with `import_csv()` or
+  `import_rows()`. The MCP server remains read-only.
+- No database migration is required.
+
 ## 1.9.7
 
 - Vendor Claims can filter by component name, version, and effective support
   status. The same filters work through the API, exports, Python client, and MCP
   tools; responses identify matching component versions and inherited statuses.
 - Expanded component lists have an opaque, scrollable panel.
-- Example import CSVs exercise 100 component versions across five devices.
 - Vendor claims for the same software version and hardware retain each explicit
   component version. Adding or importing another component updates that link
   without removing the earlier ones, even when both statuses are the same.

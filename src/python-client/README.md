@@ -185,7 +185,7 @@ tb.software.versions("curl-smoke")             # all of them, newest first
 ## Vendor devices
 
 Hardware a vendor **claims** their software supports — their published
-compatibility list. Read-only, and not the same question as `tests`:
+compatibility list. These are not the same as `tests`:
 
 - a vendor device is a **claim**. Not evidence, and not necessarily hardware
   this fleet owns.
@@ -230,6 +230,26 @@ to the unqualified yes.
 `component_status` filters the effective status of the same named component
 version, falling back to the suite status when that component has no explicit
 override. It describes a vendor claim, not a recorded test result.
+
+To import claims, use one row per component. Each row must include the software
+name and version plus the same hardware fields for claims that should merge.
+The API key needs `software.edit`:
+
+```python
+tb.vendor_devices.import_csv("vendor-claims.csv")
+# Or pass dictionaries directly:
+tb.vendor_devices.import_rows([
+    {"software_name": "Microsoft 365", "software_version": "2026.1",
+     "make": "Acme", "model": "R1", "component_name": "Outlook",
+     "component_version": "16.2", "component_status": "supported"},
+    {"software_name": "Microsoft 365", "software_version": "2026.1",
+     "make": "Acme", "model": "R1", "component_name": "Teams",
+     "component_version": "2.1", "component_status": "unsupported"},
+])
+```
+
+Both methods return `created`, `updated`, and `errors`. The older
+`component_support` list also remains accepted.
 
 ## Errors
 
@@ -302,8 +322,6 @@ checkout test depends on.
   and friends exist; they are deliberately not wrapped, because an automated
   framework should be recording evidence, not editing the inventory.
 - Bulk and CSV import (`/devices/import`, `/tests/import`).
-- Editing vendor compatibility lists — reading them is `tb.vendor_devices`;
-  writing one is an import from a vendor's datasheet, done in the web app.
 - Saved filters, users, roles, audit log.
 
 Each is a short method following the pattern in `devices.py` if you need it.

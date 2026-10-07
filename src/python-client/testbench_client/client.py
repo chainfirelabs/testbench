@@ -216,6 +216,7 @@ class TestBench:
         *,
         params: dict | None = None,
         json: Any = None,
+        files: dict | None = None,
     ) -> Any:
         """Make one API call and return parsed JSON (None for 204).
 
@@ -232,7 +233,7 @@ class TestBench:
             if attempt:
                 self._backoff(attempt)
             try:
-                response = self._http.request(method, path, params=clean, json=json)
+                response = self._http.request(method, path, params=clean, json=json, files=files)
             except httpx.HTTPError as exc:
                 last = TransportError(
                     f"Could not reach the TestBench API at {self.base_url}: {exc}",

@@ -60,6 +60,32 @@ def test_component_filters_are_sent_together(tb, catalogue):
         tb.vendor_devices.list(component_status='sometimes')
 
 
+def test_import_rows_sends_flat_components_as_json_upload(tb, api):
+    rows = [
+        {"software_name": "Suite", "software_version": "1", "make": "Acme",
+         "model": "R1", "component_name": name, "component_version": version,
+         "component_status": status}
+        for name, version, status in (("Outlook", "16.2", "supported"),
+                                      ("Teams", "2.1", "unsupported"))
+    ]
+    assert tb.vendor_devices.import_rows(rows) == {"created": 1, "updated": 0, "errors": []}
+    request = api.requests[-1]
+    assert request.url.path.endswith("/vendor-devices/import")
+    assert b'"component_name": "Outlook"' in request.content
+    assert b'"component_name": "Teams"' in request.content
+    assert request.headers["content-type"].startswith("multipart/form-data")
+
+
+def test_import_csv_uploads_file(tb, api, tmp_path):
+    path = tmp_path / "claims.csv"
+    path.write_text("software_name,software_version,make,model,component_name,component_version\n"
+                    "Suite,1,Acme,R1,Outlook,16.2\n")
+    assert tb.vendor_devices.import_csv(path)["errors"] == []
+    request = api.requests[-1]
+    assert b"Suite,1,Acme,R1,Outlook,16.2" in request.content
+    assert b"claims.csv" in request.content
+
+
 def test_a_software_name_covers_every_version_of_it(tb, catalogue):
     assert len(tb.vendor_devices.list(software="Backup-Restore")) == 3
 

@@ -1,7 +1,7 @@
 """Vendor devices: the hardware vendors claim their software supports.
 
-Read-only. These rows are a vendor's published compatibility list, imported
-from a datasheet or a matrix; nothing a test run does should be writing them.
+These rows are a vendor's published compatibility list, imported from a
+datasheet or a matrix. Test runs should not write them; explicit imports can.
 
 The distinction this module exists to protect is the same one the rest of the
 system protects, and it is easy to lose:
@@ -19,7 +19,9 @@ bug this docstring is trying to prevent.
 
 from __future__ import annotations
 
-from typing import Iterator
+import json
+from pathlib import Path
+from typing import Iterable, Iterator
 
 from .models import VENDOR_SUPPORT_STATUSES, Device, Software, VendorDevice
 
@@ -33,6 +35,27 @@ class VendorDevices:
 
     def __init__(self, client) -> None:
         self._dm = client
+
+    def import_rows(self, rows: Iterable[dict]) -> dict:
+        """Import vendor claims across software versions.
+
+        Each row needs `software_name`, `software_version`, and hardware fields.
+        Use `component_name`, `component_version`, and optional
+        `component_status` for one component per row. Rows for the same
+        software version and hardware merge their component claims. The server
+        reports `created`, `updated`, and per-row `errors`.
+        """
+        content = json.dumps(list(rows)).encode("utf-8")
+        return self._dm.request("POST", "/vendor-devices/import", files={
+            "file": ("vendor-claims.json", content, "application/json"),
+        })
+
+    def import_csv(self, path: str | Path) -> dict:
+        """Upload a Vendor Claims CSV, including flat component columns."""
+        path = Path(path)
+        return self._dm.request("POST", "/vendor-devices/import", files={
+            "file": (path.name, path.read_bytes(), "text/csv"),
+        })
 
     def list(
         self,

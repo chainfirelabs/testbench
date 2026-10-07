@@ -153,7 +153,9 @@ class FakeAPI:
             return httpx.Response(status, json=body)
         path = request.url.path.replace("/api/v1", "", 1)
         params = dict(request.url.params)
-        body = json.loads(request.content) if request.content else {}
+        body = (json.loads(request.content)
+                if request.content and request.headers.get("content-type", "").startswith("application/json")
+                else {})
         method = request.method
 
         if path == "/auth/me":
@@ -225,6 +227,9 @@ class FakeAPI:
                 except _Rejected as exc:
                     return httpx.Response(422, json={"detail": str(exc)})
                 return httpx.Response(200, json=row)
+
+        if path == "/vendor-devices/import" and method == "POST":
+            return httpx.Response(200, json={"created": 1, "updated": 0, "errors": []})
 
         if path == "/vendor-devices" and method == "GET":
             rows = [self._catalog_row(r) for r in self.vendor_devices]

@@ -107,6 +107,40 @@ class SoftwareBundleApiTests(SchemaCase):
         self.assertEqual({item['component_name'] for item in claim['component_support']},
                          {'Outlook', 'Teams'})
 
+    def test_flat_csv_component_rows_merge_in_both_vendor_claim_imports(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Flat CSV Suite', 'version': '1',
+            'bundle_components': [
+                {'name': 'Outlook', 'version': '16.2'},
+                {'name': 'Teams', 'version': '2.1'},
+            ],
+        }).json()
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        header = 'make,model,support_status,component_name,component_version,component_status\n'
+        rows = ('Acme,R1,supported,Outlook,16.2,supported\n'
+                'Acme,R1,supported,Teams,2.1,unsupported\n')
+        scoped = self.client.post(f'{endpoint}/import', headers=self.headers,
+            files={'file': ('claims.csv', (header + rows).encode(), 'text/csv')})
+        self.assertEqual(scoped.status_code, 200, scoped.text)
+        self.assertEqual(scoped.json(), {'created': 1, 'updated': 0, 'errors': []})
+        claim = self.get(endpoint).json()['items'][0]
+        self.assertEqual({(item['component_name'], item['support_status'])
+                          for item in claim['component_support']},
+                         {('Outlook', 'supported'), ('Teams', 'unsupported')})
+
+        catalog_header = 'software_name,software_version,' + header
+        catalog_rows = ''.join(f'Flat CSV Suite,1,{row}\n' for row in rows.splitlines())
+        catalog = self.client.post('/api/v1/vendor-devices/import', headers=self.headers,
+            files={'file': ('claims.csv', (catalog_header + catalog_rows).encode(), 'text/csv')})
+        self.assertEqual(catalog.status_code, 200, catalog.text)
+        self.assertEqual(catalog.json(), {'created': 0, 'updated': 1, 'errors': []})
+        claim = self.get(endpoint).json()['items'][0]
+        self.assertEqual({(item['component_name'], item['support_status'])
+                          for item in claim['component_support']},
+                         {('Outlook', 'supported'), ('Teams', 'unsupported')})
+        self.assertIn('component_name', self.get(f'{endpoint}/template').text)
+        self.assertIn('component_status', self.get('/api/v1/vendor-devices/template').text)
+
     def test_vendor_claim_support_can_differ_by_component_version_or_be_general(self):
         software = self.post('/api/v1/software', {
             'name': 'Component Matrix', 'version': '1.0',

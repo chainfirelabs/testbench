@@ -86,13 +86,14 @@ EDITABLE_FIELDS = [
 ]
 
 COMPONENT_SUPPORT_FIELD = "component_support"
+FLAT_COMPONENT_FIELDS = ("component_name", "component_version", "component_status")
 
 # Fields the API owns; an import file carrying them is ignored rather than rejected.
 IMPORT_IGNORED = {"id", "software_id", "vendor", "match_key", "created_at", "updated_at", "created_by", "updated_by"}
 
 # The columns an import template offers. None is required on its own, but a row
 # has to say something about which device it describes (see build_match_key).
-TEMPLATE_COLUMNS = EDITABLE_FIELDS + [COMPONENT_SUPPORT_FIELD]
+TEMPLATE_COLUMNS = EDITABLE_FIELDS + list(FLAT_COMPONENT_FIELDS) + [COMPONENT_SUPPORT_FIELD]
 
 SEARCH_FIELDS = ("make", "model", "firmware_version", "hardware_version", "architecture", "source", "notes")
 
@@ -212,6 +213,26 @@ def _resolve_component_support(
         seen.add(component.id)
         resolved.append((component, entry.support_status))
     return resolved
+
+
+def _import_component_support(row: dict) -> list[VendorComponentSupportIn] | None:
+    """Accept a single component in flat CSV columns or the existing JSON list."""
+    name = row.pop("component_name", None)
+    version = row.pop("component_version", None)
+    status = row.pop("component_status", None)
+    supplied = row.get(COMPONENT_SUPPORT_FIELD) is not None
+    entries = list(row.get(COMPONENT_SUPPORT_FIELD) or [])
+    if name is not None:
+        entries.append({
+            "component_name": name,
+            "component_version": version or "",
+            "support_status": status or row.get("support_status") or "supported",
+        })
+    elif version is not None or status is not None:
+        raise ValueError("component_name is required with component_version or component_status")
+    if not supplied and name is None:
+        return None
+    return [VendorComponentSupportIn.model_validate(entry) for entry in entries]
 
 
 def _replace_component_support(
@@ -554,7 +575,10 @@ def vendor_device_template(software_id: str, db: Session = Depends(get_db), user
         field.key for field, payload in _effective_fields(db, software)
         if payload["visible"] and field.writable and field.key != "misc_data"
     ]
-    return download_response(template_csv(columns + [COMPONENT_SUPPORT_FIELD]), name, "text/csv")
+    return download_response(
+        template_csv(columns + list(FLAT_COMPONENT_FIELDS) + [COMPONENT_SUPPORT_FIELD]),
+        name, "text/csv",
+    )
 
 
 @router.post("/import", response_model=ImportResult)
@@ -584,17 +608,17 @@ async def import_vendor_devices(
     # folded into misc_data; only physical columns remain top-level.
     known = {
         field.key for field in fields if field.storage != "data"
-    } | IMPORT_IGNORED | {"misc_data", COMPONENT_SUPPORT_FIELD}
+    } | IMPORT_IGNORED | {"misc_data", COMPONENT_SUPPORT_FIELD} | set(FLAT_COMPONENT_FIELDS)
     for i, row in enumerate(rows):
         try:
             if not isinstance(row, dict):
                 raise ValueError("row must be an object")
             row = merge_extra_columns(row, known, "misc_data")
-            supplied = row.get(COMPONENT_SUPPORT_FIELD) is not None
+            component_entries = _import_component_support(row)
             body = VendorDeviceCreate(
                 **strip_nulls({k: v for k, v in row.items() if k not in IMPORT_IGNORED})
             )
-            links = _resolve_component_support(db, software, body.component_support) if supplied else None
+            links = _resolve_component_support(db, software, component_entries) if component_entries is not None else None
             data = _validate_values(db, software, body.model_dump(exclude={COMPONENT_SUPPORT_FIELD}))
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": i, "error": row_error(exc)})
@@ -1000,7 +1024,8 @@ def export_vendor_device_catalog(
     q = q.order_by(Software.name.asc(), VendorDevice.match_key.asc())
     pairs = [tuple(row) for row in db.execute(q).all()]
     fields = _catalog_export_fields(db)
-    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD]
+    columns = (CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
+               + list(FLAT_COMPONENT_FIELDS) + [COMPONENT_SUPPORT_FIELD])
     rows = []
     for item in _catalog_rows(db, pairs):
         row = item.model_dump(mode="json")
@@ -1146,7 +1171,7 @@ async def import_vendor_device_catalog(
     fields = get_entity_fields(db, "vendor_devices")
     known = {
         field.key for field in fields if field.storage != "data"
-    } | IMPORT_IGNORED | {"misc_data", COMPONENT_SUPPORT_FIELD} | set(CATALOG_SOFTWARE_COLUMNS)
+    } | IMPORT_IGNORED | {"misc_data", COMPONENT_SUPPORT_FIELD} | set(CATALOG_SOFTWARE_COLUMNS) | set(FLAT_COMPONENT_FIELDS)
 
     # The whole file is validated before anything is written, for the reason
     # the per-software import gives: rolling one bad row back mid-file would
@@ -1161,9 +1186,9 @@ async def import_vendor_device_catalog(
             software = _software_by_name_version(
                 db, cleaned.pop("software_name", ""), cleaned.pop("software_version", ""),
             )
-            supplied = cleaned.get(COMPONENT_SUPPORT_FIELD) is not None
+            component_entries = _import_component_support(cleaned)
             body = VendorDeviceCreate(**cleaned)
-            links = _resolve_component_support(db, software, body.component_support) if supplied else None
+            links = _resolve_component_support(db, software, component_entries) if component_entries is not None else None
             data = _validate_values(db, software, body.model_dump(exclude={COMPONENT_SUPPORT_FIELD}))
         except Exception as exc:  # noqa: BLE001
             result.errors.append({"row": i, "error": row_error(exc)})

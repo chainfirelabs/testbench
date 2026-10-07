@@ -35,7 +35,7 @@ images such as PostgreSQL are not built by these Dockerfiles and are unchanged.
 
 ## Build triggers and tags
 
-Default-branch pushes publish the chart's `appVersion` (currently `1.9.7`),
+Default-branch pushes publish the chart's `appVersion` (currently `1.9.8`),
 `latest`, and `sha-<full-commit-SHA>` tags. Rebuilding the same product version
 updates its version tag; use a digest or SHA tag to pin an exact build.
 Pushing a version tag such as `v1.7.3` publishes `1.7.3` and the SHA tag.
