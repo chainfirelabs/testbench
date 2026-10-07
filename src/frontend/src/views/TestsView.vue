@@ -485,10 +485,12 @@ const filterValues = makeFilterValues({
   skip: ['misc_data', 'created_at', 'updated_at'],
 })
 
+let latestTestsRequest = 0
 async function loadRemoteTests(request: RemoteTableRequest) {
+  const requestId = ++latestTestsRequest
   const params = remoteTableParams(request)
   const page = await remoteTableApi(`/tests`, params)
-  rows.value = page.items
+  if (requestId === latestTestsRequest) rows.value = page.items
   return { rows: page.items, total: page.total }
 }
 

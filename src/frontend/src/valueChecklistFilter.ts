@@ -17,9 +17,8 @@
  *    model can answer on its own. A fallback, so a page with no provider wired
  *    up still offers something to tick rather than an empty panel.
  *
- * Whatever they turn up accumulates: a value seen on an earlier page stays on
- * the list after paging away from it, so the choice does not move underneath
- * the user.
+ * Options refresh when the menu opens so another column's filter cannot leave
+ * stale values in this one. Selected values stay visible until cleared.
  */
 export class ValueChecklistFilter {
   private params: any
@@ -31,8 +30,9 @@ export class ValueChecklistFilter {
   private mode: 'included' | 'excluded' = 'excluded'
   private selection = new Map<string, any>()
   private values = new Map<string, { value: any; label: string }>()
-  /** Distinct values fetched from the server, once per filter instance. */
+  /** Distinct values fetched from the server for the current menu opening. */
   private providerState: 'idle' | 'loading' | 'done' | 'failed' = 'idle'
+  private providerRequest = 0
 
   init(params: any) {
     this.params = params
@@ -65,7 +65,13 @@ export class ValueChecklistFilter {
 
   getGui() { return this.gui }
   afterGuiAttached() {
-    if (this.providerState !== 'loading') this.providerState = 'idle'
+    // Other columns may have changed since this menu was last open. Discard
+    // their old option domain and ignore any response still in flight.
+    this.providerRequest++
+    this.providerState = 'idle'
+    this.search.value = ''
+    this.values.clear()
+    this.absorb(this.selection.values())
     this.refreshValues()
     this.search.focus()
   }
@@ -160,24 +166,30 @@ export class ValueChecklistFilter {
       return
     }
     this.providerState = 'loading'
+    const request = ++this.providerRequest
     this.renderStatus()
     Promise.resolve().then(() => provide(colId, this.params.colDef))
       .then((values: any[]) => {
-        this.providerState = values.length ? 'done' : 'failed'
+        if (request !== this.providerRequest) return
+        this.providerState = 'done'
         this.absorb(Array.isArray(values) ? values : [])
         this.renderList()
       })
       .catch(() => {
+        if (request !== this.providerRequest) return
         // A column the page cannot enumerate still filters on whatever the
         // rows on screen turned up; the panel says so rather than looking
         // like the column is empty.
         this.providerState = 'failed'
+        this.absorb(this.harvestRowModel())
         this.renderList()
       })
   }
 
   private refreshValues() {
-    this.absorb(this.harvestRowModel())
+    if (typeof this.params.colDef?.filterParams?.valuesProvider !== 'function') {
+      this.absorb(this.harvestRowModel())
+    }
     this.loadProvidedValues()
     this.renderList()
   }

@@ -199,6 +199,12 @@ answer different questions and routinely disagree.
 # Every compatibility list at once — the question no single software answers.
 tb.vendor_devices.list(search="ISR 4331")
 tb.vendor_devices.list(make="Cisco", support_status="supported")
+matches = tb.vendor_devices.list(
+    model="R1", component_name="Outlook", component_version="16.2",
+    component_status="supported",
+)
+for claim in matches:
+    print(claim.matching_components)  # effective status and inherited flag
 
 # One software's own list. A bare name gives the current version's.
 tb.vendor_devices.for_software("curl-smoke")
@@ -221,6 +227,9 @@ current = [c for c in tb.vendor_devices.for_device("dev-0042") if c.software_is_
 `unsupported` or `planned`. Unsupported rows come back like any other, because
 "the vendor says no" is an answer; `supported_only=` and `.is_supported` filter
 to the unqualified yes.
+`component_status` filters the effective status of the same named component
+version, falling back to the suite status when that component has no explicit
+override. It describes a vendor claim, not a recorded test result.
 
 ## Errors
 

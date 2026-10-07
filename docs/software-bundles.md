@@ -48,6 +48,25 @@ one component version and unsupported by another. A claim with no component
 links works exactly as before; a component without an override uses the general
 claim status.
 
+Component links are distinct by component version even when their statuses
+match. Adding the same hardware to another component version joins that link
+to the existing suite/device claim; it does not erase earlier component links.
+Separate import rows for that hardware and different component versions merge
+in the same way. Editing a claim can still remove a link by unselecting it.
+The Vendor Claims lists show one suite/device row with an expandable Components
+section. Open it to see each explicit component version and its support status.
+Filter either list by component name, version, and status. The status filter
+uses the effective status: a component's own claim when present, otherwise the
+suite claim. A match returned by the API appears in `matching_components` with
+`inherited: true` when it uses the suite status. The name, version, and status
+filters must all match the same component version. Component links remain
+optional; filtering for an unlinked component can still find a suite claim
+when that component belongs to the software version.
+
+For example, `GET /api/v1/vendor-devices?model=R1&component_name=Outlook&component_version=16.2&component_status=supported`
+finds suite/device claims whose effective Outlook 16.2 status is supported.
+This is vendor guidance, not a measured test result.
+
 On the software version's **Vendor Claims** tab, or in **Vendor Claims** across
 all software, open a claim and choose the component versions whose support
 differs. Each selected version has its own status. The API uses

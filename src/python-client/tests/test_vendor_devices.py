@@ -49,6 +49,17 @@ def test_named_filters_narrow_the_catalogue(tb, catalogue):
     assert all(r.model == "ISR 4331" for r in rows)
 
 
+def test_component_filters_are_sent_together(tb, catalogue):
+    tb.vendor_devices.list(model="ISR 4331", component_name="Outlook",
+                           component_version="16.2", component_status="supported")
+    request = next(r for r in reversed(catalogue.requests) if r.url.path.endswith('/vendor-devices'))
+    assert request.url.params['component_name'] == 'Outlook'
+    assert request.url.params['component_version'] == '16.2'
+    assert request.url.params['component_status'] == 'supported'
+    with pytest.raises(ValueError, match='support_status must be one of'):
+        tb.vendor_devices.list(component_status='sometimes')
+
+
 def test_a_software_name_covers_every_version_of_it(tb, catalogue):
     assert len(tb.vendor_devices.list(software="Backup-Restore")) == 3
 

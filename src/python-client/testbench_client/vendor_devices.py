@@ -45,6 +45,9 @@ class VendorDevices:
         hardware_version: str | None = None,
         architecture: str | None = None,
         support_status: str | None = None,
+        component_name: str | None = None,
+        component_version: str | None = None,
+        component_status: str | None = None,
         sort: str = "make",
         order: str = "asc",
         limit: int | None = None,
@@ -52,7 +55,8 @@ class VendorDevices:
         """Every claim matching the filters, across as many pages as it takes.
 
         `search` matches make, model, firmware, hardware version, architecture,
-        source, notes and the software's own name and version at once; the
+        source, notes, component names and versions, and the software's own
+        name and version at once; the
         named filters are narrower and combine with AND.
 
         `software` takes a name and covers **every version of it** — a claim
@@ -61,12 +65,16 @@ class VendorDevices:
 
         `support_status` filters the general vendor claim: supported, partial,
         unsupported or planned. Per-component overrides are available on each
-        returned row's `component_support` list.
+        returned row's `component_support` list. Component filters match one
+        component version's effective status; `matching_components` identifies
+        each match and whether it inherited the suite status.
         """
         return list(self.iter(
             search=search, software=software, make=make, model=model,
             firmware_version=firmware_version, hardware_version=hardware_version,
             architecture=architecture, support_status=support_status,
+            component_name=component_name, component_version=component_version,
+            component_status=component_status,
             sort=sort, order=order, limit=limit,
         ))
 
@@ -81,6 +89,9 @@ class VendorDevices:
         hardware_version: str | None = None,
         architecture: str | None = None,
         support_status: str | None = None,
+        component_name: str | None = None,
+        component_version: str | None = None,
+        component_status: str | None = None,
         sort: str = "make",
         order: str = "asc",
         limit: int | None = None,
@@ -88,6 +99,8 @@ class VendorDevices:
         """Like `list()`, but yields as pages arrive rather than buffering."""
         if support_status is not None:
             _check_support_status(support_status)
+        if component_status is not None:
+            _check_support_status(component_status)
         params = {
             "search": search,
             # The API takes a software *name* here, which is what covers every
@@ -99,6 +112,9 @@ class VendorDevices:
             "hardware_version": hardware_version,
             "architecture": architecture,
             "support_status": support_status,
+            "component_name": component_name,
+            "component_version": component_version,
+            "component_status": component_status,
             "sort": sort, "order": order,
         }
         for row in self._dm.paginate("/vendor-devices", params, limit=limit):
@@ -111,6 +127,9 @@ class VendorDevices:
         *,
         search: str | None = None,
         support_status: str | None = None,
+        component_name: str | None = None,
+        component_version: str | None = None,
+        component_status: str | None = None,
         limit: int | None = None,
     ) -> list[VendorDevice]:
         """One software version's own compatibility list.
@@ -127,11 +146,16 @@ class VendorDevices:
         """
         if support_status is not None:
             _check_support_status(support_status)
+        if component_status is not None:
+            _check_support_status(component_status)
         software_id = self._dm.software.resolve(name, version)
         params = {
             "software_id": software_id,
             "search": search,
             "support_status": support_status,
+            "component_name": component_name,
+            "component_version": component_version,
+            "component_status": component_status,
         }
         return [
             VendorDevice.from_dict(row)
@@ -143,6 +167,9 @@ class VendorDevices:
         identifier: str | Device,
         *,
         supported_only: bool = False,
+        component_name: str | None = None,
+        component_version: str | None = None,
+        component_status: str | None = None,
         limit: int | None = None,
     ) -> list[VendorDevice]:
         """Claims describing a device in the fleet, by its own make and model.
@@ -159,8 +186,16 @@ class VendorDevices:
         device = identifier if isinstance(identifier, Device) else self._dm.devices.get(identifier)
         if not device.make and not device.model:
             return []
-        rows = self.list(make=device.make or None, model=device.model or None, limit=limit)
-        return [row for row in rows if row.is_supported] if supported_only else rows
+        rows = self.list(make=device.make or None, model=device.model or None,
+                         component_name=component_name, component_version=component_version,
+                         component_status=component_status, limit=limit)
+        if not supported_only:
+            return rows
+        if component_name or component_version or component_status:
+            return [row for row in rows if any(
+                match.get("support_status") == "supported" for match in row.matching_components
+            )]
+        return [row for row in rows if row.is_supported]
 
 
 def _check_support_status(status: str) -> None:

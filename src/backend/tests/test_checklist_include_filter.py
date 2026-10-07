@@ -229,3 +229,50 @@ class ChecklistQueryTransportTests(SchemaCase):
         self.assertEqual(self.post('/api/v1/devices/query?page_size=0', {}).status_code, 422)
         self.assertEqual(self.post('/api/v1/devices/query', {'page_size': '0'}).status_code, 422)
         self.assertEqual(self.client.post('/api/v1/devices/query', json={}).status_code, 401)
+
+
+class FacetedFilterValueTests(SchemaCase):
+    def test_user_boolean_options_follow_other_user_filters(self):
+        import json
+        from urllib.parse import urlencode
+
+        params = urlencode({'include__username': json.dumps(['admin'])})
+        response = self.get(f'/api/v1/suggestions/users/is_online/filter-values?{params}')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(response.json()['values']), 1)
+        self.assertIsInstance(response.json()['values'][0], bool)
+
+    def test_other_columns_narrow_device_and_test_options(self):
+        import json
+        from urllib.parse import urlencode
+
+        cisco = self.post('/api/v1/devices', {
+            'unique_id': 'facet-cisco', 'make': 'Cisco', 'model': 'R1',
+        }).json()
+        dell = self.post('/api/v1/devices', {
+            'unique_id': 'facet-dell', 'make': 'Dell', 'model': 'R10',
+        }).json()
+        software = self.post('/api/v1/software', {
+            'name': 'Facet suite', 'version': '1',
+        }).json()
+        for device in (cisco, dell):
+            self.post('/api/v1/tests', {
+                'device_id': device['id'], 'software_id': software['id'], 'outcome': 'pass',
+            })
+        self.post('/api/v1/devices', {'unique_id': 'facet-untested', 'make': 'Other',
+                                      'model': 'R100'})
+        device_facet = '/api/v1/suggestions/devices/model/filter-values'
+        query = urlencode({'include__make': json.dumps(['Cisco'])})
+        response = self.get(f'{device_facet}?{query}')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['values'], ['R1'])
+        scoped = self.get(f'{device_facet}?software_id={software["id"]}')
+        self.assertEqual(scoped.status_code, 200, scoped.text)
+        self.assertEqual(scoped.json()['values'], ['R1', 'R10'])
+
+        test_facet = '/api/v1/suggestions/tests/device_unique_id/filter-values'
+        query = urlencode({'include__device_unique_id': json.dumps(['facet-dell']),
+                           'include__outcome': json.dumps(['pass'])})
+        response = self.get(f'{test_facet}?{query}')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['values'], ['facet-cisco', 'facet-dell'])

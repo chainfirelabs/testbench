@@ -260,11 +260,13 @@ async function reloadRows() {
  * Values for the column filters' checklists.
  *
  * A device grid is server-paged, so the distinct values of a column are the
- * server's to answer. The ones this page can answer itself — a select field's
- * vocabulary, the device types it already loaded — it does, without a request.
+ * server's to answer. Schema options and device types remain fallback values
+ * if enumeration fails.
  */
 const filterValues = makeFilterValues({
   entity: 'devices',
+  base: () => ({ device_type: activeTypeKey.value || undefined,
+                 overdue: showOverdueOnly.value || undefined }),
   local: (colId) => {
     if (colId === 'device_type_id') return [null, ...deviceTypes.value.map((type) => type.id)]
     const field = [...deviceFields.value, ...otherTypeFields.value].find((f) => f.key === colId)
@@ -276,7 +278,9 @@ const filterValues = makeFilterValues({
   skip: ['misc_data', 'created_at', 'updated_at'],
 })
 
+let latestDevicesRequest = 0
 async function loadRemoteDevices(request: RemoteTableRequest) {
+  const requestId = ++latestDevicesRequest
   const params = remoteTableParams(request, {
     device_type: activeTypeKey.value || undefined,
     overdue: showOverdueOnly.value || undefined,
@@ -286,7 +290,7 @@ async function loadRemoteDevices(request: RemoteTableRequest) {
     params.set('order', 'asc')
   }
   const page = await remoteTableApi(`/devices`, params)
-  rows.value = page.items
+  if (requestId === latestDevicesRequest) rows.value = page.items
   return { rows: page.items, total: page.total }
 }
 

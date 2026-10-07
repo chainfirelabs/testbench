@@ -145,10 +145,10 @@ const props = withDefaults(
      *
      * Only the page can answer this for a server-paged table — the browser
      * holds one window of the rows, and the column has the rest. Return an
-     * empty array (or leave the prop off) for a column with no answer; the
-     * filter falls back to the values the loaded rows happen to carry.
+     * An empty array means no values exist in the current filtered set.
+     * Leave the prop off to use values from the loaded rows instead.
      */
-    filterValues?: (colId: string, colDef: any) => Promise<any[]> | any[]
+    filterValues?: (colId: string, colDef: any, context: { search: string; filterModel: Record<string, any> }) => Promise<any[]> | any[]
     editable?: boolean
     /** Rows that have unsaved (dirty) changes, keyed by row id. */
     dirtyIds?: Set<string>
@@ -552,7 +552,12 @@ const defaultColDef = computed(() => ({
   // values. Server-paged tables need it: the row model only ever holds the
   // window on screen, so without it the checklist offers a page's worth of
   // values and silently hides the rest of the column.
-  filterParams: { valuesProvider: props.filterValues || undefined },
+  filterParams: { valuesProvider: props.filterValues
+    ? (colId: string, colDef: any) => props.filterValues?.(colId, colDef, {
+        search: quickFilter.value.trim(),
+        filterModel: gridApi.value?.getFilterModel?.() || {},
+      })
+    : undefined },
   sortable: true,
   // Our custom filter owns its types; inference can defer saved models until
   // rows arrive, which creates a circular dependency for remote filtering.

@@ -108,6 +108,34 @@ test('a provider supplies values the loaded page never showed', async () => {
   assert.equal(statusText(filter), '')
 })
 
+test('reopening after another filter changes replaces stale options', async () => {
+  let options = ['R1', 'R10']
+  const { filter } = harness({ provider: async () => options })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(shown(filter).map((row) => row.label), ['R1', 'R10'])
+  options = ['R1']
+  filter.afterGuiAttached()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(shown(filter).map((row) => row.label), ['R1'])
+})
+
+test('a late option response cannot restore an earlier filter context', async () => {
+  let finishOld
+  let calls = 0
+  const { filter } = harness({ provider: () => {
+    calls++
+    return calls === 1
+      ? new Promise((resolve) => { finishOld = resolve })
+      : Promise.resolve(['R1'])
+  } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  filter.afterGuiAttached()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  finishOld(['R10'])
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(shown(filter).map((row) => row.label), ['R1'])
+})
+
 test('a provider that fails leaves the loaded values usable, and says why', async () => {
   const { filter } = harness({
     rows: ['Cisco', 'Dell'],

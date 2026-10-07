@@ -43,6 +43,7 @@ import { customColumn, customFormField, mergeCustomValues, useEntityFields } fro
 import SuggestCellEditor from '../components/SuggestCellEditor.vue'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
+import { componentSupportColumn } from '../vendorComponentSupport'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -175,15 +176,6 @@ const baseColumns = [
   },
 ]
 
-const componentSupportText = (row: any) => (row?.component_support || [])
-  .map((item: any) => `${item.component_name} ${item.component_version || '(unversioned)'}: ${supportLabel(item.support_status)}`)
-  .join(', ')
-
-const componentSupportColumn = {
-  field: 'component_support', headerName: 'Component Support', editable: false,
-  filter: false, minWidth: 230, valueGetter: (p: any) => componentSupportText(p.data),
-}
-
 /*
  * The grid's columns: the two software ones, then the field catalog.
  *
@@ -219,6 +211,7 @@ const columns = computed(() => {
 
 const filterValues = makeFilterValues({
   entity: 'vendor-devices',
+  base: () => ({ ...urlFilters.value, ...componentFilters.value }),
   local: (colId) => {
     if (colId === 'support_status') return [null, ...SUPPORT_VALUES]
     const field = vendorFields.value.find((item: any) => item.key === colId)
@@ -251,16 +244,26 @@ const urlFilters = computed(() => {
 })
 
 const activeFilters = computed(() => Object.entries(urlFilters.value))
+const componentFilters = ref({ component_name: '', component_version: '', component_status: '' })
+let componentFilterTimer: ReturnType<typeof setTimeout> | undefined
+watch(componentFilters, () => {
+  if (componentFilterTimer) clearTimeout(componentFilterTimer)
+  componentFilterTimer = setTimeout(() => table.value?.reload(), 250)
+}, { deep: true })
 
 function clearFilters() {
   router.replace('/vendor-devices')
 }
 
+let latestVendorRequest = 0
 async function loadRemoteVendorDevices(request: RemoteTableRequest) {
-  const params = remoteTableParams(request, urlFilters.value)
+  const requestId = ++latestVendorRequest
+  const params = remoteTableParams(request, { ...urlFilters.value, ...componentFilters.value })
   const page = await remoteTableApi(`/vendor-devices`, params)
-  rows.value = page.items
-  total.value = page.total
+  if (requestId === latestVendorRequest) {
+    rows.value = page.items
+    total.value = page.total
+  }
   return { rows: page.items, total: page.total }
 }
 
@@ -283,7 +286,7 @@ function exportAs(format: string) {
       sortModel: state?.sort || [],
       filterModel: state?.filter || {},
     },
-    { format, ...urlFilters.value },
+    { format, ...urlFilters.value, ...componentFilters.value },
   )
   // Paging parameters mean nothing to an export, which returns the whole
   // filtered set.
@@ -750,6 +753,16 @@ async function onImportFile(e: Event) {
       </span>
       <button class="btn btn-mini" type="button" @click="clearFilters">Clear</button>
     </p>
+    <div class="vendor-component-filters" aria-label="Component claim filters">
+      <label>Component <input v-model="componentFilters.component_name" type="search" placeholder="Name" /></label>
+      <label>Version <input v-model="componentFilters.component_version" type="search" placeholder="Version" /></label>
+      <label>Status <select v-model="componentFilters.component_status">
+        <option value="">Any</option>
+        <option v-for="status in SUPPORT_VALUES" :key="status" :value="status">{{ supportLabel(status) }}</option>
+      </select></label>
+      <button v-if="Object.values(componentFilters).some(Boolean)" class="btn btn-mini"
+        @click="componentFilters = { component_name: '', component_version: '', component_status: '' }">Clear</button>
+    </div>
     <DataTable
       ref="table"
       :columns="columns"

@@ -10,7 +10,7 @@ import re
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import Boolean, Numeric, and_, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db, utcnow
 from ..models import (EntityField, Software, SoftwareComponent, User, VendorDevice,
                       VendorDeviceComponentSupport, VendorDeviceFieldOverride)
-from ..models.vendor_device import build_match_key
+from ..models.vendor_device import VENDOR_SUPPORT_STATUSES, build_match_key
 from ..schemas import (
     BulkIds,
     ImportResult,
@@ -29,6 +29,7 @@ from ..schemas import (
     VendorDeviceOut,
     VendorDeviceUpdate,
     VendorComponentSupportIn,
+    VendorComponentMatchOut,
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import (
@@ -227,6 +228,21 @@ def _replace_component_support(
     vd.component_support = updated
 
 
+def _merge_component_support(
+    vd: VendorDevice, entries: list[tuple[SoftwareComponent, str]],
+) -> None:
+    """Add or update named component versions without dropping other claims."""
+    existing = {row.component_id: row for row in vd.component_support}
+    for component, status in entries:
+        row = existing.get(component.id)
+        if row is None:
+            row = VendorDeviceComponentSupport(component_id=component.id, support_status=status)
+            vd.component_support.append(row)
+            existing[component.id] = row
+        else:
+            row.support_status = status
+
+
 def _find_duplicate(db: Session, software: Software, match_key: str, exclude_id: str | None = None) -> VendorDevice | None:
     q = select(VendorDevice).where(
         VendorDevice.software_id == software.id, VendorDevice.match_key == match_key
@@ -247,8 +263,78 @@ def _describe(values: dict) -> str:
     return " ".join(parts) or "(blank)"
 
 
-def _query(db: Session, software: Software, search: str | None):
+COMPONENT_FILTER_KEYS = ("component_name", "component_version", "component_status")
+
+
+def _component_filters(params: dict) -> dict[str, str]:
+    values = {key: str(params.get(key) or "").strip() for key in COMPONENT_FILTER_KEYS}
+    if values["component_status"] and values["component_status"] not in VENDOR_SUPPORT_STATUSES:
+        raise HTTPException(status_code=422, detail=f"component_status must be one of {VENDOR_SUPPORT_STATUSES}")
+    return values
+
+
+def _component_exists(filters: dict[str, str], *, search: str | None = None):
+    """Match all component predicates against one version without multiplying claim rows."""
+    conditions = [SoftwareComponent.software_id == VendorDevice.software_id]
+    if filters["component_name"]:
+        conditions.append(SoftwareComponent.name.ilike(f"%{filters['component_name']}%"))
+    if filters["component_version"]:
+        conditions.append(SoftwareComponent.version == filters["component_version"])
+    if filters["component_status"]:
+        conditions.append(func.coalesce(
+            VendorDeviceComponentSupport.support_status, VendorDevice.support_status,
+        ) == filters["component_status"])
+    if search:
+        like = f"%{search}%"
+        conditions.append(or_(SoftwareComponent.name.ilike(like), SoftwareComponent.version.ilike(like)))
+    return select(SoftwareComponent.id).outerjoin(
+        VendorDeviceComponentSupport,
+        and_(VendorDeviceComponentSupport.component_id == SoftwareComponent.id,
+             VendorDeviceComponentSupport.vendor_device_id == VendorDevice.id),
+    ).where(*conditions).correlate(VendorDevice).exists()
+
+
+def _matching_components(db: Session, rows: list[VendorDevice], filters: dict[str, str],
+                         search: str | None = None) -> dict[str, list[dict]]:
+    has_filters = any(filters.values())
+    if not rows or (not has_filters and not search):
+        return {}
+    search_key = (search or "").casefold()
+    components = db.scalars(select(SoftwareComponent).where(
+        SoftwareComponent.software_id.in_({row.software_id for row in rows}),
+    )).all()
+    by_software: dict[str, list[SoftwareComponent]] = {}
+    for component in components:
+        by_software.setdefault(component.software_id, []).append(component)
+    matches = {}
+    for row in rows:
+        explicit = {link.component_id: link.support_status for link in row.component_support}
+        found = []
+        for component in by_software.get(row.software_id, []):
+            status = explicit.get(component.id, row.support_status)
+            if filters["component_name"] and filters["component_name"].casefold() not in component.name.casefold():
+                continue
+            if filters["component_version"] and filters["component_version"] != component.version:
+                continue
+            if filters["component_status"] and filters["component_status"] != status:
+                continue
+            if not has_filters and search_key and not (
+                search_key in component.name.casefold()
+                or search_key in component.version.casefold()
+            ):
+                continue
+            found.append({"component_id": component.id, "component_name": component.name,
+                          "component_version": component.version, "support_status": status,
+                          "inherited": component.id not in explicit})
+        matches[row.id] = found
+    return matches
+
+
+def _query(db: Session, software: Software, search: str | None, component_filters: dict[str, str] | None = None):
     q = select(VendorDevice).where(VendorDevice.software_id == software.id)
+    filters = component_filters or _component_filters({})
+    if any(filters.values()):
+        q = q.where(_component_exists(filters))
     if search:
         like = f"%{search}%"
         custom = [
@@ -258,6 +344,7 @@ def _query(db: Session, software: Software, search: str | None):
         ]
         q = q.where(or_(
             *[getattr(VendorDevice, f).ilike(like) for f in SEARCH_FIELDS],
+            _component_exists(_component_filters({}), search=search),
             *custom,
         ))
     return q
@@ -279,6 +366,9 @@ def _firmware_key(item: dict):
 def list_grouped_vendor_devices(
     software_id: str,
     search: str | None = None,
+    component_name: str | None = None,
+    component_version: str | None = None,
+    component_status: str | None = None,
     sort: str = "make",
     order: str = "asc",
     page: int = Query(1, ge=1),
@@ -290,11 +380,12 @@ def list_grouped_vendor_devices(
 ):
     """Page the presentation groups while retaining every firmware member."""
     software = _get_software(db, software_id)
-    source_query = _query(db, software, search)
+    filters = _component_filters(locals())
+    source_query = _query(db, software, search, filters)
     standard = {key for key in EDITABLE_FIELDS if key != "misc_data"}
     custom = {field.key: field for field, _payload in _effective_fields(db, software) if field.storage == "data"}
     for key, value in checklist_query(request, filters_body).items():
-        if key in {"search", "sort", "order", "page", "page_size"} or not value:
+        if key in {"search", "sort", "order", "page", "page_size", *COMPONENT_FILTER_KEYS} or not value:
             continue
         excluded = key.startswith("exclude__")
         included = key.startswith("include__")
@@ -332,12 +423,12 @@ def list_grouped_vendor_devices(
         _group_value(VendorDevice.model) == row.model_key,
         _group_value(VendorDevice.hardware_version) == row.hardware_key,
     ) for row in group_rows]
-    members = db.scalars(select(VendorDevice).where(
-        VendorDevice.software_id == software.id, or_(*clauses),
-    )).all()
+    members = db.scalars(source_query.where(or_(*clauses))).all()
+    matched = _matching_components(db, members, filters, search)
     by_key: dict[tuple[str, str, str], list[dict]] = {}
     for member in members:
         payload = _vd_dict(member)
+        payload["matching_components"] = matched.get(member.id, [])
         key = tuple(str(payload.get(name) or "").strip().lower()
                     for name in ("make", "model", "hardware_version"))
         by_key.setdefault(key, []).append(payload)
@@ -389,6 +480,9 @@ def update_vendor_device_schema(
 def list_vendor_devices(
     software_id: str,
     search: str | None = None,
+    component_name: str | None = None,
+    component_version: str | None = None,
+    component_status: str | None = None,
     sort: str = "make",
     order: str = "asc",
     page: int = Query(1, ge=1),
@@ -397,13 +491,21 @@ def list_vendor_devices(
     user: User = Depends(get_current_user),
 ):
     software = _get_software(db, software_id)
-    q = _query(db, software, search)
+    filters = _component_filters(locals())
+    q = _query(db, software, search, filters)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     # Secondary sort keeps paging stable when the primary column repeats.
     q = q.order_by(order_by(VendorDevice, sort, order, "make"), VendorDevice.match_key.asc())
     items = db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all()
+    matched = _matching_components(db, items, filters, search)
+    out = []
+    for item in items:
+        payload = VendorDeviceOut.model_validate(item)
+        payload.matching_components = [VendorComponentMatchOut.model_validate(match)
+                                       for match in matched.get(item.id, [])]
+        out.append(payload)
     return Page(
-        items=[VendorDeviceOut.model_validate(v) for v in items],
+        items=out,
         total=total,
         page=page,
         page_size=page_size,
@@ -420,7 +522,8 @@ def export_vendor_devices(
     user: User = Depends(get_current_user),
 ):
     software = _get_software(db, software_id)
-    items = db.scalars(_query(db, software, search).order_by(VendorDevice.match_key)).all()
+    filters = _component_filters(dict(request.query_params))
+    items = db.scalars(_query(db, software, search, filters).order_by(VendorDevice.match_key)).all()
     fields = [field for field, payload in _effective_fields(db, software) if payload["visible"]]
     rows = []
     for item in items:
@@ -514,7 +617,7 @@ async def import_vendor_devices(
             existing[key] = vd
         _apply(vd, data)
         if links is not None:
-            _replace_component_support(vd, links)
+            _merge_component_support(vd, links)
         vd.updated_by = user.id
         if not is_new:
             vd.updated_at = utcnow()
@@ -564,6 +667,7 @@ def create_vendor_device(
     software_id: str,
     body: VendorDeviceCreate,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     user: User = Depends(require_software_edit),
 ):
@@ -574,11 +678,23 @@ def create_vendor_device(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     key = build_match_key(data)
-    if _find_duplicate(db, software, key):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{software.name} already lists a vendor device matching {_describe(data)}",
-        )
+    duplicate = _find_duplicate(db, software, key)
+    if duplicate:
+        if not links:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{software.name} already lists a vendor device matching {_describe(data)}",
+            )
+        _merge_component_support(duplicate, links)
+        duplicate.updated_by = user.id
+        duplicate.updated_at = utcnow()
+        log_action(db, user, "software.vendor_device.update", "vendor_device", duplicate.id,
+                   {"software_id": software.id,
+                    "component_support_added": body.model_dump(mode="json")[COMPONENT_SUPPORT_FIELD]}, request)
+        db.commit()
+        db.refresh(duplicate)
+        response.status_code = 200
+        return VendorDeviceOut.model_validate(duplicate)
     vd = VendorDevice(software_id=software.id, created_by=user.id, updated_by=user.id)
     _apply(vd, data)
     _replace_component_support(vd, links)
@@ -716,7 +832,8 @@ def _catalog_export_fields(db: Session) -> list[EntityField]:
     ]
 
 # Query parameters that steer the request rather than filter it.
-CATALOG_CONTROLS = {"search", "sort", "order", "page", "page_size", "offset", "format", "software"}
+CATALOG_CONTROLS = {"search", "sort", "order", "page", "page_size", "offset", "format", "software",
+                    *COMPONENT_FILTER_KEYS}
 
 
 def _catalog_query(db: Session, search: str | None, params: dict):
@@ -728,6 +845,9 @@ def _catalog_query(db: Session, search: str | None, params: dict):
     claim about a Cisco", asked of the other side of the join.
     """
     q = select(VendorDevice, Software).join(Software, VendorDevice.software_id == Software.id)
+    component_filters = _component_filters(params)
+    if any(component_filters.values()):
+        q = q.where(_component_exists(component_filters))
     if search:
         like = f"%{search}%"
         # Custom (misc_data) columns are configured per software version, so a
@@ -741,6 +861,7 @@ def _catalog_query(db: Session, search: str | None, params: dict):
             *[column.ilike(like) for column in CATALOG_TEXT_FILTERS.values()],
             Software.name.ilike(like),
             Software.version.ilike(like),
+            _component_exists(_component_filters({}), search=search),
             *custom,
         ))
     custom_fields = {field.key: field for field in get_entity_fields(db, "vendor_devices")
@@ -777,7 +898,9 @@ def _catalog_query(db: Session, search: str | None, params: dict):
     return q
 
 
-def _catalog_rows(db: Session, pairs: list[tuple[VendorDevice, Software]]) -> list[VendorDeviceCatalogOut]:
+def _catalog_rows(db: Session, pairs: list[tuple[VendorDevice, Software]],
+                  filters: dict[str, str] | None = None,
+                  search: str | None = None) -> list[VendorDeviceCatalogOut]:
     """Vendor claims with the software that makes them, and its place in the line.
 
     `software_is_latest` is resolved for the whole page in one query: the same
@@ -793,12 +916,15 @@ def _catalog_rows(db: Session, pairs: list[tuple[VendorDevice, Software]]) -> li
     latest = {
         name: (newest_version(rows).id if rows else None) for name, rows in siblings.items()
     }
+    matched = _matching_components(db, [vd for vd, _software in pairs], filters or _component_filters({}), search)
     out = []
     for vendor_device, software in pairs:
         item = VendorDeviceCatalogOut.model_validate(vendor_device)
         item.software_name = software.name
         item.software_version = software.version or ""
         item.software_is_latest = latest.get(software.name.lower()) == software.id
+        item.matching_components = [VendorComponentMatchOut.model_validate(match)
+                                    for match in matched.get(vendor_device.id, [])]
         out.append(item)
     return out
 
@@ -847,7 +973,7 @@ def search_vendor_devices(
     start = offset if offset is not None else (page - 1) * page_size
     pairs = [tuple(row) for row in db.execute(q.offset(start).limit(page_size)).all()]
     return Page(
-        items=_catalog_rows(db, pairs),
+        items=_catalog_rows(db, pairs, _component_filters(checklist_query(request, filters_body)), search),
         total=total,
         page=start // page_size + 1,
         page_size=page_size,
@@ -948,6 +1074,7 @@ def vendor_device_catalog_template(db: Session = Depends(get_db), user: User = D
 def create_vendor_device_from_catalog(
     body: VendorDeviceCatalogCreate,
     request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     user: User = Depends(require_software_edit),
 ):
@@ -968,11 +1095,23 @@ def create_vendor_device_from_catalog(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     key = build_match_key(data)
-    if _find_duplicate(db, software, key):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{software.name} already lists a vendor device matching {_describe(data)}",
-        )
+    duplicate = _find_duplicate(db, software, key)
+    if duplicate:
+        if not links:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{software.name} already lists a vendor device matching {_describe(data)}",
+            )
+        _merge_component_support(duplicate, links)
+        duplicate.updated_by = user.id
+        duplicate.updated_at = utcnow()
+        log_action(db, user, "software.vendor_device.update", "vendor_device", duplicate.id,
+                   {"software_id": software.id, "from_catalog": True,
+                    "component_support_added": component_support}, request)
+        db.commit()
+        db.refresh(duplicate)
+        response.status_code = 200
+        return _catalog_rows(db, [(duplicate, software)])[0]
     vd = VendorDevice(software_id=software.id, created_by=user.id, updated_by=user.id)
     _apply(vd, data)
     _replace_component_support(vd, links)
@@ -1054,7 +1193,7 @@ async def import_vendor_device_catalog(
             rows_for_software[key] = vd
         _apply(vd, data)
         if links is not None:
-            _replace_component_support(vd, links)
+            _merge_component_support(vd, links)
         vd.updated_by = user.id
         if not is_new:
             vd.updated_at = utcnow()

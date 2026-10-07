@@ -68,10 +68,12 @@ const filterValues = makeFilterValues({
   skip: ['detail'],
 })
 
+let latestAuditRequest = 0
 async function loadRemoteAudit(request: RemoteTableRequest) {
+  const requestId = ++latestAuditRequest
   const params = remoteTableParams(request)
   const page = await remoteTableApi(`/audit_logs`, params)
-  rows.value = page.items
+  if (requestId === latestAuditRequest) rows.value = page.items
   return { rows: page.items, total: page.total }
 }
 

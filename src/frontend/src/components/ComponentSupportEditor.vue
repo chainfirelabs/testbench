@@ -25,7 +25,7 @@ function setStatus(id: string, status: string) {
 <template>
   <section class="component-support-editor">
     <strong>Component support (optional)</strong>
-    <p class="muted">Choose a component version only when its support differs from the general claim.</p>
+    <p class="muted">Choose each component version with an explicit support claim. Unselected versions inherit the general claim.</p>
     <p v-if="!components.length" class="muted">This software version has no components.</p>
     <div v-for="component in components" :key="component.id" class="component-support-row">
       <label>

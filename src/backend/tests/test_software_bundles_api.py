@@ -6,6 +6,107 @@ from test_device_schema_api import SchemaCase
 
 
 class SoftwareBundleApiTests(SchemaCase):
+    def test_component_filters_use_effective_status_on_the_same_version(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Filter Component Matrix', 'version': '1',
+            'bundle_components': [
+                {'name': 'Outlook', 'version': '16.2'},
+                {'name': 'Teams', 'version': '2.1'},
+            ],
+        }).json()
+        outlook = software['bundle_components'][0]
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        created = self.post(endpoint, {
+            'make': 'SampleCo', 'model': 'FilterBox-1', 'support_status': 'supported',
+            'component_support': [{
+                'component_id': outlook['id'], 'support_status': 'unsupported',
+            }],
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        query = '?model=FilterBox-1&component_name=Teams&component_version=2.1&component_status=supported'
+        catalog = self.get('/api/v1/vendor-devices' + query).json()
+        self.assertEqual(catalog['total'], 1)
+        self.assertEqual(catalog['items'][0]['matching_components'][0]['component_name'], 'Teams')
+        self.assertTrue(catalog['items'][0]['matching_components'][0]['inherited'])
+        scoped = self.get(endpoint + '?component_name=Outlook&component_status=unsupported').json()
+        self.assertEqual(scoped['total'], 1)
+        self.assertFalse(scoped['items'][0]['matching_components'][0]['inherited'])
+        grouped = self.get(endpoint + '/grouped?component_name=Teams&component_status=supported').json()
+        self.assertEqual(grouped['total'], 1)
+        self.assertEqual(grouped['items'][0]['matching_components'][0]['component_name'], 'Teams')
+        self.assertEqual(self.get('/api/v1/vendor-devices?model=FilterBox-1&component_name=Outlook&component_status=supported').json()['total'], 0)
+        self.assertEqual(self.get('/api/v1/vendor-devices?model=FilterBox-1&component_name=Teams&component_status=unsupported').json()['total'], 0)
+        self.assertEqual(self.get('/api/v1/vendor-devices?model=FilterBox-1&search=Outlook').json()['total'], 1)
+        self.assertEqual(self.get(endpoint + '?search=Teams').json()['total'], 1)
+        self.assertEqual(len(self.get('/api/v1/vendor-devices/export?format=json&model=FilterBox-1&component_name=Teams&component_status=supported').json()), 1)
+        self.assertEqual(self.get('/api/v1/vendor-devices?component_status=unknown').status_code, 422)
+
+    def test_adding_another_component_to_same_claim_preserves_the_first(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Separate Component Claims', 'version': '1',
+            'bundle_components': [
+                {'name': 'Outlook', 'version': '16.2'},
+                {'name': 'Teams', 'version': '2.1'},
+            ],
+        }).json()
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        first, second = software['bundle_components']
+        device = {'make': 'Acme', 'model': 'R1', 'firmware_version': '3.2',
+                  'hardware_version': 'Rev A'}
+        created = self.post(endpoint, {**device, 'support_status': 'partial',
+            'component_support': [{'component_id': first['id'], 'support_status': 'supported'}]})
+        self.assertEqual(created.status_code, 201, created.text)
+        added = self.post('/api/v1/vendor-devices', {
+            **device, 'software_name': software['name'], 'software_version': '1',
+            'support_status': 'supported',
+            'component_support': [{'component_id': second['id'], 'support_status': 'unsupported'}],
+        })
+        self.assertEqual(added.status_code, 200, added.text)
+        self.assertEqual(added.json()['id'], created.json()['id'])
+        self.assertEqual(added.json()['support_status'], 'partial')
+        self.assertEqual({(item['component_name'], item['component_version'], item['support_status'])
+                          for item in added.json()['component_support']},
+                         {('Outlook', '16.2', 'supported'), ('Teams', '2.1', 'unsupported')})
+        updated = self.post(endpoint, {**device,
+            'component_support': [{'component_id': second['id'], 'support_status': 'supported'}]})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual({(item['component_name'], item['support_status'])
+                          for item in updated.json()['component_support']},
+                         {('Outlook', 'supported'), ('Teams', 'supported')})
+        self.assertEqual(self.get(endpoint).json()['total'], 1)
+
+    def test_separate_import_rows_merge_component_versions(self):
+        software = self.post('/api/v1/software', {
+            'name': 'Import Component Claims', 'version': '1',
+            'bundle_components': [
+                {'name': 'Outlook', 'version': '16.2'},
+                {'name': 'Teams', 'version': '2.1'},
+            ],
+        }).json()
+        rows = [
+            {'make': 'Acme', 'model': 'R1', 'component_support': [
+                {'component_name': name, 'component_version': version,
+                 'support_status': status}]}
+            for name, version, status in [('Outlook', '16.2', 'supported'),
+                                          ('Teams', '2.1', 'unsupported')]
+        ]
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        imported = self.client.post(f'{endpoint}/import', headers=self.headers,
+            files={'file': ('claims.json', json.dumps(rows).encode(), 'application/json')})
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(imported.json()['errors'], [])
+        claim = self.get(endpoint).json()['items'][0]
+        self.assertEqual(len(claim['component_support']), 2)
+        catalog_rows = [{**row, 'software_name': software['name'], 'software_version': '1'}
+                        for row in rows]
+        imported = self.client.post('/api/v1/vendor-devices/import', headers=self.headers,
+            files={'file': ('claims.json', json.dumps(catalog_rows).encode(), 'application/json')})
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertEqual(imported.json()['errors'], [])
+        claim = self.get(endpoint).json()['items'][0]
+        self.assertEqual({item['component_name'] for item in claim['component_support']},
+                         {'Outlook', 'Teams'})
+
     def test_vendor_claim_support_can_differ_by_component_version_or_be_general(self):
         software = self.post('/api/v1/software', {
             'name': 'Component Matrix', 'version': '1.0',

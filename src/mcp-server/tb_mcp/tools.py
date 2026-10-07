@@ -405,6 +405,9 @@ async def list_vendor_supported_devices(
     software: str,
     version: str | None = None,
     search: str | None = None,
+    component_name: str | None = None,
+    component_version: str | None = None,
+    component_status: str | None = None,
     limit: int | None = None,
 ) -> dict:
     """Hardware the VENDOR CLAIMS this software supports.
@@ -416,6 +419,8 @@ async def list_vendor_supported_devices(
     `support_status` on each row is the general vendor claim (supported,
     partial, unsupported, or planned). Optional `component_support` entries
     override it for specific component versions; neither is a test result.
+    Component filters use effective support and return `matching_components`,
+    including whether each status was inherited from the suite.
     """
     limit = clamp_limit(limit)
     try:
@@ -424,7 +429,10 @@ async def list_vendor_supported_devices(
         return miss.payload
     page = await api().get(
         f"/software/{quote(record['id'], safe='')}/vendor-devices",
-        params={"search": search, "page_size": limit},
+        params={"search": search, "component_name": component_name,
+                "component_version": component_version,
+                "component_status": check(component_status, "component status", VENDOR_SUPPORT_STATUSES),
+                "page_size": limit},
     )
     schema = await api().get(
         f"/software/{quote(record['id'], safe='')}/vendor-devices/schema",
@@ -456,6 +464,9 @@ async def find_vendor_devices(
     hardware_version: str | None = None,
     architecture: str | None = None,
     support_status: str | None = None,
+    component_name: str | None = None,
+    component_version: str | None = None,
+    component_status: str | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict:
@@ -475,9 +486,9 @@ async def find_vendor_devices(
     `list_devices_tested_with` or `list_software_tested_on`.
 
     `search` matches make, model, firmware, hardware version, architecture,
-    source, notes and the software's name at once; the named filters are
+    source, notes, component name/version and the software's name at once; the named filters are
     narrower and combine with AND. `software` takes a software name and covers
-    every version of it.
+    every version of it. Component status includes inherited suite support.
 
     A claim on a superseded version is still returned, marked
     `software_is_latest: false` — it is real, but it is not current guidance.
@@ -486,6 +497,7 @@ async def find_vendor_devices(
     """
     limit = clamp_limit(limit)
     support_status = check(support_status, "support status", VENDOR_SUPPORT_STATUSES)
+    component_status = check(component_status, "component status", VENDOR_SUPPORT_STATUSES)
     architecture = check(architecture, "architecture", DEVICE_ARCHITECTURES)
     page = await api().get(
         "/vendor-devices",
@@ -496,6 +508,9 @@ async def find_vendor_devices(
             "hardware_version": hardware_version,
             "architecture": architecture,
             "support_status": support_status,
+            "component_name": component_name,
+            "component_version": component_version,
+            "component_status": component_status,
             "sort": "make", "order": "asc",
             "page_size": limit, "offset": max(0, offset),
         },

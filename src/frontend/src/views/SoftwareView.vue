@@ -241,6 +241,7 @@ async function reloadRows() {
  */
 const filterValues = makeFilterValues({
   entity: 'software',
+  base: () => ({ latest_only: true }),
   local: (colId) => {
     const field = softwareFields.value.find((f: any) => f.key === colId)
     if (field?.type === 'select') return [null, ...field.options]
@@ -251,10 +252,12 @@ const filterValues = makeFilterValues({
   skip: ['misc_data', 'vendor_device_count', 'version_count', 'created_at', 'updated_at'],
 })
 
+let latestSoftwareRequest = 0
 async function loadRemoteSoftware(request: RemoteTableRequest) {
+  const requestId = ++latestSoftwareRequest
   const params = remoteTableParams(request, { latest_only: true })
   const page = await remoteTableApi(`/software`, params)
-  rows.value = page.items
+  if (requestId === latestSoftwareRequest) rows.value = page.items
   return { rows: page.items, total: page.total }
 }
 

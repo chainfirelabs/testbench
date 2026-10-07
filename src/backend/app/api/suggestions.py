@@ -11,15 +11,20 @@ distinct-values endpoint over a column like that is a disclosure, not a
 convenience. Only the columns named below can be asked for.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Boolean, Numeric, String, cast, func, literal, select
+from datetime import timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from sqlalchemy import Boolean, Numeric, String, case, cast, func, literal, or_, select
 from sqlalchemy.orm import Session
 
-from ..db import get_db
+from ..config import settings
+from ..db import get_db, utcnow
 from ..models import AuditLog, Device, Software, SoftwareComponent, Test, User, VendorDevice
 from ..schemas import SuggestionsOut
 from ..services.device_schema import device_field_expression, effective_field_map, union_field_map
 from ..services.entity_fields import entity_field_expression, entity_field_map
+from ..services.list_filters import exclude_clause, excluded_values, include_clause
 from .deps import get_current_user
 from ..services.permissions import AUDIT_VIEW, USERS_MANAGE, caller_permissions
 
@@ -122,13 +127,16 @@ def field_suggestions(
 
 
 @router.get("/{entity}/{field}/filter-values")
+@router.post("/{entity}/{field}/filter-values/query")
 def field_filter_values(
     entity: str,
     field: str,
+    request: Request,
     offset: int = Query(0, ge=0),
     limit: int = Query(500, ge=1, le=500),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
     """Paginated, typed distinct values, including blanks, for column filters.
 
@@ -140,6 +148,8 @@ def field_filter_values(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed to read these filter values")
     column = None
     if entity == "devices":
+        if field == "device_type_id":
+            column = Device.device_type_id
         configured = union_field_map(db).get(field)
         if (configured and not configured.sensitive
                 and configured.field_type not in {"json", "password"}
@@ -174,11 +184,135 @@ def field_filter_values(
             columns.update(timestamp=AuditLog.timestamp, entity_id=AuditLog.entity_id)
         elif entity == "users":
             columns.update(created_at=User.created_at, last_login_at=User.last_login_at)
+            columns["is_online"] = case(
+                (User.last_login_at >= utcnow() - timedelta(hours=settings.jwt_expires_hours), True),
+                else_=False,
+            )
         column = columns.get(field)
     if column is None:
         raise HTTPException(404, f"{entity} has no filter values for {field!r}")
     if isinstance(column.type, String):
         column = func.nullif(column, "")
+    if filters_body and any(not key.startswith(("include__", "exclude__")) for key in filters_body):
+        raise HTTPException(422, "The query body may contain only checklist filters")
+    params = {key: value for key, value in {**request.query_params, **(filters_body or {})}.items()
+              if key not in {"offset", "limit", field, f"include__{field}", f"exclude__{field}"}}
+    # Facet values come from the same filtered row set as the table. Leave out
+    # this column's predicate so users can change its selection without first
+    # clearing it. With no context, retain the original full-domain response.
+    matched_ids = None
+    if params:
+        if entity == "vendor-devices":
+            from .vendor_devices import _catalog_query
+            base = VendorDevice
+            query = _catalog_query(db, params.get("search"), params)
+        elif entity == "devices":
+            from .devices import _query_devices
+            base = Device
+            controls = {"search", "sort", "order", "page", "page_size"}
+            filters = {key: value for key, value in params.items() if key not in controls}
+            software_id = filters.pop("software_id", None)
+            component_filters = {key: filters.pop(key) for key in list(filters)
+                                 if key.removeprefix("include__").removeprefix("exclude__")
+                                 in {"component_name", "component_version"}}
+            for flag in ("online", "overdue"):
+                if flag in filters:
+                    filters[flag] = str(filters[flag]).lower() == "true"
+            query = _query_devices(db, filters, None if software_id else params.get("search"))
+            if software_id:
+                query = query.join(Test, Test.device_id == Device.id).outerjoin(
+                    SoftwareComponent, Test.component_id == SoftwareComponent.id,
+                ).where(Test.software_id == software_id)
+                for key, value in component_filters.items():
+                    keeping = key.startswith("include__")
+                    excluded = key.startswith("exclude__")
+                    name = key.removeprefix("include__" if keeping else "exclude__") if keeping or excluded else key
+                    expression = getattr(SoftwareComponent, "name" if name == "component_name" else "version")
+                    clause = ((include_clause if keeping else exclude_clause)(expression, excluded_values(value))
+                              if keeping or excluded else expression.ilike(f"%{value}%"))
+                    if clause is not None:
+                        query = query.where(clause)
+                if params.get("search"):
+                    like = f"%{params['search']}%"
+                    query = query.where(or_(Device.unique_id.ilike(like), Device.make.ilike(like),
+                                            Device.model.ilike(like), SoftwareComponent.name.ilike(like),
+                                            SoftwareComponent.version.ilike(like)))
+        elif entity == "software":
+            from .software import _query_software
+            base = Software
+            controls = {"search", "sort", "order", "page", "page_size", "latest_only"}
+            filters = {key: value for key, value in params.items() if key not in controls}
+            query = _query_software(db, params.get("search"),
+                                    params.get("latest_only") == "true", filters)
+        elif entity == "tests":
+            from .tests import _query_tests
+            base = Test
+            controls = {"search", "sort", "order", "page", "page_size"}
+            filters = {key: value for key, value in params.items() if key not in controls}
+            query = _query_tests(db, params.get("search"), params.get("device_id"),
+                                 params.get("software_id"), params.get("outcome"),
+                                 params.get("tag"), filters)
+        elif entity in {"users", "audit_logs"}:
+            base = User if entity == "users" else AuditLog
+            query = select(base)
+            if params.get("search"):
+                like = f"%{params['search']}%"
+                searchable = ([User.username, User.email, User.role, User.auth_provider]
+                              if entity == "users" else
+                              [AuditLog.username, AuditLog.action, AuditLog.entity_type,
+                               AuditLog.entity_id, AuditLog.ip_address])
+                query = query.where(or_(*(item.ilike(like) for item in searchable)))
+            columns = ({**SUGGESTABLE["users"], "created_at": User.created_at,
+                        "last_login_at": User.last_login_at} if entity == "users" else
+                       {**SUGGESTABLE["audit_logs"], "entity_id": AuditLog.entity_id,
+                        "timestamp": AuditLog.timestamp})
+            for key, value in params.items():
+                keeping = key.startswith("include__")
+                excluded = key.startswith("exclude__")
+                if not (keeping or excluded):
+                    if entity == "audit_logs" and key in columns and key != "search":
+                        query = query.where(columns[key] == value if key in {"entity_type", "entity_id"}
+                                            else columns[key].ilike(f"%{value}%"))
+                    continue
+                name = key.removeprefix("include__" if keeping else "exclude__")
+                if entity == "users" and name == "is_online":
+                    dropped = {str(item).lower() for item in excluded_values(value)}
+                    if keeping:
+                        dropped = {"true", "false"} - dropped
+                    cutoff = utcnow() - timedelta(hours=settings.jwt_expires_hours)
+                    if dropped == {"true", "false"}:
+                        query = query.where(User.id.is_(None))
+                    elif "true" in dropped:
+                        query = query.where(or_(User.last_login_at.is_(None),
+                                                User.last_login_at < cutoff))
+                    elif "false" in dropped:
+                        query = query.where(User.last_login_at >= cutoff)
+                    continue
+                expression = columns.get(name)
+                if expression is not None:
+                    clause = (include_clause if keeping else exclude_clause)(expression, excluded_values(value))
+                    if clause is not None:
+                        query = query.where(clause)
+        else:
+            base = None
+        if base is not None:
+            matched_ids = query.with_only_columns(base.id).subquery()
+    if matched_ids is not None:
+        statement = select(column).select_from(base).join(matched_ids, matched_ids.c.id == base.id)
+        if entity == "vendor-devices" and field in related:
+            statement = statement.join(Software, VendorDevice.software_id == Software.id)
+        elif entity == "tests" and field in related:
+            target, join = {
+                "device_unique_id": (Device, Test.device_id == Device.id),
+                "software_name": (Software, Test.software_id == Software.id),
+                "component_name": (SoftwareComponent, Test.component_id == SoftwareComponent.id),
+                "component_version": (SoftwareComponent, Test.component_id == SoftwareComponent.id),
+                "created_by_username": (User, Test.created_by == User.id),
+            }[field]
+            statement = statement.outerjoin(target, join)
+        statement = statement.distinct().order_by(column.asc().nullsfirst()).offset(offset).limit(limit + 1)
+        values = list(db.scalars(statement))
+        return {"values": values[:limit], "has_more": len(values) > limit}
     if entity in {"tests", "vendor-devices"} and field in related:
         # Enumerate only values reachable through this collection. In
         # particular, test authors must not expose unrelated user accounts.

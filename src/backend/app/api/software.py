@@ -301,13 +301,14 @@ def _apply_vendor_component_support(db: Session, software: Software, rows: list)
             seen.add(component.id)
             links.append((component, item.support_status))
         existing = {link.component_id: link for link in claim.component_support}
-        claim.component_support = [
-            existing.get(component.id) or VendorDeviceComponentSupport(
-                component_id=component.id, support_status=status,
-            ) for component, status in links
-        ]
-        for link, (_, status) in zip(claim.component_support, links):
-            link.support_status = status
+        for component, status in links:
+            link = existing.get(component.id)
+            if link is None:
+                link = VendorDeviceComponentSupport(component_id=component.id, support_status=status)
+                claim.component_support.append(link)
+                existing[component.id] = link
+            else:
+                link.support_status = status
 
 
 def _latest_of(db: Session, name: str) -> Software | None:

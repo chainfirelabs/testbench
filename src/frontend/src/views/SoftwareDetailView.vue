@@ -27,6 +27,7 @@ import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { groupBundleComponents } from '../bundleComponentGroups'
+import { componentSupportColumn } from '../vendorComponentSupport'
 
 const route = useRoute()
 const router = useRouter()
@@ -49,6 +50,12 @@ function openDetail(title: string, value: any) {
 }
 const toastError = ref(false)
 const vendorTable = ref<InstanceType<typeof DataTable> | null>(null)
+const vendorComponentFilters = ref({ component_name: '', component_version: '', component_status: '' })
+let vendorComponentFilterTimer: ReturnType<typeof setTimeout> | undefined
+watch(vendorComponentFilters, () => {
+  if (vendorComponentFilterTimer) clearTimeout(vendorComponentFilterTimer)
+  vendorComponentFilterTimer = setTimeout(() => vendorTable.value?.reload(), 250)
+}, { deep: true })
 const testedTable = ref<InstanceType<typeof DataTable> | null>(null)
 const vendorProfiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const testedProfiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
@@ -463,10 +470,6 @@ const baseVendorColumns = [
   },
 ]
 
-const componentSupportText = (row: any) => (row?.component_support || [])
-  .map((item: any) => `${item.component_name} ${item.component_version || '(unversioned)'}: ${SUPPORT_LABELS[item.support_status] || item.support_status}`)
-  .join(', ')
-
 const vendorColumns = computed(() => {
   const columns = vendorFields.value
   .filter((field) => field.visible && field.list_visible)
@@ -477,10 +480,7 @@ const vendorColumns = computed(() => {
     return column
   })
   const supportIndex = columns.findIndex((column: any) => column.field === 'support_status')
-  columns.splice(supportIndex + 1, 0, {
-    field: 'component_support', headerName: 'Component Support', editable: false,
-    filter: false, minWidth: 230, valueGetter: (p: any) => componentSupportText(p.data),
-  } as any)
+  columns.splice(supportIndex + 1, 0, componentSupportColumn as any)
   return columns
 })
 
@@ -526,6 +526,7 @@ async function reloadVendorRows() {
  */
 const vendorFilterValues = makeFilterValues({
   entity: 'vendor-devices',
+  base: () => ({ software_id: software.value?.id, ...vendorComponentFilters.value }),
   local: (colId) => {
     const field = vendorFields.value.find((item) => item.key === colId)
     if (field?.type === 'select') return [null, ...field.options]
@@ -542,20 +543,27 @@ const vendorFilterValues = makeFilterValues({
  */
 const testedDeviceFilterValues = makeFilterValues({
   entity: 'devices',
+  base: () => ({ software_id: software.value?.id }),
   skip: ['component_name', 'component_version', 'outcomes', 'test_count', 'last_test_at'],
 })
 
-const testedComponentFilterValues = makeFilterValues({ entity: 'tests' })
+const testedComponentFilterValues = makeFilterValues({
+  entity: 'tests', base: () => ({ software_id: software.value?.id }),
+})
 const testedFilterValues = (colId: string) => colId.startsWith('component_')
   ? testedComponentFilterValues(colId) : testedDeviceFilterValues(colId)
 
+let latestVendorRequest = 0
 async function loadRemoteVendorDevices(request: RemoteTableRequest) {
-  const params = remoteTableParams(request)
+  const requestId = ++latestVendorRequest
+  const softwareId = software.value.id
+  const params = remoteTableParams(request, vendorComponentFilters.value)
   const result = await remoteTableApi(
-    `/software/${software.value.id}/vendor-devices/grouped`, params,
+    `/software/${softwareId}/vendor-devices/grouped`, params,
   )
-  vendorRows.value = result.items.flatMap((row: any) => row._firmwareMembers || [row])
-  return { rows: vendorDisplayRows.value, total: result.total }
+  const members = result.items.flatMap((row: any) => row._firmwareMembers || [row])
+  if (requestId === latestVendorRequest && software.value?.id === softwareId) vendorRows.value = members
+  return { rows: collapseVendorDevices(members, selectedFirmwareByGroup.value), total: result.total }
 }
 
 async function loadVendorSchema() {
@@ -660,7 +668,7 @@ async function createVendorDevice(values: Record<string, any>) {
     })
     // The spellings just written are the ones the next claim should be offered.
     invalidateSuggestions('vendor-devices')
-    bumpVendorCount(1)
+    software.value.vendor_device_count = (await api<any>(`/software/${software.value.id}`)).vendor_device_count
     // A row that did not exist a moment ago is not in the window the grid is
     // holding, and its row count has moved: re-read rather than refresh. The
     // grid's rows come back from the server collapsed by make/model, so there
@@ -807,8 +815,12 @@ function downloadVendorTemplate() {
 
 function exportVendorAs(format: string) {
   const stem = software.value.name.replace(/\s+/g, '_')
+  const params = new URLSearchParams({ format })
+  for (const [key, value] of Object.entries(vendorComponentFilters.value)) {
+    if (value) params.set(key, value)
+  }
   download(
-    `/software/${software.value.id}/vendor-devices/export?format=${format}`,
+    `/software/${software.value.id}/vendor-devices/export?${params}`,
     `${stem}-vendor-devices.${format}`,
     'export',
   )
@@ -919,11 +931,14 @@ async function loadTestedDeviceCount(softwareId: string) {
   if (software.value?.id === softwareId) testedDeviceCount.value = res.total
 }
 
+let latestTestedRequest = 0
 async function loadRemoteTestedDevices(request: RemoteTableRequest) {
+  const requestId = ++latestTestedRequest
+  const softwareId = software.value.id
   const params = remoteTableParams(request)
-  const res = await remoteTableApi(`/software/${software.value.id}/tested-devices`, params)
+  const res = await remoteTableApi(`/software/${softwareId}/tested-devices`, params)
   const rows = (res.devices || []).map((t: any) => ({
-      id: `${t.component?.id || software.value.id}:${t.device.id}`,
+      id: `${t.component?.id || softwareId}:${t.device.id}`,
       component_name: t.component?.name || '',
       component_version: t.component?.version || '',
       unique_id: t.device.unique_id,
@@ -936,8 +951,10 @@ async function loadRemoteTestedDevices(request: RemoteTableRequest) {
       last_test_at: t.last_test_at,
       outcomes: t.outcomes,
     }))
-  testedRows.value = rows
-  testedDeviceCount.value = res.total
+  if (requestId === latestTestedRequest && software.value?.id === softwareId) {
+    testedRows.value = rows
+    testedDeviceCount.value = res.total
+  }
   return { rows, total: res.total }
 }
 
@@ -1146,6 +1163,16 @@ onMounted(load)
             </button>
           </OverflowMenu>
         </div>
+      </div>
+      <div class="vendor-component-filters" aria-label="Component claim filters">
+        <label>Component <input v-model="vendorComponentFilters.component_name" type="search" placeholder="Name" /></label>
+        <label>Version <input v-model="vendorComponentFilters.component_version" type="search" placeholder="Version" /></label>
+        <label>Status <select v-model="vendorComponentFilters.component_status">
+          <option value="">Any</option>
+          <option v-for="status in SUPPORT_VALUES" :key="status" :value="status">{{ SUPPORT_LABELS[status] }}</option>
+        </select></label>
+        <button v-if="Object.values(vendorComponentFilters).some(Boolean)" class="btn btn-mini"
+          @click="vendorComponentFilters = { component_name: '', component_version: '', component_status: '' }">Clear</button>
       </div>
       <DataTable
         ref="vendorTable"

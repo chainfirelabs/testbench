@@ -10,10 +10,9 @@
  *
  * Two sources, in order:
  *
- * 1. `local` — values the page already knows without asking. A controlled
- *    vocabulary is in the schema (a select field's options), and a structural
- *    column like Device Type is a list the page already loaded. No request,
- *    and the list is complete even for a column where every row is blank.
+ * 1. `local` — a fallback when the server cannot enumerate a configured
+ *    select, boolean, or structural column. The server is preferred so the
+ *    dropdown only offers values in the current filtered rows.
  * 2. `/suggestions/{entity}/{field}/filter-values` — the distinct values of a text column,
  *    paginated independently of autocomplete and including blank values.
  *
@@ -38,6 +37,8 @@ export interface FilterValueSource {
    * opening their filter does not cost a request that is going to 404.
    */
   skip?: readonly string[]
+  /** Additional list constraints, such as the software or device type being viewed. */
+  base?: () => Record<string, string | number | boolean | null | undefined>
 }
 
 /** How a column's values are looked up when the page cannot answer itself. */

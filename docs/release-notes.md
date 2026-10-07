@@ -1,5 +1,20 @@
 # Release notes
 
+## 1.9.7
+
+- Vendor Claims can filter by component name, version, and effective support
+  status. The same filters work through the API, exports, Python client, and MCP
+  tools; responses identify matching component versions and inherited statuses.
+- Expanded component lists have an opaque, scrollable panel.
+- Example import CSVs exercise 100 component versions across five devices.
+- Vendor claims for the same software version and hardware retain each explicit
+  component version. Adding or importing another component updates that link
+  without removing the earlier ones, even when both statuses are the same.
+- Vendor Claims shows one suite/device row with an expandable Components section
+  that lists each explicit component version and its support status, on both
+  the global and software details pages.
+- No database migration is required.
+
 ## 1.9.6
 
 - Software suites now group components with the same name. On a suite's Details

@@ -368,6 +368,10 @@ class VendorComponentSupportOut(BaseModel):
     support_status: str
 
 
+class VendorComponentMatchOut(VendorComponentSupportOut):
+    inherited: bool
+
+
 class VendorDeviceBase(BaseModel):
     make: str | None = None
     model: str | None = None
@@ -410,6 +414,7 @@ class VendorDeviceOut(VendorDeviceBase):
     id: str
     software_id: str
     component_support: list[VendorComponentSupportOut] = Field(default_factory=list)
+    matching_components: list[VendorComponentMatchOut] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime | None = None
 

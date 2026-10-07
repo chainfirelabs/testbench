@@ -127,10 +127,12 @@ const filterValues = makeFilterValues({
   local: (colId) => (colId === 'is_online' ? [true, false] : undefined),
 })
 
+let latestUsersRequest = 0
 async function loadRemoteUsers(request: RemoteTableRequest) {
+  const requestId = ++latestUsersRequest
   const params = remoteTableParams(request)
   const page = await remoteTableApi(`/users/paged`, params)
-  rows.value = page.items
+  if (requestId === latestUsersRequest) rows.value = page.items
   return { rows: page.items, total: page.total }
 }
 

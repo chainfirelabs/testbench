@@ -82,6 +82,41 @@ class VendorDeviceCatalogTests(SchemaCase):
         self.assertTrue(row.startswith("NetGuard,3.1,Dell"))
 
 
+class VendorChecklistExactnessTests(SchemaCase):
+    def test_model_selection_excludes_longer_models_on_both_vendor_lists(self):
+        software = self.post('/api/v1/software', {'name': 'Filter suite', 'version': '1'}).json()
+        endpoint = f"/api/v1/software/{software['id']}/vendor-devices"
+        for model, firmware in (('R1', '1.0'), ('R10', '9.0')):
+            self.post(endpoint, {'make': 'Acme', 'model': model,
+                                 'firmware_version': firmware})
+        selected = 'include__model=["R1"]'
+        for path in ('/api/v1/vendor-devices', f'{endpoint}/grouped'):
+            with self.subTest(path=path):
+                page = self.get(f'{path}?{selected}').json()
+                self.assertEqual(page['total'], 1)
+                self.assertEqual([row['model'] for row in page['items']], ['R1'])
+                for row in page['items']:
+                    for member in row.get('_firmwareMembers', [row]):
+                        self.assertEqual(member['model'], 'R1')
+
+        from urllib.parse import urlencode
+        facet = '/api/v1/suggestions/vendor-devices/firmware_version/filter-values'
+        params = {'include__make': '["Acme"]', 'include__model': '["R1"]'}
+        values = self.get(f'{facet}?{urlencode(params)}').json()['values']
+        self.assertEqual(values, ['1.0'])
+        posted = self.post(f'{facet}/query', {'include__make': '["Acme"]',
+                                                'include__model': '["R1"]'})
+        self.assertEqual(posted.status_code, 200, posted.text)
+        self.assertEqual(posted.json()['values'], ['1.0'])
+        # The current firmware selection must not hide the alternative choices.
+        params['include__firmware_version'] = '["9.0"]'
+        values = self.get(f'{facet}?{urlencode(params)}').json()['values']
+        self.assertEqual(values, ['1.0'])
+        params['software_id'] = software['id']
+        values = self.get(f'{facet}?{urlencode(params)}').json()['values']
+        self.assertEqual(values, ['1.0'])
+
+
 class TestedDevicePagingTests(SchemaCase):
     def test_the_window_reports_how_many_rows_there_are(self):
         """Without a total the grid reading this pages on past the data forever."""

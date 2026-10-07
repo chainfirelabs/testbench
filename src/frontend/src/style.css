@@ -1453,6 +1453,86 @@ label {
   box-shadow: inset 0 0 0 1px var(--accent-a24);
 }
 
+/* Component claims expand inside their suite/device row, in the grid and on
+   mobile cards. Auto-height on this column lets the grid grow the row. */
+.vendor-component-details {
+  max-width: 100%;
+  padding: 6px 0;
+  white-space: normal;
+}
+
+.vendor-component-details summary {
+  width: fit-content;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.vendor-component-details summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.vendor-component-details ul {
+  list-style: none;
+  box-sizing: border-box;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 8px 0 2px;
+  padding: 4px 10px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-sm);
+}
+
+.vendor-component-details li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid var(--border-soft);
+  line-height: 1.4;
+}
+
+.vendor-component-details li > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vendor-component-details .support-pill {
+  flex: none;
+}
+
+.vendor-component-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 12px;
+  padding: 10px 0;
+}
+
+.vendor-component-filters label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.vendor-component-filters input,
+.vendor-component-filters select {
+  min-width: 120px;
+  max-width: 200px;
+  height: var(--control-h);
+  padding: 4px 8px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;

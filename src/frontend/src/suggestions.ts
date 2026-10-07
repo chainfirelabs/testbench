@@ -19,6 +19,7 @@
 import { ref, type Ref } from 'vue'
 import { api } from './api/client'
 import { fetchFilterValues, resolveFilterValues, type FilterValueSource } from './filterValues'
+import { remoteTableParams, remoteTableQuery } from './remoteTable'
 
 /** Matches the whitelist in `backend/app/api/suggestions.py`. */
 export type SuggestEntity =
@@ -124,9 +125,32 @@ export function invalidateSuggestions(entity: SuggestEntity): void {
 /** Complete typed filter options have a separate endpoint from autocomplete. */
 export function makeFilterValues(
   source: FilterValueSource,
-): (colId: string) => Promise<any[]> {
-  return (colId: string) => resolveFilterValues(source, colId, (entity, field) =>
-    fetchFilterValues((offset) => api(
-      `/suggestions/${entity}/${encodeURIComponent(field)}/filter-values?offset=${offset}&limit=500`,
-    )))
+): (colId: string, colDef?: any, context?: { search: string; filterModel: Record<string, any> }) => Promise<any[]> {
+  return (colId, _colDef, context) => {
+    const params = remoteTableParams({
+      startRow: 0, endRow: 1, search: context?.search || '', sortModel: [],
+      filterModel: context?.filterModel || {},
+    }, source.base?.() || {})
+    params.delete('page')
+    params.delete('page_size')
+    params.delete(colId)
+    params.delete(`include__${colId}`)
+    params.delete(`exclude__${colId}`)
+    const fetchValues = (entity: SuggestEntity, field: string) => fetchFilterValues((offset) => {
+      const pageParams = new URLSearchParams(params)
+      pageParams.set('offset', String(offset))
+      pageParams.set('limit', '500')
+      const query = remoteTableQuery(
+        `/suggestions/${entity}/${encodeURIComponent(field)}/filter-values`, pageParams,
+      )
+      return api(query.path, query.options)
+    })
+    // Configured select/boolean options describe the whole vocabulary. Ask
+    // which values actually occur, retaining the vocabulary as a fallback.
+    const local = source.local?.(colId)
+    if (local?.length && !(source.skip || []).includes(colId) && source.entity) {
+      return fetchValues(source.entity, colId).catch(() => local)
+    }
+    return resolveFilterValues(source, colId, fetchValues)
+  }
 }
