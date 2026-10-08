@@ -7,6 +7,7 @@ import BundleComponentsEditor from '../components/BundleComponentsEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
+import ComponentModal from '../components/ComponentModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
 import { api } from '../api/client'
@@ -19,6 +20,7 @@ import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 import { groupBundleComponents } from '../bundleComponentGroups'
+import { componentPreview, type ComponentPanelState } from '../componentPanel'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -35,6 +37,7 @@ const { fields: softwareFields, ready: columnsReady, loadFields } = useEntityFie
  * a row can display, so the cell offers the value rather than flattening it.
  */
 const detail = ref<{ title: string; value: any } | null>(null)
+const componentPanel = ref<ComponentPanelState | null>(null)
 
 function openDetail(title: string, value: any) {
   detail.value = { title, value }
@@ -134,7 +137,10 @@ const baseColumns = [
 
 const componentsColumn = {
   field: 'bundle_components',
-  filter: false,
+  colId: 'component_name',
+  filter: 'agTextColumnFilter',
+  filterParams: { filterOptions: ['contains'], maxNumConditions: 1, debounceMs: 300 },
+  sortable: false,
   headerName: 'Components',
   editable: false,
   minWidth: 190,
@@ -152,41 +158,36 @@ const componentsColumn = {
     }
 
     const groups = groupBundleComponents(components)
-    const select = document.createElement('select')
-    select.className = 'component-list'
-    select.title = groups
-      .map((group) => `${group.name}: ${group.versions[0].version || '(unversioned)'}`)
-      .join('\n')
-    select.setAttribute('aria-label', `Components for ${p.data.name}`)
-    const summary = document.createElement('option')
-    summary.textContent = `${groups.length} component${groups.length === 1 ? '' : 's'}`
-    summary.value = ''
-    select.appendChild(summary)
-    for (const group of groups) {
-      const latest = group.versions[0]
-      const option = document.createElement('option')
-      option.textContent = `${group.name} — ${latest.version || '(unversioned)'}`
-      option.value = latest.id || ''
-      select.appendChild(option)
-    }
-    // This is a compact list, not an editor. Always return to the count after
-    // somebody inspects an item so the cell cannot imply a selected component.
-    select.onchange = () => { select.selectedIndex = 0 }
-    select.onclick = (event) => event.stopPropagation()
-    return select
+    const trigger = document.createElement('button')
+    trigger.type = 'button'
+    trigger.className = 'component-cell-button'
+    const count = document.createElement('strong')
+    count.textContent = `${groups.length} component${groups.length === 1 ? '' : 's'}`
+    const preview = document.createElement('span')
+    preview.textContent = componentPreview(groups.map((group) => ({ name: group.name })))
+    trigger.append(count, preview)
+    trigger.title = `View components for ${p.data.name}`
+    trigger.addEventListener('click', (event) => {
+      event.stopPropagation()
+      componentPanel.value = {
+        title: 'Software components',
+        subtitle: `${p.data.name} ${p.data.version || '(unversioned)'}`,
+        items: components.map((item: any) => ({ name: item.name, version: item.version })),
+      }
+    })
+    return trigger
   },
 }
 
 const columns = computed(() => {
   const configured = softwareFields.value.filter((field) => field.list_visible).map((field) => {
-    const builtIn = baseColumns.find((column: any) => column.field === field.key)
+    const builtIn = field.key === 'bundle_components'
+      ? componentsColumn
+      : baseColumns.find((column: any) => column.field === field.key)
     const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
     if (field.type === 'json' || field.sensitive || ['vendor_device_count', 'version_count', 'misc_data', 'created_at', 'updated_at'].includes(field.key)) column.filter = false
     return column
   })
-  const versionIndex = configured.findIndex((column: any) => column.field === 'version')
-  const nameIndex = configured.findIndex((column: any) => column.field === 'name')
-  configured.splice(Math.max(versionIndex, nameIndex) + 1, 0, componentsColumn)
   return configured
 })
 
@@ -820,6 +821,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
       :value="detail.value"
       @close="detail = null"
     />
+    <ComponentModal v-if="componentPanel" :panel="componentPanel" @close="componentPanel = null" />
     <ImportProgressModal :state="importState" @close="closeImport" />
 
     <div v-if="toast" class="toast" :class="{ 'toast-error': toastError }">{{ toast }}</div>

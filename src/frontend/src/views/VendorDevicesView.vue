@@ -27,6 +27,7 @@ import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import DetailModal from '../components/DetailModal.vue'
+import ComponentModal from '../components/ComponentModal.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import ComponentSupportEditor from '../components/ComponentSupportEditor.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
@@ -44,6 +45,7 @@ import SuggestCellEditor from '../components/SuggestCellEditor.vue'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { componentSupportColumn } from '../vendorComponentSupport'
+import type { ComponentPanelState } from '../componentPanel'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -57,6 +59,7 @@ const { fields: vendorFields, ready: columnsReady, loadFields: loadVendorFields 
 
 /** Notes run to a paragraph, which is not a cell's worth of text. */
 const detail = ref<{ title: string; value: any } | null>(null)
+const componentPanel = ref<ComponentPanelState | null>(null)
 
 function openDetail(title: string, value: any) {
   detail.value = { title, value }
@@ -195,7 +198,9 @@ const columns = computed(() => {
   const claim = vendorFields.value
     .filter((field) => field.visible && field.list_visible)
     .map((field) => {
-      const builtIn = baseColumns.find((column: any) => column.field === field.key)
+      const builtIn = field.key === 'component_support'
+        ? componentSupportColumn((panel) => { componentPanel.value = panel })
+        : baseColumns.find((column: any) => column.field === field.key)
       const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
       if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
       return column
@@ -203,10 +208,7 @@ const columns = computed(() => {
   // Before the catalog has loaded there is nothing to render but the software
   // columns, which would look like a broken grid — show the built-ins until it
   // arrives, exactly as they were before.
-  const columns = claim.length ? [...software, ...claim] : [...baseColumns]
-  const supportIndex = columns.findIndex((column: any) => column.field === 'support_status')
-  columns.splice(supportIndex + 1, 0, componentSupportColumn)
-  return columns
+  return claim.length ? [...software, ...claim] : [...baseColumns]
 })
 
 const filterValues = makeFilterValues({
@@ -807,6 +809,7 @@ async function onImportFile(e: Event) {
       :value="detail.value"
       @close="detail = null"
     />
+    <ComponentModal v-if="componentPanel" :panel="componentPanel" @close="componentPanel = null" />
     <FormModal
       v-if="newClaim"
       title="New vendor device"

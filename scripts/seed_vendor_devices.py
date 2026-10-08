@@ -7,7 +7,7 @@ inventory, so most claims here point at make/model combos we actually own (that
 is what makes them comparable against test history) and a minority point at
 hardware nobody here has.
 
-Run: python3 seed_vendor_devices.py [--force] [--count N]
+Run: python3 seed_vendor_devices.py [--force] [--count N] [--components N]
 """
 import json
 import argparse
@@ -17,6 +17,8 @@ import sys
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+
+from seed_components import component_additions, component_support_for
 
 BASE = os.environ.get("TB_SEED_API_BASE", "http://localhost:8001/api/v1")
 random.seed(1337)  # reproducible dataset
@@ -126,9 +128,13 @@ def parse_args():
                         help="API token (env: TB_SEED_API_KEY)")
     parser.add_argument("--force", action="store_true", help="add claims when claims already exist")
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT, help="vendor-device records to create")
+    parser.add_argument("--components", type=int, default=2,
+                        help="explicit component support links per claim (adds missing software components)")
     args = parser.parse_args()
     if args.count < 1:
         parser.error("--count must be at least 1")
+    if args.components < 0:
+        parser.error("--components cannot be negative")
     return args
 
 
@@ -178,6 +184,23 @@ def main():
     if not owned:
         sys.exit("no inventory hardware to mirror — run seed_dev_data.py first")
 
+    # Claims can only reference component ids from their own software version.
+    # Preserve existing components and add fixtures only where the requested
+    # count exceeds what that version already has.
+    for index, sw in enumerate(software[:min(args.count, len(software))]):
+        existing_components = sw.get("bundle_components") or []
+        additions = component_additions(
+            existing_components, sw["name"], sw.get("version") or "", args.components,
+        )
+        if not additions:
+            continue
+        status, updated = req("PATCH", f"/software/{sw['id']}", tok, {
+            "bundle_components": [*existing_components, *additions],
+        })
+        if status != 200:
+            sys.exit(f"component update failed for {sw['name']}: {status} {updated}")
+        software[index] = updated
+
     # Alternate grouped firmware records with unique hardware. Each grouped
     # pair shares make/model/hardware/architecture and differs only by firmware,
     # exactly the shape the Vendor Devices table collapses.
@@ -200,6 +223,11 @@ def main():
             architecture = random.choice(ARCH_BY_MAKE.get(make, ["x86_64"]))
             group_by_software[sw["id"]] = (make, model, fw, hardware, architecture)
         claim = make_claim(sw["name"], make, model, fw, hardware, architecture)
+        if args.components:
+            claim["component_support"] = component_support_for(
+                sw.get("bundle_components") or [], args.components,
+                claim["support_status"], random,
+            )
         key = match_key(claim)
         if key in seen:
             continue
@@ -217,11 +245,13 @@ def main():
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(post, bodies))
-    ok = [r for r in results if r[0] == 201]
-    bad = [r for r in results if r[0] != 201]
+    created = sum(1 for status, _ in results if status == 201)
+    updated = sum(1 for status, _ in results if status == 200)
+    skipped = sum(1 for status, _ in results if status == 409)
+    bad = [r for r in results if r[0] not in (200, 201, 409)]
     if bad:
         print(f"  WARN {len(bad)} failures: {bad[:3]}")
-    print(f"  created: {len(ok)}")
+    print(f"  created: {created}, updated: {updated}, already present: {skipped}")
 
     s, softs = req("GET", "/software?page_size=500", tok)
     total = sum(sw.get("vendor_device_count") or 0 for sw in softs["items"])

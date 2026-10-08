@@ -1,4 +1,5 @@
 import { SUPPORT_LABELS } from './constants'
+import { componentPreview, type ComponentPanelState } from './componentPanel'
 
 type ComponentClaim = {
   component_name: string
@@ -21,8 +22,7 @@ export function componentSupportText(row: any): string {
     .join(', ')
 }
 
-/** Native details also works in the mobile card renderer, which reuses this column. */
-function componentSupportRenderer(params: any): HTMLElement {
+function componentSupportRenderer(params: any, onOpen: (panel: ComponentPanelState) => void): HTMLElement {
   const entries = claims(params.data)
   if (!entries.length) {
     const empty = document.createElement('span')
@@ -31,37 +31,46 @@ function componentSupportRenderer(params: any): HTMLElement {
     return empty
   }
 
-  const details = document.createElement('details')
-  details.className = 'vendor-component-details'
-  details.onclick = (event) => event.stopPropagation()
-
-  const summary = document.createElement('summary')
-  summary.textContent = `${entries.length}${params.data?.matching_components?.length ? ' matching' : ''} component${entries.length === 1 ? '' : 's'}`
-  details.appendChild(summary)
-
-  const list = document.createElement('ul')
-  for (const entry of entries) {
-    const item = document.createElement('li')
-    const name = document.createElement('span')
-    name.textContent = `${entry.component_name} ${entry.component_version || '(unversioned)'}`
-    const status = document.createElement('span')
-    status.className = `support-pill ${entry.support_status}`
-    status.textContent = `${SUPPORT_LABELS[entry.support_status] || entry.support_status}${entry.inherited ? ' (inherited)' : ''}`
-    item.append(name, status)
-    list.appendChild(item)
-  }
-  details.appendChild(list)
-  return details
+  const trigger = document.createElement('button')
+  trigger.type = 'button'
+  trigger.className = 'component-cell-button'
+  const matching = !!params.data?.matching_components?.length
+  const componentCount = new Set(entries.map((entry) => entry.component_name.toLocaleLowerCase())).size
+  const count = document.createElement('strong')
+  count.textContent = `${componentCount}${matching ? ' matching' : ''} component${componentCount === 1 ? '' : 's'}`
+  const preview = document.createElement('span')
+  preview.textContent = componentPreview(entries.map((entry) => ({ name: entry.component_name })))
+  trigger.append(count, preview)
+  trigger.title = `View ${entries.length} component version${entries.length === 1 ? '' : 's'}`
+  trigger.addEventListener('click', (event) => {
+    event.stopPropagation()
+    onOpen({
+      title: 'Component support',
+      subtitle: [params.data?.software_name, params.data?.software_version,
+        [params.data?.make, params.data?.model].filter(Boolean).join(' ')].filter(Boolean).join(' · '),
+      matching,
+      items: entries.map((entry) => ({
+        name: entry.component_name,
+        version: entry.component_version,
+        status: entry.support_status,
+        inherited: entry.inherited,
+      })),
+    })
+  })
+  return trigger
 }
 
-export const componentSupportColumn = {
-  field: 'component_support',
-  headerName: 'Components',
-  editable: false,
-  filter: false,
-  minWidth: 230,
-  autoHeight: true,
-  wrapText: true,
-  valueGetter: (params: any) => componentSupportText(params.data),
-  cellRenderer: componentSupportRenderer,
+export function componentSupportColumn(onOpen: (panel: ComponentPanelState) => void) {
+  return {
+    field: 'component_support',
+    colId: 'component_name',
+    headerName: 'Components',
+    editable: false,
+    filter: 'agTextColumnFilter',
+    filterParams: { filterOptions: ['contains'], maxNumConditions: 1, debounceMs: 300 },
+    sortable: false,
+    minWidth: 230,
+    valueGetter: (params: any) => componentSupportText(params.data),
+    cellRenderer: (params: any) => componentSupportRenderer(params, onOpen),
+  }
 }

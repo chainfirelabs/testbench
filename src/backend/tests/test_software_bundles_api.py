@@ -6,6 +6,22 @@ from test_device_schema_api import SchemaCase
 
 
 class SoftwareBundleApiTests(SchemaCase):
+    def test_software_list_filters_by_component_name(self):
+        suite = self.post('/api/v1/software', {
+            'name': 'Filter Suite Components', 'version': '1',
+            'bundle_components': [
+                {'name': 'Outlook', 'version': '16.2'},
+                {'name': 'Teams', 'version': '2.1'},
+            ],
+        }).json()
+        other = self.post('/api/v1/software', {
+            'name': 'Filter Other Components', 'version': '1',
+            'bundle_components': [{'name': 'Word', 'version': '16.2'}],
+        }).json()
+        response = self.get('/api/v1/software?component_name=outlook&latest_only=true').json()
+        self.assertIn(suite['id'], {item['id'] for item in response['items']})
+        self.assertNotIn(other['id'], {item['id'] for item in response['items']})
+
     def test_component_filters_use_effective_status_on_the_same_version(self):
         software = self.post('/api/v1/software', {
             'name': 'Filter Component Matrix', 'version': '1',

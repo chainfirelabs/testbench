@@ -23,6 +23,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+from seed_components import component_additions, components_for
+
 BASE = os.environ.get("TB_SEED_API_BASE", "http://localhost:8001/api/v1")
 random.seed(20260826)  # reproducible dataset
 
@@ -147,14 +149,6 @@ def catalogue_entries(count):
     return entries
 
 
-def components_for(name, version, count):
-    labels = ["Core", "Agent", "CLI", "Web Console", "API", "Reporting"]
-    return [
-        {"name": f"{name} {labels[i] if i < len(labels) else f'Component {i + 1}'}", "version": version}
-        for i in range(count)
-    ]
-
-
 def main():
     global BASE
     args = parse_args()
@@ -182,6 +176,26 @@ def main():
     # re-runnable rather than one-shot.
     taken = {sw["name"].casefold() for sw in before}
     requested = catalogue_entries(args.count)
+    requested_names = {entry[0].casefold() for entry in requested}
+    updated_components = 0
+    if args.force:
+        for sw in before:
+            if sw["name"].casefold() not in requested_names:
+                continue
+            existing_components = sw.get("bundle_components") or []
+            additions = component_additions(
+                existing_components, sw["name"], sw.get("version") or "", args.components,
+            )
+            if not additions:
+                continue
+            status, updated = req("PATCH", f"/software/{sw['id']}", tok, {
+                "bundle_components": [*existing_components, *additions],
+            })
+            if status != 200:
+                sys.exit(f"component update failed for {sw['name']}: {status} {updated}")
+            updated_components += len(additions)
+        if updated_components:
+            print(f"added {updated_components} components to existing software versions")
     catalogue = [c for c in requested if c[0].casefold() not in taken]
     skipped = len(requested) - len(catalogue)
     if not catalogue:

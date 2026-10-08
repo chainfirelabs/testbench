@@ -2,6 +2,13 @@
 
 ## 1.9.8
 
+- Software and Vendor Claims component lists open in a searchable, scrollable modal.
+- Components can be filtered by name from the Software and Vendor Claims columns.
+- Components appear in both Software and Vendor Claims schemas, where their
+  list visibility and order can be customized. Each software version can also
+  reorder its Vendor Claims fields, including Components.
+- Development seed scripts can generate a requested number of software
+  components and link components to vendor device claims.
 - Vendor Claims CSV and JSON imports accept one component per row with
   `component_name`, `component_version`, and optional `component_status`.
   Rows for the same software version and hardware merge their component claims.

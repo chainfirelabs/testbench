@@ -347,6 +347,13 @@ def _query_software(db: Session, search: str | None, latest_only: bool = False, 
         ]
         q = q.where(or_(*searchable) if searchable else Software.id.ilike(like))
     for key, value in (filters or {}).items():
+        if key == "component_name":
+            if value:
+                q = q.where(select(SoftwareComponent.id).where(
+                    SoftwareComponent.software_id == Software.id,
+                    SoftwareComponent.name.ilike(f"%{value}%"),
+                ).correlate(Software).exists())
+            continue
         excluded = key.startswith("exclude__")
         included = key.startswith("include__")
         field = catalog.get(
@@ -490,7 +497,8 @@ def export_software(
         {"format": format, "count": len(rows), "vendor_devices": vendor_total}, request,
     )
     db.commit()
-    return streaming_export_response(rows, [field.key for field in fields] + ["bundle_components", "vendor_devices"], format, "software")
+    columns = [field.key for field in fields if field.key != "bundle_components"]
+    return streaming_export_response(rows, columns + ["bundle_components", "vendor_devices"], format, "software")
 
 
 @router.get("/template")

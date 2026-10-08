@@ -487,6 +487,8 @@ def update_vendor_device_schema(
     ))
     for position, item in enumerate(body.fields):
         field = by_id[item.id]
+        if item.required and not field.writable:
+            raise HTTPException(status_code=422, detail=f"{field.label} is read-only and cannot be required")
         if item.required and not item.visible:
             raise HTTPException(status_code=422, detail=f"{field.label} cannot be required while hidden")
         db.add(VendorDeviceFieldOverride(
@@ -545,7 +547,8 @@ def export_vendor_devices(
     software = _get_software(db, software_id)
     filters = _component_filters(dict(request.query_params))
     items = db.scalars(_query(db, software, search, filters).order_by(VendorDevice.match_key)).all()
-    fields = [field for field, payload in _effective_fields(db, software) if payload["visible"]]
+    fields = [field for field, payload in _effective_fields(db, software)
+              if payload["visible"] and field.key != COMPONENT_SUPPORT_FIELD]
     rows = []
     for item in items:
         payload = _vd_dict(item)
@@ -852,7 +855,7 @@ def _catalog_export_fields(db: Session) -> list[EntityField]:
     """
     return [
         field for field in get_entity_fields(db, "vendor_devices")
-        if field.key != "misc_data"
+        if field.key not in {"misc_data", COMPONENT_SUPPORT_FIELD}
     ]
 
 # Query parameters that steer the request rather than filter it.

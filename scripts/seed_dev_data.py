@@ -7,6 +7,7 @@ Vendor compatibility includes matching inventory hardware, collapsed firmware
 groups, and vendor-only devices.
 Run: python3 seed_dev_data.py [--force] [--devices N] [--software N]
        [--tests N] [--vendor-devices N] [--components N]
+       [--vendor-components N]
 """
 import json
 import argparse
@@ -17,6 +18,8 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+
+from seed_components import component_additions, component_support_for, components_for
 
 BASE = os.environ.get("TB_SEED_API_BASE", "http://localhost:8001/api/v1")
 random.seed(42)  # reproducible dataset
@@ -138,6 +141,8 @@ def parse_args():
     parser.add_argument("--tests", type=int, default=DEFAULT_TESTS)
     parser.add_argument("--vendor-devices", type=int, default=DEFAULT_VENDOR_DEVICES)
     parser.add_argument("--components", type=int, default=3, help="components per software suite")
+    parser.add_argument("--vendor-components", type=int, default=None,
+                        help="explicit component support links per vendor claim (default: up to 2)")
     args = parser.parse_args()
     if args.devices < 1 or args.tests < 1 or args.vendor_devices < 1:
         parser.error("--devices, --tests, and --vendor-devices must be at least 1")
@@ -145,6 +150,10 @@ def parse_args():
         parser.error("--software must be at least 1")
     if args.components < 0:
         parser.error("--components cannot be negative")
+    if args.vendor_components is None:
+        args.vendor_components = min(args.components, 2)
+    if args.vendor_components < 0 or args.vendor_components > args.components:
+        parser.error("--vendor-components must be between 0 and --components")
     return args
 
 
@@ -276,10 +285,7 @@ def main():
         {"name": name, "version": f"{random.randint(1, 3)}.{random.randint(0, 9)}.{random.randint(0, 9)}",
          "docs": f"https://software.example.com/{name}",
          "misc_data": {"category": cat, "description": f"{name} verification suite"},
-         "bundle_components": [
-             {"name": f"{name} {label}", "version": "1.0"}
-             for label in ["Core", "Agent", "CLI", "API", "Reporting"][:args.components]
-         ]}
+         "bundle_components": components_for(name, "1.0", args.components)}
         for name, cat, _w in selected_software
     ]
     existing_software = load_all("/software", tok)
@@ -299,9 +305,9 @@ def main():
     for body in software_bodies:
         suite = latest_by_name[body["name"].casefold()]
         existing_components = suite.get("bundle_components") or []
-        known = {(item["name"].casefold(), str(item.get("version") or "")) for item in existing_components}
-        additions = [item for item in body["bundle_components"]
-                     if (item["name"].casefold(), str(item.get("version") or "")) not in known]
+        additions = component_additions(
+            existing_components, suite["name"], suite.get("version") or "", args.components,
+        )
         if additions:
             status, updated = req("PATCH", f"/software/{suite['id']}", tok, {
                 "bundle_components": [*existing_components, *additions],
@@ -348,7 +354,7 @@ def main():
             firmware = f"{firmware}.{len(seen) + 1}"
             key = (*key[:-1], firmware.casefold())
         seen.add(key)
-        vendor_bodies.append((suite_id, {
+        claim = {
             "make": make,
             "model": model,
             "firmware_version": firmware,
@@ -359,19 +365,26 @@ def main():
                 weights=[65, 20, 10, 5], k=1,
             )[0],
             "source": f"Seeded compatibility matrix for {suite['name']}",
-        }))
+        }
+        if args.vendor_components:
+            claim["component_support"] = component_support_for(
+                suite.get("bundle_components") or [], args.vendor_components,
+                claim["support_status"], random,
+            )
+        vendor_bodies.append((suite_id, claim))
 
     def post_vendor(item):
         suite_id, body = item
         return req("POST", f"/software/{suite_id}/vendor-devices", tok, body)
     with ThreadPoolExecutor(max_workers=8) as ex:
         tresults = list(ex.map(post_vendor, vendor_bodies))
-    bad = [r for r in tresults if r[0] not in (201, 409)]
+    bad = [r for r in tresults if r[0] not in (200, 201, 409)]
     if bad:
         sys.exit(f"vendor-device failures: {bad[:3]}")
     created_vendor = sum(1 for status, _ in tresults if status == 201)
+    updated_vendor = sum(1 for status, _ in tresults if status == 200)
     skipped_vendor = sum(1 for status, _ in tresults if status == 409)
-    print(f"  vendor devices: {created_vendor} created, {skipped_vendor} already present")
+    print(f"  vendor devices: {created_vendor} created, {updated_vendor} updated, {skipped_vendor} already present")
 
     # ---- 4. tests (each references software + one of ITS target devices)
     print(f"creating {args.tests} tests...")

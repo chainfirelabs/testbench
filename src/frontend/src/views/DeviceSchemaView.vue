@@ -1172,7 +1172,7 @@ onMounted(async () => {
   }
   if (tab.value === 'layouts') await loadScope()
   if (tab.value === 'plugins') await loadPlugins()
-  if (tab.value === 'software' || tab.value === 'tests') await loadEntitySchema()
+  if (activeEntity.value) await loadEntitySchema()
 })
 </script>
 
@@ -1184,10 +1184,10 @@ onMounted(async () => {
       <div>
         <h2>Schema</h2>
         <p class="muted">
-          Fields and rules for devices, software, and tests.
+          Fields and rules for devices, software, tests, and vendor claims.
         </p>
       </div>
-      <div v-if="tab !== 'software' && tab !== 'tests'" class="toolbar">
+      <div v-if="!activeEntity" class="toolbar">
         <input ref="importInput" class="file-input" type="file" accept=".yaml,.yml,application/yaml,text/yaml" @change="previewImport" />
         <button class="btn" :disabled="busy || importing" @click="chooseImport">
           {{ importing ? 'Reading YAML…' : 'Import bootstrap YAML' }}

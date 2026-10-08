@@ -92,6 +92,12 @@ class EntityFieldConfigurationTests(unittest.TestCase):
         tests = {field["key"]: field for field in configured["tests"]}
         self.assertTrue(tests["component_name"]["visible"])
         self.assertTrue(tests["component_version"]["visible"])
+        software = {field["key"]: field for field in configured["software"]}
+        self.assertTrue(software["bundle_components"]["visible"])
+        self.assertFalse(software["bundle_components"]["writable"])
+        vendor_claims = {field["key"]: field for field in configured["vendor_devices"]}
+        self.assertTrue(vendor_claims["component_support"]["visible"])
+        self.assertFalse(vendor_claims["component_support"]["writable"])
 
     def test_minimal_catalog_and_custom_json_field(self):
         configured = self.configured({

@@ -9,6 +9,7 @@ import ComponentSupportEditor from '../components/ComponentSupportEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
+import ComponentModal from '../components/ComponentModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import DetailValue from '../components/DetailValue.vue'
 import SuggestCellEditor from '../components/SuggestCellEditor.vue'
@@ -28,6 +29,7 @@ import { remoteTableParams } from '../remoteTable'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { groupBundleComponents } from '../bundleComponentGroups'
 import { componentSupportColumn } from '../vendorComponentSupport'
+import type { ComponentPanelState } from '../componentPanel'
 
 const route = useRoute()
 const router = useRouter()
@@ -44,6 +46,7 @@ const { importState, runImport, closeImport } = useImportProgress()
  * a row can display, so the cell offers the value rather than flattening it.
  */
 const detail = ref<{ title: string; value: any } | null>(null)
+const componentPanel = ref<ComponentPanelState | null>(null)
 
 function openDetail(title: string, value: any) {
   detail.value = { title, value }
@@ -124,6 +127,15 @@ const NEW_COMPONENT_FIELDS: FormField[] = [
 
 const versionLabel = (v: any) => v.version || '(unversioned)'
 const componentGroups = computed(() => groupBundleComponents(software.value?.bundle_components || []))
+
+function openComponents() {
+  if (!software.value?.bundle_components?.length) return
+  componentPanel.value = {
+    title: 'Software components',
+    subtitle: `${software.value.name} ${versionLabel(software.value)}`,
+    items: software.value.bundle_components.map((item: any) => ({ name: item.name, version: item.version })),
+  }
+}
 
 function openNewVersion() {
   newVersion.value = { version: '', copy_vendor_devices: 'yes' }
@@ -347,10 +359,31 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const editingVendorSchema = ref(false)
 const savingVendorSchema = ref(false)
 const vendorSchemaDraft = ref<EntityField[]>([])
+const vendorSchemaDragId = ref('')
 
 function openVendorSchema() {
   vendorSchemaDraft.value = vendorFields.value.map((field) => ({ ...field }))
+  vendorSchemaDragId.value = ''
   editingVendorSchema.value = true
+}
+
+function moveVendorSchemaField(field: EntityField, delta: number) {
+  const from = vendorSchemaDraft.value.findIndex((item) => item.id === field.id)
+  const to = from + delta
+  if (from < 0 || to < 0 || to >= vendorSchemaDraft.value.length) return
+  const next = [...vendorSchemaDraft.value]
+  next.splice(to, 0, ...next.splice(from, 1))
+  vendorSchemaDraft.value = next
+}
+
+function dropVendorSchemaField(target: EntityField) {
+  const from = vendorSchemaDraft.value.findIndex((item) => item.id === vendorSchemaDragId.value)
+  const to = vendorSchemaDraft.value.findIndex((item) => item.id === target.id)
+  vendorSchemaDragId.value = ''
+  if (from < 0 || to < 0 || from === to) return
+  const next = [...vendorSchemaDraft.value]
+  next.splice(to, 0, ...next.splice(from, 1))
+  vendorSchemaDraft.value = next
 }
 
 async function saveVendorSchema() {
@@ -474,13 +507,13 @@ const vendorColumns = computed(() => {
   const columns = vendorFields.value
   .filter((field) => field.visible && field.list_visible)
   .map((field) => {
-    const builtIn = baseVendorColumns.find((column: any) => column.field === field.key)
+    const builtIn = field.key === 'component_support'
+      ? componentSupportColumn((panel) => { componentPanel.value = panel })
+      : baseVendorColumns.find((column: any) => column.field === field.key)
     const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
     if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
     return column
   })
-  const supportIndex = columns.findIndex((column: any) => column.field === 'support_status')
-  columns.splice(supportIndex + 1, 0, componentSupportColumn as any)
   return columns
 })
 
@@ -1075,7 +1108,14 @@ onMounted(load)
         <dl class="kv">
           <template v-for="field in softwareFields" :key="field.key">
             <dt>{{ field.label }}</dt>
-            <dd><DetailValue :value="dataValue(software, field, 'misc_data')" /></dd>
+            <dd v-if="field.key === 'bundle_components' && componentGroups.length">
+              <button type="button" class="component-cell-button" @click="openComponents">
+                <strong>{{ componentGroups.length }} component{{ componentGroups.length === 1 ? '' : 's' }}</strong>
+                <span>View components</span>
+              </button>
+            </dd>
+            <dd v-else-if="field.key === 'bundle_components'">—</dd>
+            <dd v-else><DetailValue :value="dataValue(software, field, 'misc_data')" /></dd>
           </template>
           <dt>All Versions</dt>
           <dd>
@@ -1084,21 +1124,6 @@ onMounted(load)
               <strong v-else>{{ versionLabel(v) }}</strong><span v-if="i < versions.length - 1">, </span>
             </span>
           </dd>
-          <dt>Bundle Components</dt>
-          <dd v-if="componentGroups.length" class="component-groups">
-            <div v-for="group in componentGroups" :key="group.name.toLocaleLowerCase()">
-              <details v-if="group.versions.length > 1" class="component-group">
-                <summary>{{ group.name }} <span class="muted">({{ group.versions.length }} versions)</span></summary>
-                <ul>
-                  <li v-for="component in group.versions" :key="component.id || component.version">
-                    {{ versionLabel(component) }}
-                  </li>
-                </ul>
-              </details>
-              <span v-else>{{ group.name }} — {{ versionLabel(group.versions[0]) }}</span>
-            </div>
-          </dd>
-          <dd v-else>—</dd>
           <dt>Vendor Claims</dt>
           <dd>
             {{ software.vendor_device_count ?? vendorRows.length }}
@@ -1215,12 +1240,22 @@ onMounted(load)
       <div v-if="editingVendorSchema" class="modal-backdrop">
         <form class="modal-card modal-wide" @submit.prevent="saveVendorSchema">
           <h3 class="modal-title">Vendor Device Fields — {{ software.name }} {{ versionLabel(software) }}</h3>
-          <p class="muted">These overrides apply to this software version. Field definitions are managed under Schema → Vendor Claims.</p>
+          <p class="muted">Choose which fields appear and drag or use the arrows to set their order for this software version. Field definitions are managed under Schema → Vendor Claims.</p>
           <div class="schema-field-list">
-            <div v-for="field in vendorSchemaDraft" :key="field.id" class="schema-field-row">
-              <div><strong>{{ field.label }}</strong><br /><code>{{ field.key }}</code></div>
+            <div v-for="(field, index) in vendorSchemaDraft" :key="field.id" class="schema-field-row"
+              @dragover.prevent @drop.prevent="dropVendorSchemaField(field)">
+              <div class="schema-field-order">
+                <button type="button" class="schema-drag-handle" draggable="true" :disabled="savingVendorSchema"
+                  :aria-label="`Drag to reorder ${field.label}`"
+                  @dragstart="vendorSchemaDragId = field.id" @dragend="vendorSchemaDragId = ''">⠿</button>
+                <button type="button" class="schema-order-button" :disabled="savingVendorSchema || index === 0"
+                  :aria-label="`Move ${field.label} up`" @click="moveVendorSchemaField(field, -1)">↑</button>
+                <button type="button" class="schema-order-button" :disabled="savingVendorSchema || index === vendorSchemaDraft.length - 1"
+                  :aria-label="`Move ${field.label} down`" @click="moveVendorSchemaField(field, 1)">↓</button>
+              </div>
+              <div class="schema-field-name"><strong>{{ field.label }}</strong><br /><code>{{ field.key }}</code></div>
               <label class="check"><input v-model="field.visible" type="checkbox" @change="!field.visible && (field.required = false)" /> Shown</label>
-              <label class="check"><input v-model="field.required" type="checkbox" :disabled="!field.visible" /> Required</label>
+              <label class="check"><input v-model="field.required" type="checkbox" :disabled="!field.visible || !field.writable" /> Required</label>
             </div>
           </div>
           <div class="actions">
@@ -1314,6 +1349,7 @@ onMounted(load)
       :value="detail.value"
       @close="detail = null"
     />
+    <ComponentModal v-if="componentPanel" :panel="componentPanel" @close="componentPanel = null" />
     <ImportProgressModal :state="importState" @close="closeImport" />
 
     <div v-if="toast" class="toast" :class="{ 'toast-error': toastError }">{{ toast }}</div>
@@ -1381,9 +1417,6 @@ onMounted(load)
   font-size: 12.5px;
 }
 
-.component-groups { display: grid; gap: 6px; }
-.component-group summary { cursor: pointer; }
-.component-group ul { margin: 6px 0 4px 18px; padding: 0; }
 
 .schema-field-list {
   display: grid;
@@ -1395,21 +1428,36 @@ onMounted(load)
 
 .schema-field-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto;
   align-items: center;
-  gap: 20px;
+  gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
 }
 
+.schema-field-order { display: flex; align-items: center; gap: 2px; }
+.schema-drag-handle,
+.schema-order-button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  padding: 4px;
+}
+.schema-drag-handle { cursor: grab; }
+.schema-drag-handle:disabled,
+.schema-order-button:disabled { cursor: default; opacity: 0.4; }
+.schema-drag-handle:focus-visible,
+.schema-order-button:focus-visible { outline: 2px solid var(--accent); border-radius: var(--r-sm); }
+
 @media (max-width: 599px) {
   .schema-field-row {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .schema-field-row > div {
-    grid-column: 1 / -1;
-  }
+  .schema-field-name { grid-column: 2; }
+  .schema-field-row > .check { grid-row: 2; }
 }
 </style>

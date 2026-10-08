@@ -86,6 +86,8 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
     "software": [
         _field("name", "Name", required=True, role="identifier", indexed=True),
         _field("version", "Version", required=True, role="version", indexed=True),
+        _field("bundle_components", "Components", writable=False,
+               description="Components belonging to this software version."),
         _field("vendor_device_count", "Vendor Devices", "number", writable=False),
         _field("version_count", "Versions", "number", writable=False),
         _field("misc_data", "Misc Data", "json"),
@@ -112,6 +114,8 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
         _field("architecture", "Architecture"),
         _field("support_status", "Support", "select", required=True,
                options=["supported", "partial", "unsupported", "planned"]),
+        _field("component_support", "Components", writable=False,
+               description="Component support for this vendor claim."),
         _field("source", "Source"),
         _field("notes", "Notes", "textarea"),
         _field("misc_data", "Misc Data", "json"),
@@ -138,12 +142,13 @@ REQUIRED_FIELDS = {
     "vendor_devices": (),
 }
 
-# These relationship fields are optional values, but they are part of the
-# application's suite/component model rather than deployment-defined metadata.
-# Keeping them catalog-visible lets the Tests page honor list visibility on
-# both new and upgraded installations.
+# These relationship fields are part of the application's suite/component
+# model. Keep them catalog-visible on new and upgraded installations so their
+# list columns can follow the schema layout.
 CORE_VISIBLE_FIELDS = {
+    "software": {"bundle_components"},
     "tests": {"component_name", "component_version"},
+    "vendor_devices": {"component_support"},
 }
 
 
@@ -446,7 +451,11 @@ def entity_order_by(db: Session, entity: str, model, sort: str, order: str):
 def field_database_storage(field: EntityField) -> str:
     if field.key in {"created_at", "updated_at"}:
         return "column"
-    elif field.key in {"device_unique_id", "software_name", "component_name", "component_version", "created_by_username", "checked_out_by_username"}:
+    elif field.key in {
+        "device_unique_id", "software_name", "component_name", "component_version",
+        "component_support", "bundle_components", "created_by_username",
+        "checked_out_by_username",
+    }:
         return "relationship"
     elif field.key in {"vendor_device_count", "version_count"}:
         return "derived"
