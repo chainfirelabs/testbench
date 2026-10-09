@@ -28,7 +28,7 @@ from ..schemas import (
     VendorComponentSupportIn,
 )
 from ..services.audit import field_diff, log_action
-from ..services.io import database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.io import ExportRequest, database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.versions import newest_version, version_key
@@ -470,6 +470,7 @@ def list_software(
 
 
 @router.get("/export")
+@router.post("/export")
 def export_software(
     format: str = "json",
     search: str | None = None,
@@ -477,8 +478,17 @@ def export_software(
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    body: ExportRequest | None = None,
 ):
-    q = _query_software(db, search, latest_only)
+    params = body.filters if body is not None else (request.query_params if request else {})
+    filters = {key: value for key, value in params.items()
+               if key not in {"format", "search", "latest_only", "sort", "order",
+                              "page", "page_size", "fields"}}
+    def export_query(session: Session):
+        if body is not None and body.ids is not None:
+            return select(Software).where(Software.id.in_(body.ids))
+        return _query_software(session, search, latest_only, filters)
+    q = export_query(db)
     matched = q.subquery()
     count = db.scalar(select(func.count()).select_from(matched)) or 0
     vendor_total = db.scalar(select(func.count()).select_from(VendorDevice).where(
@@ -492,7 +502,7 @@ def export_software(
     columns = [field.key for field in fields if field.key != "bundle_components"]
     def rows(export_db: Session):
         export_fields = get_entity_fields(export_db, "software")
-        query = _query_software(export_db, search, latest_only)
+        query = export_query(export_db)
         query = query.options(selectinload(Software.vendor_devices)
                               .selectinload(VendorDevice.component_support)
                               .joinedload(VendorDeviceComponentSupport.component))

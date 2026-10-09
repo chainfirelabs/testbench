@@ -6,6 +6,7 @@ import DetailModal from '../components/DetailModal.vue'
 import { detailCellRenderer } from '../detail'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { tableExportRequest } from '../tableExport'
 import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
@@ -33,6 +34,7 @@ const toast = ref('')
 const toastError = ref(false)
 const profiles = ref<InstanceType<typeof FilterProfilesMenu> | null>(null)
 const table = ref<InstanceType<typeof DataTable> | null>(null)
+const selected = ref<any[]>([])
 
 const fmt = (p: any) => (p.value ? new Date(p.value).toLocaleString() : '')
 
@@ -114,7 +116,9 @@ function showToast(msg: string, isError = false) {
 const { downloading, download } = useDownload(showToast)
 
 function exportAs(format: string) {
-  download(`/audit_logs/export?format=${format}`, `audit_logs.${format}`, 'export')
+  const request = tableExportRequest('/audit_logs', table.value?.getState(), { format },
+    selected.value.map((row) => row.id).filter(Boolean))
+  download(request.path, `audit_logs.${format}`, 'export', request.options)
 }
 
 async function loadRetention() {
@@ -218,10 +222,10 @@ onBeforeUnmount(() => { if (cleanupPollTimer) clearInterval(cleanupPollTimer) })
       <h2>Audit Log</h2>
       <div class="toolbar">
         <button class="btn" :disabled="downloading" @click="exportAs('json')">
-            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected JSON' : 'Export JSON' }}
           </button>
         <button class="btn" :disabled="downloading" @click="exportAs('csv')">
-            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected CSV' : 'Export CSV' }}
           </button>
       </div>
     </div>
@@ -267,6 +271,8 @@ onBeforeUnmount(() => { if (cleanupPollTimer) clearInterval(cleanupPollTimer) })
       :rows="rows"
       :remote-loader="loadRemoteAudit"
       :filter-values="filterValues"
+      :selectable="true"
+      @selection-change="(r: any[]) => (selected = r)"
       @grid-ready="onGridReady"
     >
       <template #table-actions>

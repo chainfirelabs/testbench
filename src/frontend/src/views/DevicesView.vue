@@ -13,6 +13,7 @@ import PluginRunModal from '../components/PluginRunModal.vue'
 import { daysFromToday, daysUntil } from '../dates'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { tableExportRequest } from '../tableExport'
 import { useImportProgress } from '../importProgress'
 import { invalidateSuggestions, makeFilterValues, useSuggestions } from '../suggestions'
 import { describeScan } from '../scan'
@@ -1182,44 +1183,11 @@ function extraActions(row: any): RowAction[] {
 function exportAs(format: 'json' | 'csv', columns: 'type' | 'all' | 'data' = 'type') {
   const shape = activeTypeKey.value || columns !== 'type' ? columns : 'all'
   const variant = columns === 'data' ? 'raw' : undefined
-  /*
-   * The grid's own search, sort and column filters, not just the device type.
-   *
-   * The export endpoint has always taken the list endpoint's filters — its
-   * docstring promises that what you see in a filtered table is what you get
-   * in the file — but this page only ever sent the type from the route. So
-   * narrowing the grid to three devices and exporting handed back the whole
-   * fleet, silently and plausibly, which is the worst way for an export to be
-   * wrong. Built from the same `remoteTableParams` the loader uses, so the two
-   * cannot read the same grid differently.
-   */
-  const state = table.value?.getState()
-  const params = remoteTableParams(
-    {
-      startRow: 0,
-      endRow: 1,
-      search: state?.quick_filter || '',
-      sortModel: state?.sort || [],
-      filterModel: state?.filter || {},
-    },
-    {
-      format,
-      columns: shape,
-      device_type: activeTypeKey.value || undefined,
-      overdue: showOverdueOnly.value || undefined,
-    },
-  )
-  // An export returns the whole filtered set, in its own order: a window into
-  // it means nothing, and the endpoint orders by creation date whatever it is
-  // told. Dropped rather than left to be ignored — anything the export does
-  // not recognise it treats as a column filter, so an installation with a
-  // field actually named `sort` would get a quietly wrong file.
-  for (const key of ['page', 'page_size', 'sort', 'order']) params.delete(key)
-  download(
-    `/devices/export?${params}`,
-    deviceDownloadFilename(activeTypeKey.value, format, variant),
-    'export',
-  )
+  const request = tableExportRequest('/devices', table.value?.getState(), {
+    format, columns: shape, device_type: activeTypeKey.value || undefined,
+    overdue: showOverdueOnly.value || undefined,
+  }, selected.value.map((row) => row.id).filter(Boolean))
+  download(request.path, deviceDownloadFilename(activeTypeKey.value, format, variant), 'export', request.options)
 }
 
 /** A blank CSV carrying exactly the columns an import of this page accepts. */
@@ -1355,7 +1323,7 @@ onBeforeUnmount(() => {
             </button>
           </template>
           <button class="btn" :disabled="downloading" @click="exportAs('json')">
-            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected JSON' : 'Export JSON' }}
           </button>
           <!-- One CSV, because there is now one answer. The second button
                existed because a field-column export silently dropped link
@@ -1371,7 +1339,7 @@ onBeforeUnmount(() => {
             :disabled="downloading"
             @click="exportAs('csv')"
           >
-            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected CSV' : 'Export CSV' }}
           </button>
         </OverflowMenu>
       </div>
@@ -1388,7 +1356,7 @@ onBeforeUnmount(() => {
       :remote-loader="loadRemoteDevices"
       :filter-values="filterValues"
       :editable="auth.can(PERMISSION.devicesEdit)"
-      :selectable="auth.can(PERMISSION.devicesEdit)"
+      :selectable="true"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
       :row-editable="auth.can(PERMISSION.devicesEdit)"

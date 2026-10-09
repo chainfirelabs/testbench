@@ -33,6 +33,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import (
+    ExportRequest,
     database_export_rows,
     download_response,
     parse_import,
@@ -383,6 +384,35 @@ def _firmware_key(item: dict):
     return natural, str(item.get("updated_at") or item.get("created_at") or "")
 
 
+def _scoped_export_query(
+    db: Session, software: Software, search: str | None,
+    component_filters: dict[str, str], params: dict[str, str],
+):
+    source_query = _query(db, software, search, component_filters)
+    standard = {key for key in EDITABLE_FIELDS if key != "misc_data"}
+    custom = {field.key: field for field, _payload in _effective_fields(db, software) if field.storage == "data"}
+    for key, value in params.items():
+        if key in {"search", "sort", "order", "page", "page_size", *COMPONENT_FILTER_KEYS} or not value:
+            continue
+        excluded = key.startswith("exclude__")
+        included = key.startswith("include__")
+        field = key.removeprefix("exclude__" if excluded else "include__") if excluded or included else key
+        expression = (getattr(VendorDevice, field) if field in standard else
+                      _custom_filter_expression(custom[field]) if field in custom else None)
+        if expression is None:
+            continue
+        if excluded or included:
+            values = excluded_values(value)
+            if field in custom:
+                values = [coerce_query_value(custom[field], item) for item in values]
+            clause = (exclude_clause if excluded else include_clause)(expression, values)
+            if clause is not None:
+                source_query = source_query.where(clause)
+        else:
+            source_query = source_query.where(expression.ilike(f"%{value}%"))
+    return source_query
+
+
 @router.get("/grouped")
 @router.post("/grouped/query")
 def list_grouped_vendor_devices(
@@ -403,28 +433,7 @@ def list_grouped_vendor_devices(
     """Page the presentation groups while retaining every firmware member."""
     software = _get_software(db, software_id)
     filters = _component_filters(locals())
-    source_query = _query(db, software, search, filters)
-    standard = {key for key in EDITABLE_FIELDS if key != "misc_data"}
-    custom = {field.key: field for field, _payload in _effective_fields(db, software) if field.storage == "data"}
-    for key, value in checklist_query(request, filters_body).items():
-        if key in {"search", "sort", "order", "page", "page_size", *COMPONENT_FILTER_KEYS} or not value:
-            continue
-        excluded = key.startswith("exclude__")
-        included = key.startswith("include__")
-        field = key.removeprefix("exclude__" if excluded else "include__") if excluded or included else key
-        expression = (getattr(VendorDevice, field) if field in standard else
-                      _custom_filter_expression(custom[field]) if field in custom else None)
-        if expression is None:
-            continue
-        if excluded or included:
-            values = excluded_values(value)
-            if field in custom:
-                values = [coerce_query_value(custom[field], item) for item in values]
-            clause = (exclude_clause if excluded else include_clause)(expression, values)
-            if clause is not None:
-                source_query = source_query.where(clause)
-        else:
-            source_query = source_query.where(expression.ilike(f"%{value}%"))
+    source_query = _scoped_export_query(db, software, search, filters, checklist_query(request, filters_body))
     source = source_query.subquery()
     keys = [
         _group_value(source.c.make).label("make_key"),
@@ -537,6 +546,7 @@ def list_vendor_devices(
 
 
 @router.get("/export")
+@router.post("/export")
 def export_vendor_devices(
     software_id: str,
     format: str = "json",
@@ -544,10 +554,17 @@ def export_vendor_devices(
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    body: ExportRequest | None = None,
 ):
     software = _get_software(db, software_id)
-    filters = _component_filters(dict(request.query_params))
-    count = db.scalar(select(func.count()).select_from(_query(db, software, search, filters).subquery())) or 0
+    params = dict(body.filters if body is not None else (request.query_params if request else {}))
+    filters = _component_filters(params)
+    def export_query(session: Session, scoped: Software):
+        if body is not None and body.ids is not None:
+            return select(VendorDevice).where(VendorDevice.software_id == scoped.id,
+                                              VendorDevice.id.in_(body.ids))
+        return _scoped_export_query(session, scoped, search, filters, params)
+    count = db.scalar(select(func.count()).select_from(export_query(db, software).subquery())) or 0
     fields = [field for field, payload in _effective_fields(db, software)
               if payload["visible"] and field.key != COMPONENT_SUPPORT_FIELD]
     log_action(
@@ -557,7 +574,7 @@ def export_vendor_devices(
     db.commit()
     def rows(export_db: Session):
         export_software = _get_software(export_db, software_id)
-        result = export_db.scalars(_query(export_db, export_software, search, filters)
+        result = export_db.scalars(export_query(export_db, export_software)
                                    .order_by(VendorDevice.match_key)
                                    .execution_options(yield_per=100))
         for item in result:
@@ -1011,12 +1028,14 @@ def search_vendor_devices(
 
 
 @catalog_router.get("/export")
+@catalog_router.post("/export")
 def export_vendor_device_catalog(
     request: Request,
     format: str = "json",
     search: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    body: ExportRequest | None = None,
 ):
     """The same search, as a file. Filters are the ones the list endpoint takes.
 
@@ -1026,8 +1045,13 @@ def export_vendor_device_catalog(
     would not merely omit the field: re-importing writes the whole row, so the
     absent column would read as "no value" and clear what an operator typed.
     """
-    params = dict(request.query_params)
-    q = _catalog_query(db, search, params)
+    params = dict(body.filters if body is not None else request.query_params)
+    def export_query(session: Session):
+        if body is not None and body.ids is not None:
+            return select(VendorDevice, Software).join(Software, VendorDevice.software_id == Software.id).where(
+                VendorDevice.id.in_(body.ids))
+        return _catalog_query(session, search, params)
+    q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     fields = _catalog_export_fields(db)
     columns = (CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
@@ -1036,7 +1060,7 @@ def export_vendor_device_catalog(
                {"format": format, "count": count}, request)
     db.commit()
     def rows(export_db: Session):
-        query = _catalog_query(export_db, search, params).order_by(
+        query = export_query(export_db).order_by(
             Software.name.asc(), VendorDevice.match_key.asc())
         result = export_db.execute(query.execution_options(yield_per=100))
         for batch in result.partitions(100):

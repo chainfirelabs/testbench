@@ -17,6 +17,7 @@ import { detailCellRenderer } from '../detail'
 import { invalidateSuggestions, makeFilterValues, useSuggestions } from '../suggestions'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { tableExportRequest } from '../tableExport'
 import { useImportProgress } from '../importProgress'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import {
@@ -848,15 +849,10 @@ function downloadVendorTemplate() {
 
 function exportVendorAs(format: string) {
   const stem = software.value.name.replace(/\s+/g, '_')
-  const params = new URLSearchParams({ format })
-  for (const [key, value] of Object.entries(vendorComponentFilters.value)) {
-    if (value) params.set(key, value)
-  }
-  download(
-    `/software/${software.value.id}/vendor-devices/export?${params}`,
-    `${stem}-vendor-devices.${format}`,
-    'export',
-  )
+  const request = tableExportRequest(`/software/${software.value.id}/vendor-devices`,
+    vendorTable.value?.getState(), { format, ...vendorComponentFilters.value },
+    selectedVendorDeviceIds(vendorSelected.value))
+  download(request.path, `${stem}-vendor-devices.${format}`, 'export', request.options)
 }
 
 async function onImportFile(e: Event) {
@@ -1181,10 +1177,10 @@ onMounted(load)
               </button>
             </template>
             <button class="btn" :disabled="downloading" @click="exportVendorAs('json')">
-              {{ downloading ? 'Preparing…' : 'Export JSON' }}
+              {{ downloading ? 'Preparing…' : vendorSelected.length ? 'Export selected JSON' : 'Export JSON' }}
             </button>
             <button class="btn" :disabled="downloading" @click="exportVendorAs('csv')">
-              {{ downloading ? 'Preparing…' : 'Export CSV' }}
+              {{ downloading ? 'Preparing…' : vendorSelected.length ? 'Export selected CSV' : 'Export CSV' }}
             </button>
           </OverflowMenu>
         </div>
@@ -1208,7 +1204,7 @@ onMounted(load)
         :filter-values="vendorFilterValues"
         :editable="auth.can(PERMISSION.softwareEdit)"
         :row-editable="auth.can(PERMISSION.softwareEdit)"
-        :selectable="auth.can(PERMISSION.softwareEdit)"
+        :selectable="true"
         :dirty-ids="vendorDirtyIds"
         :is-row-dirty="isVendorRowDirty"
         @cell-edit="onVendorCellEdit"

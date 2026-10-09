@@ -11,6 +11,7 @@ import { detailCellRenderer } from '../detail'
 import { dateColumn } from '../dates'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { tableExportRequest } from '../tableExport'
 import { useImportProgress } from '../importProgress'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
@@ -752,7 +753,8 @@ async function saveNewTest(values: Record<string, any>) {
 }
 
 function exportAs(format: string) {
-  download(`/tests/export?format=${format}`, `tests.${format}`, 'export')
+  const request = tableExportRequest('/tests', table.value?.getState(), { format }, selected.value.map((row) => row.id).filter(Boolean))
+  download(request.path, `tests.${format}`, 'export', request.options)
 }
 
 /** A blank CSV with base fields; users may append misc-data columns. */
@@ -803,10 +805,10 @@ onMounted(loadFields)
             </button>
           </template>
           <button class="btn" :disabled="downloading" @click="exportAs('json')">
-            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected JSON' : 'Export JSON' }}
           </button>
           <button class="btn" :disabled="downloading" @click="exportAs('csv')">
-            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected CSV' : 'Export CSV' }}
           </button>
         </OverflowMenu>
       </div>
@@ -830,7 +832,7 @@ onMounted(loadFields)
       :remote-loader="loadRemoteTests"
       :filter-values="filterValues"
       :editable="auth.can(PERMISSION.testsEdit)"
-      :selectable="auth.can(PERMISSION.testsEdit)"
+      :selectable="true"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
       :row-editable="auth.can(PERMISSION.testsEdit)"

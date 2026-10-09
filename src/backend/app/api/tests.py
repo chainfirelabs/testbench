@@ -18,7 +18,7 @@ from ..schemas import (
     TestUpdate,
 )
 from ..services.audit import field_diff, log_action
-from ..services.io import database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.io import ExportRequest, database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
@@ -266,6 +266,7 @@ def list_tests(
 
 
 @router.get("/export")
+@router.post("/export")
 def export_tests(
     format: str = "json",
     search: str | None = None,
@@ -276,14 +277,23 @@ def export_tests(
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    body: ExportRequest | None = None,
 ):
-    q = _query_tests(db, search, device_id, software_id, outcome, tag)
+    params = body.filters if body is not None else (request.query_params if request else {})
+    filters = {key: value for key, value in params.items()
+               if key not in {"format", "search", "device_id", "software_id", "outcome", "tag",
+                              "sort", "order", "page", "page_size"}}
+    def export_query(session: Session):
+        if body is not None and body.ids is not None:
+            return select(Test).where(Test.id.in_(body.ids))
+        return _query_tests(session, search, device_id, software_id, outcome, tag, filters)
+    q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     fields = get_entity_fields(db, "tests")
     log_action(db, user, "export.tests", "test", None, {"format": format, "count": count}, request)
     db.commit()
     def rows(export_db: Session):
-        query = _query_tests(export_db, search, device_id, software_id, outcome, tag)
+        query = export_query(export_db)
         for item in export_db.scalars(query.order_by(Test.created_at, Test.id).execution_options(yield_per=500)):
             yield project_fields(_test_dict(item), fields, "misc_data")
     return streaming_export_response(database_export_rows(rows), [field.key for field in fields], format, "tests")

@@ -12,6 +12,7 @@ import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { tableExportRequest } from '../tableExport'
 import { useImportProgress } from '../importProgress'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
@@ -662,7 +663,8 @@ async function saveBulkEdit(values: Record<string, any>) {
 }
 
 function exportAs(format: string) {
-  download(`/software/export?format=${format}`, `software.${format}`, 'export')
+  const request = tableExportRequest('/software', table.value?.getState(), { format, latest_only: true }, selected.value.map((row) => row.id).filter(Boolean))
+  download(request.path, `software.${format}`, 'export', request.options)
 }
 
 /** A blank CSV carrying exactly the columns /software/import accepts —
@@ -715,19 +717,19 @@ onMounted(() => Promise.all([load(), loadFields()]))
           </template>
           <button
             class="btn"
-            title="Every software version, each with its vendor device list"
+            title="Export selected records or the latest versions matching current filters, with vendor device lists"
             :disabled="downloading"
             @click="exportAs('json')"
           >
-            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected JSON' : 'Export JSON' }}
           </button>
           <button
             class="btn"
-            title="Every software version, each with its vendor device list (one JSON cell per row)"
+            title="Export selected records or the latest versions matching current filters, with vendor device lists (one JSON cell per row)"
             :disabled="downloading"
             @click="exportAs('csv')"
           >
-            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected CSV' : 'Export CSV' }}
           </button>
         </OverflowMenu>
       </div>
@@ -740,7 +742,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
       :remote-loader="loadRemoteSoftware"
       :filter-values="filterValues"
       :editable="auth.can(PERMISSION.softwareEdit)"
-      :selectable="auth.can(PERMISSION.softwareEdit)"
+      :selectable="true"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
       :row-editable="auth.can(PERMISSION.softwareEdit)"

@@ -67,9 +67,13 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   return data as T
 }
 
-export async function downloadFile(path: string, filename: string): Promise<void> {
+export async function downloadFile(path: string, filename: string, options: RequestInit = {}): Promise<void> {
+  const headers = new Headers(options.headers)
+  headers.set('Authorization', `Bearer ${getToken()}`)
+  if (typeof options.body === 'string') headers.set('Content-Type', 'application/json')
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${getToken()}` },
+    ...options,
+    headers,
   })
   if (!res.ok) throw new ApiError(res.status, await parseError(res))
   const blob = await res.blob()

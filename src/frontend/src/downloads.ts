@@ -19,11 +19,11 @@ import { downloadFile } from './api/client'
 export function useDownload(notify: (message: string, isError?: boolean) => void) {
   const downloading = ref(false)
 
-  async function download(path: string, filename: string, label = 'download'): Promise<void> {
+  async function download(path: string, filename: string, label = 'download', options: RequestInit = {}): Promise<void> {
     if (downloading.value) return
     downloading.value = true
     try {
-      await downloadFile(path, filename)
+      await downloadFile(path, filename, options)
     } catch (error: any) {
       notify(error?.message || `The ${label} could not be completed.`, true)
     } finally {

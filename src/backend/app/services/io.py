@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from fastapi import HTTPException
 from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import SessionLocal
 from sqlalchemy.orm import Session
@@ -184,6 +185,14 @@ def export_response(rows: list[dict[str, Any]], columns: list[str], fmt: str, st
 # a 30,000-row export into thirty hops rather than several hundred thousand,
 # and the per-hop cost stops mattering.
 STREAM_CHUNK_ROWS = 1000
+
+
+class ExportRequest(BaseModel):
+    """Filters and an optional exact row selection for a table download."""
+
+    model_config = ConfigDict(extra="forbid")
+    filters: dict[str, str] = Field(default_factory=dict)
+    ids: list[str | int] | None = None
 
 
 def database_export_rows(factory: Callable[[Session], Iterable[dict[str, Any]]]) -> Iterator[dict[str, Any]]:

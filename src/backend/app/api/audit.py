@@ -14,7 +14,7 @@ from ..schemas import AuditOut, Page
 from ..services.audit import log_action
 from ..services.audit_cleanup_jobs import process_pending_cleanup_jobs
 from ..services.audit_retention import eligible_count, retention_days, safe_cutoff
-from ..services.io import database_export_rows, streaming_export_response
+from ..services.io import ExportRequest, database_export_rows, streaming_export_response
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from .deps import require_audit_view, require_settings_manage
 
@@ -213,28 +213,8 @@ def list_audit_logs(
     user: User = Depends(require_audit_view),
     filters_body: Annotated[dict[str, str] | None, Body()] = None,
 ):
-    q = _query_logs(db, username, action, entity_type, entity_id, date_from, date_to)
-    if search:
-        like = f"%{search}%"
-        q = q.where(or_(
-            AuditLog.username.ilike(like), AuditLog.action.ilike(like),
-            AuditLog.entity_type.ilike(like), AuditLog.entity_id.ilike(like),
-            AuditLog.ip_address.ilike(like),
-        ))
-    filter_columns = {
-        "timestamp": AuditLog.timestamp, "username": AuditLog.username,
-        "action": AuditLog.action, "entity_type": AuditLog.entity_type,
-        "entity_id": AuditLog.entity_id, "ip_address": AuditLog.ip_address,
-    }
-    for key, value in checklist_query(request, filters_body).items():
-        if not key.startswith(("exclude__", "include__")):
-            continue
-        keeping = key.startswith("include__")
-        expression = filter_columns.get(key.removeprefix("include__" if keeping else "exclude__"))
-        pick = include_clause if keeping else exclude_clause
-        clause = pick(expression, excluded_values(value)) if expression is not None else None
-        if clause is not None:
-            q = q.where(clause)
+    q = _filtered_logs(db, search, username, action, entity_type, entity_id,
+                       date_from, date_to, checklist_query(request, filters_body))
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     sort_columns = {
         "timestamp": AuditLog.timestamp, "username": AuditLog.username,
@@ -247,24 +227,64 @@ def list_audit_logs(
     return Page(items=[AuditOut.model_validate(a) for a in items], total=total, page=page, page_size=page_size)
 
 
+def _filtered_logs(db, search, username, action, entity_type, entity_id, date_from, date_to, params):
+    q = _query_logs(
+        db, username or params.get("username"), action or params.get("action"),
+        entity_type or params.get("entity_type"), entity_id or params.get("entity_id"),
+        date_from or params.get("date_from"), date_to or params.get("date_to"),
+    )
+    if search:
+        like = f"%{search}%"
+        q = q.where(or_(
+            AuditLog.username.ilike(like), AuditLog.action.ilike(like),
+            AuditLog.entity_type.ilike(like), AuditLog.entity_id.ilike(like),
+            AuditLog.ip_address.ilike(like),
+        ))
+    filter_columns = {
+        "timestamp": AuditLog.timestamp, "username": AuditLog.username,
+        "action": AuditLog.action, "entity_type": AuditLog.entity_type,
+        "entity_id": AuditLog.entity_id, "ip_address": AuditLog.ip_address,
+    }
+    for key, value in params.items():
+        if not key.startswith(("exclude__", "include__")):
+            continue
+        keeping = key.startswith("include__")
+        expression = filter_columns.get(key.removeprefix("include__" if keeping else "exclude__"))
+        pick = include_clause if keeping else exclude_clause
+        clause = pick(expression, excluded_values(value)) if expression is not None else None
+        if clause is not None:
+            q = q.where(clause)
+    return q
+
+
 @router.get("/export")
+@router.post("/export")
 def export_audit_logs(
     format: str = "json",
+    search: str | None = None,
     username: str | None = None,
     action: str | None = None,
     entity_type: str | None = None,
+    entity_id: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_audit_view),
+    body: ExportRequest | None = None,
 ):
-    q = _query_logs(db, username, action, entity_type, None, date_from, date_to)
+    params = body.filters if body is not None else (request.query_params if request else {})
+    def export_query(session: Session):
+        if body is not None and body.ids is not None:
+            return select(AuditLog).where(AuditLog.id.in_(body.ids))
+        return _filtered_logs(session, search, username, action, entity_type, entity_id,
+                              date_from, date_to, params)
+    q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     log_action(db, user, "export.audit_logs", "audit_log", None, {"format": format, "count": count}, request)
     db.commit()
     def rows(export_db: Session):
-        query = _query_logs(export_db, username, action, entity_type, None, date_from, date_to)
+        query = export_query(export_db)
         for item in export_db.scalars(query.order_by(AuditLog.timestamp, AuditLog.id).execution_options(yield_per=500)):
             yield AuditOut.model_validate(item).model_dump(mode="json")
     return streaming_export_response(database_export_rows(rows), EXPORT_COLUMNS, format, "audit_logs")

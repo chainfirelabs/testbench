@@ -35,6 +35,7 @@ import JsonCellEditor from '../components/JsonCellEditor.vue'
 import { detailCellRenderer } from '../detail'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { tableExportRequest } from '../tableExport'
 import { router } from '../router'
 import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
@@ -279,22 +280,10 @@ function onGridReady() {
 
 /** Whatever the grid is currently showing, as a file. */
 function exportAs(format: string) {
-  const state = table.value?.getState()
-  const params = remoteTableParams(
-    {
-      startRow: 0,
-      endRow: 1,
-      search: state?.quick_filter || '',
-      sortModel: state?.sort || [],
-      filterModel: state?.filter || {},
-    },
+  const request = tableExportRequest('/vendor-devices', table.value?.getState(),
     { format, ...urlFilters.value, ...componentFilters.value },
-  )
-  // Paging parameters mean nothing to an export, which returns the whole
-  // filtered set.
-  params.delete('page')
-  params.delete('page_size')
-  download(`/vendor-devices/export?${params}`, `vendor-devices.${format}`, 'export')
+    selected.value.map((row) => row.id).filter(Boolean))
+  download(request.path, `vendor-devices.${format}`, 'export', request.options)
 }
 
 const countLabel = computed(() =>
@@ -733,10 +722,10 @@ async function onImportFile(e: Event) {
             </button>
           </template>
           <button class="btn" :disabled="downloading" @click="exportAs('json')">
-            {{ downloading ? 'Preparing…' : 'Export JSON' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected JSON' : 'Export JSON' }}
           </button>
           <button class="btn" :disabled="downloading" @click="exportAs('csv')">
-            {{ downloading ? 'Preparing…' : 'Export CSV' }}
+            {{ downloading ? 'Preparing…' : selected.length ? 'Export selected CSV' : 'Export CSV' }}
           </button>
         </OverflowMenu>
       </div>
@@ -774,7 +763,7 @@ async function onImportFile(e: Event) {
       :filter-values="filterValues"
       :editable="auth.can(PERMISSION.softwareEdit)"
       :row-editable="auth.can(PERMISSION.softwareEdit)"
-      :selectable="auth.can(PERMISSION.softwareEdit)"
+      :selectable="true"
       :dirty-ids="dirtyIds"
       :is-row-dirty="isRowDirty"
       @cell-edit="onCellEdit"

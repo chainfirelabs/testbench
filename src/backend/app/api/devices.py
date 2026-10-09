@@ -38,7 +38,7 @@ from ..services.changelog import changelog_entries
 from ..services.checkout import overdue_clause, today
 from ..services.compat import compatible_software
 from ..services.hooks import emit_status_change
-from ..services.io import database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.io import ExportRequest, database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.device_info import DockerError, launch_device_info, missing_required_fields
@@ -666,6 +666,7 @@ def start_device_info(
 
 
 @router.get("/export")
+@router.post("/export")
 def export_devices(
     format: str = "json",
     columns_mode: str = Query("type", pattern="^(type|all|data)$", alias="columns"),
@@ -689,23 +690,27 @@ def export_devices(
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    body: ExportRequest | None = None,
 ):
     """Export the devices a filter selects. Takes the same filters as the list
     endpoint, so what you see in a filtered table is what you get in the file."""
+    params = body.filters if body is not None else (request.query_params if request else {})
     dynamic = {
-        key: value for key, value in request.query_params.items()
+        key: value for key, value in params.items()
         if key not in {"format", "search", "online", "overdue", "columns", "expand_misc"}
-    } if request else {}
+    }
     dynamic.update({key: value for key, value in {
         "status": status, "location": location, "make": make, "model": model,
         "firmware_version": firmware_version, "hardware_version": hardware_version,
         "architecture": architecture,
     }.items() if value is not None})
-    q = _query_devices(
-        db,
-        {**dynamic, "device_type": device_type, "online": online, "overdue": overdue},
-        search,
-    )
+    selected_ids = body.ids if body is not None else None
+    def export_query(session: Session):
+        if selected_ids is not None:
+            return _query_devices(session, {"device_type": device_type}, None).where(Device.id.in_(selected_ids))
+        return _query_devices(session, {**dynamic, "device_type": device_type,
+                                        "online": online, "overdue": overdue}, search)
+    q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     resolved = _resolve_device_type(db, device_type, allow_disabled=True) if device_type and device_type != "uncategorized" else None
     # An unscoped export represents the fleet, not just its global schema.
@@ -730,11 +735,7 @@ def export_devices(
                 "expand_misc": expand_misc}, request)
     db.commit()
     def rows(export_db: Session):
-        query = _query_devices(
-            export_db,
-            {**dynamic, "device_type": device_type, "online": online, "overdue": overdue},
-            search,
-        )
+        query = export_query(export_db)
         export_type = (_resolve_device_type(export_db, device_type, allow_disabled=True)
                        if device_type and device_type != "uncategorized" else None)
         _, export_projector = _export_shape(export_db, export_type, effective_mode)
