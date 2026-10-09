@@ -1,5 +1,5 @@
 import { SUPPORT_LABELS } from './constants'
-import { componentPreview, type ComponentPanelState } from './componentPanel'
+import { componentSummaryLabel, type ComponentPanelState } from './componentPanel'
 
 type ComponentClaim = {
   component_name: string
@@ -35,12 +35,9 @@ function componentSupportRenderer(params: any, onOpen: (panel: ComponentPanelSta
   trigger.type = 'button'
   trigger.className = 'component-cell-button'
   const matching = !!params.data?.matching_components?.length
-  const componentCount = new Set(entries.map((entry) => entry.component_name.toLocaleLowerCase())).size
-  const count = document.createElement('strong')
-  count.textContent = `${componentCount}${matching ? ' matching' : ''} component${componentCount === 1 ? '' : 's'}`
-  const preview = document.createElement('span')
-  preview.textContent = componentPreview(entries.map((entry) => ({ name: entry.component_name })))
-  trigger.append(count, preview)
+  const label = document.createElement('strong')
+  label.textContent = componentSummaryLabel(entries.map((entry) => entry.component_name))
+  trigger.append(label)
   trigger.title = `View ${entries.length} component version${entries.length === 1 ? '' : 's'}`
   trigger.addEventListener('click', (event) => {
     event.stopPropagation()

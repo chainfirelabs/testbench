@@ -211,6 +211,9 @@ const columns = computed(() => {
   // arrives, exactly as they were before.
   return claim.length ? [...software, ...claim] : [...baseColumns]
 })
+const schemaVisibleColumns = computed(() =>
+  columns.value.some((column: any) => column.colId === 'component_name') ? ['component_name'] : [],
+)
 
 const filterValues = makeFilterValues({
   entity: 'vendor-devices',
@@ -757,6 +760,7 @@ async function onImportFile(e: Event) {
     <DataTable
       ref="table"
       :columns="columns"
+      :schema-visible-columns="schemaVisibleColumns"
       :columns-ready="columnsReady"
       :rows="rows"
       :remote-loader="loadRemoteVendorDevices"

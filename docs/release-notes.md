@@ -1,5 +1,18 @@
 # Release notes
 
+## 1.9.10
+
+- Exports for devices, tests, software, vendor claims, and audit logs honor the
+  current filters and selected rows instead of exporting the full dataset.
+- Components summaries on Software, Software Details, and Vendor Claims show
+  the component name when there is one, or only the count when there are
+  multiple components. Long names fit within their cells.
+- Software Details shows its Components field even when older field metadata
+  omits it, and follows the field order set in Schema → Software. Components
+  also appears in small-screen cards when enabled.
+- A saved view can no longer hide a Components column that the schema shows.
+- No database migration is required.
+
 ## 1.9.9
 
 - Audit log retention is configurable in the web UI and defaults to `0` (keep

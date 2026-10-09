@@ -30,12 +30,26 @@ import { remoteTableParams } from '../remoteTable'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { groupBundleComponents } from '../bundleComponentGroups'
 import { componentSupportColumn } from '../vendorComponentSupport'
-import type { ComponentPanelState } from '../componentPanel'
+import { componentSummaryLabel, type ComponentPanelState } from '../componentPanel'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const { fields: softwareFields, loadFields } = useEntityFields('software')
+const detailCatalogFields = ref<EntityField[]>([])
+type DetailField = { key: string; label: string; definition: EntityField | null }
+const detailFields = computed(() => {
+  const fields: DetailField[] = detailCatalogFields.value
+    .filter((field) => field.visible || field.key === 'bundle_components')
+    .map((field) => ({ key: field.key, label: field.label, definition: field }))
+  if (!fields.some((field) => field.key === 'bundle_components')) {
+    const versionIndex = fields.findIndex((field) => field.key === 'version')
+    fields.splice(versionIndex < 0 ? fields.length : versionIndex + 1, 0, {
+      key: 'bundle_components', label: 'Components', definition: null,
+    })
+  }
+  return fields
+})
 
 const software = ref<any>(null)
 const error = ref('')
@@ -517,6 +531,9 @@ const vendorColumns = computed(() => {
   })
   return columns
 })
+const schemaVisibleVendorColumns = computed(() =>
+  vendorColumns.value.some((column: any) => column.colId === 'component_name') ? ['component_name'] : [],
+)
 
 // A computed (not a function called from the template): a fresh Set on every
 // render would look like a change to the grid and trigger needless refreshes.
@@ -993,6 +1010,7 @@ async function load() {
   vendorColumnsReady.value = false
   try {
     await loadFields()
+    detailCatalogFields.value = await api<EntityField[]>('/entity-fields/software')
     // Resolves a UUID or a name; a bare name gives the current version.
     const resolved = await api<any>(`/software/${route.params.id}`)
     versions.value = await api<any[]>(`/software/${resolved.id}/versions`)
@@ -1102,16 +1120,16 @@ onMounted(load)
       </form>
       <template v-else>
         <dl class="kv">
-          <template v-for="field in softwareFields" :key="field.key">
+          <template v-for="field in detailFields" :key="field.key">
             <dt>{{ field.label }}</dt>
             <dd v-if="field.key === 'bundle_components' && componentGroups.length">
               <button type="button" class="component-cell-button" @click="openComponents">
-                <strong>{{ componentGroups.length }} component{{ componentGroups.length === 1 ? '' : 's' }}</strong>
+                <strong>{{ componentSummaryLabel(componentGroups.map((group) => group.name)) }}</strong>
                 <span>View components</span>
               </button>
             </dd>
             <dd v-else-if="field.key === 'bundle_components'">—</dd>
-            <dd v-else><DetailValue :value="dataValue(software, field, 'misc_data')" /></dd>
+            <dd v-else-if="field.definition"><DetailValue :value="dataValue(software, field.definition, 'misc_data')" /></dd>
           </template>
           <dt>All Versions</dt>
           <dd>
@@ -1198,6 +1216,7 @@ onMounted(load)
       <DataTable
         ref="vendorTable"
         :columns="vendorColumns"
+        :schema-visible-columns="schemaVisibleVendorColumns"
         :columns-ready="vendorColumnsReady"
         :rows="vendorDisplayRows"
         :remote-loader="loadRemoteVendorDevices"

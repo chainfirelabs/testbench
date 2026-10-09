@@ -25,3 +25,14 @@ export function restoreTableState(api: any, state: any, remote: boolean) {
   if (state.page_size) api.setGridOption('paginationPageSize', state.page_size)
   api.paginationGoToFirstPage()
 }
+
+/** Schema-shown relationship columns take precedence over an older saved view. */
+export function showSchemaColumns(state: any, columnIds: string[]): any {
+  if (!state?.column?.length || !columnIds.length) return state
+  const shown = new Set(columnIds)
+  return {
+    ...state,
+    column: state.column.map((column: any) =>
+      shown.has(column.colId) ? { ...column, hide: false } : column),
+  }
+}

@@ -21,7 +21,7 @@ import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 import { groupBundleComponents } from '../bundleComponentGroups'
-import { componentPreview, type ComponentPanelState } from '../componentPanel'
+import { componentSummaryLabel, type ComponentPanelState } from '../componentPanel'
 
 const auth = useAuthStore()
 const rows = ref<any[]>([])
@@ -162,11 +162,9 @@ const componentsColumn = {
     const trigger = document.createElement('button')
     trigger.type = 'button'
     trigger.className = 'component-cell-button'
-    const count = document.createElement('strong')
-    count.textContent = `${groups.length} component${groups.length === 1 ? '' : 's'}`
-    const preview = document.createElement('span')
-    preview.textContent = componentPreview(groups.map((group) => ({ name: group.name })))
-    trigger.append(count, preview)
+    const label = document.createElement('strong')
+    label.textContent = componentSummaryLabel(groups.map((group) => group.name))
+    trigger.append(label)
     trigger.title = `View components for ${p.data.name}`
     trigger.addEventListener('click', (event) => {
       event.stopPropagation()
@@ -191,6 +189,9 @@ const columns = computed(() => {
   })
   return configured
 })
+const schemaVisibleColumns = computed(() =>
+  columns.value.some((column: any) => column.colId === 'component_name') ? ['component_name'] : [],
+)
 
 function showToast(msg: string, isError = false) {
   toast.value = msg
@@ -738,6 +739,7 @@ onMounted(() => Promise.all([load(), loadFields()]))
       ref="table"
       :columns="columns"
       :columns-ready="columnsReady"
+      :schema-visible-columns="schemaVisibleColumns"
       :rows="rows"
       :remote-loader="loadRemoteSoftware"
       :filter-values="filterValues"

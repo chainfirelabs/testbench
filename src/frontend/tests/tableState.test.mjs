@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { captureTableState, restoreTableState } from '../src/tableState.ts'
+import { captureTableState, restoreTableState, showSchemaColumns } from '../src/tableState.ts'
 
 test('saved remote search comes from the input, not the unused grid quick filter', () => {
   const state = captureTableState({
@@ -32,4 +32,20 @@ test('a view without filters clears the previous view', () => {
     setGridOption: () => {}, paginationGoToFirstPage: () => {},
   }, {}, false)
   assert.deepEqual(model, {})
+})
+
+test('a saved view cannot hide a Components column shown by the schema', () => {
+  const saved = { column: [
+    { colId: 'name', hide: false },
+    { colId: 'component_name', hide: true },
+    { colId: 'version', hide: true },
+  ] }
+  const shown = showSchemaColumns(saved, ['component_name'])
+  assert.deepEqual(shown.column, [
+    { colId: 'name', hide: false },
+    { colId: 'component_name', hide: false },
+    { colId: 'version', hide: true },
+  ])
+  assert.equal(saved.column[1].hide, true)
+  assert.equal(showSchemaColumns(saved, []), saved)
 })

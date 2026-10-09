@@ -1470,7 +1470,10 @@ label {
   text-align: left;
 }
 .component-cell-button strong {
-  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--accent);
   font-weight: 600;
 }

@@ -13,8 +13,7 @@ export interface ComponentPanelState {
   matching?: boolean
 }
 
-export function componentPreview(items: ComponentPanelItem[], limit = 2): string {
-  const names = [...new Set(items.map((item) => item.name))]
-  const shown = names.slice(0, limit).join(', ')
-  return `${shown}${names.length > limit ? ` +${names.length - limit}` : ''}`
+export function componentSummaryLabel(names: string[]): string {
+  const uniqueNames = [...new Map(names.map((name) => [name.toLocaleLowerCase(), name])).values()]
+  return uniqueNames.length === 1 ? uniqueNames[0] : `${uniqueNames.length} components`
 }

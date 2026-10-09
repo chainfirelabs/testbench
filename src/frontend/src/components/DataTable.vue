@@ -10,7 +10,7 @@ import {
   type SelectionColumnDef,
 } from 'ag-grid-community'
 import { useIsCardList, useIsMobile } from '../breakpoints'
-import { captureTableState, restoreTableState } from '../tableState'
+import { captureTableState, restoreTableState, showSchemaColumns } from '../tableState'
 import { ValueChecklistFilter } from '../valueChecklistFilter'
 import CardList, { type CardAction, type CardField } from './CardList.vue'
 
@@ -137,6 +137,8 @@ const props = withDefaults(
     columns: any[]
     /** Delay saved views until the dynamic schema has finished loading. */
     columnsReady?: boolean
+    /** Columns that a saved view must not hide while the schema shows them. */
+    schemaVisibleColumns?: string[]
     rows?: any[]
     /** Load only the requested window instead of retaining the full list. */
     remoteLoader?: (request: RemoteTableRequest) => Promise<RemoteTableResult>
@@ -188,6 +190,7 @@ const props = withDefaults(
   {
     rows: () => [],
     columnsReady: true,
+    schemaVisibleColumns: () => [],
     remoteLoader: undefined,
     filterValues: undefined,
     editable: false,
@@ -716,8 +719,11 @@ function keepCurrentState() {
 function syncCardFields() {
   const api = gridApi.value
   if (!api) return
-  const byField = new Map<string, any>()
-  for (const c of props.columns) if (c.field) byField.set(c.field, c)
+  const byColumnId = new Map<string, any>()
+  for (const c of props.columns) {
+    const id = c.colId || c.field
+    if (id) byColumnId.set(id, c)
+  }
 
   const fields: CardField[] = []
   for (const state of api.getColumnState?.() ?? []) {
@@ -725,7 +731,7 @@ function syncCardFields() {
     // The actions and selection columns are chrome, not data; the card renders
     // actions itself and has no selection.
     if (state.colId === ACTIONS_COL_ID) continue
-    const col = byField.get(state.colId)
+    const col = byColumnId.get(state.colId)
     if (!col) continue
     fields.push({ field: state.colId, headerName: col.headerName || state.colId, col })
   }
@@ -1236,7 +1242,7 @@ async function applyPendingState() {
   if (!api || !props.columnsReady || !pendingState) return
   const expected = props.columns.map((c) => c.colId || c.field).filter(Boolean)
   if (expected.some((id) => !api.getColumn(id))) return
-  const state = pendingState
+  const state = showSchemaColumns(pendingState, props.schemaVisibleColumns)
   pendingState = null
   quickFilter.value = state.quick_filter || ''
   restoreTableState(api, state, isRemote.value)

@@ -35,7 +35,7 @@ images such as PostgreSQL are not built by these Dockerfiles and are unchanged.
 
 ## Build triggers and tags
 
-Default-branch pushes publish the chart's `appVersion` (currently `1.9.9`),
+Default-branch pushes publish the chart's `appVersion` (currently `1.9.10`),
 `latest`, and `sha-<full-commit-SHA>` tags. Rebuilding the same product version
 updates its version tag; use a digest or SHA tag to pin an exact build.
 Pushing a version tag such as `v1.7.3` publishes `1.7.3` and the SHA tag.
@@ -201,7 +201,7 @@ The chart defaults to GHCR: `global.imageRegistry: ghcr.io` with repositories
 such as `chainfirelabs/testbench/backend` and `chainfirelabs/testbench/frontend`.
 These match GitHub workflow publications from the `chainfirelabs/testbench`
 repository. For a different GitHub owner/project, update the component repository
-paths accordingly. The default tag is `1.9.9`; publish Git tag `v1.9.9` to produce
+paths accordingly. The default tag is `1.9.10`; publish Git tag `v1.9.10` to produce
 that image tag, or override the chart tags to another published version.
 
 GitLab defaults to its project registry. Override `global.imageRegistry` and,
@@ -235,6 +235,6 @@ passes the release version through Docker's `VERSION` build argument, which the
 frontend build exposes as `VITE_APP_VERSION`. The same value labels the image;
 changing a Helm image tag does not rewrite a previously built frontend.
 
-For a direct image build, pass `--build-arg VERSION=1.9.9`. For a local frontend
-build or dev server, set `VITE_APP_VERSION=1.9.9` when running `npm run build` or
+For a direct image build, pass `--build-arg VERSION=1.9.10`. For a local frontend
+build or dev server, set `VITE_APP_VERSION=1.9.10` when running `npm run build` or
 `npm run dev` in `src/frontend`. Without a version, the label is `TestBench dev`.
