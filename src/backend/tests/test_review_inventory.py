@@ -5,8 +5,10 @@ from unittest.mock import Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from app.api import devices, plugins, software
+from app.models import Device
 from app.services import device_schema as schema
 
 
@@ -70,6 +72,7 @@ def test_invocation_snapshots_output_roles_and_preserves_conflict_detection(conc
     with (patch.object(plugins.registry, 'manifest', return_value=manifest),
           patch.object(plugins, 'validate_plugin_invocation', return_value=(manifest['actions'][0], [device])),
           patch.object(plugins, 'fields_for_device', return_value=fields),
+          patch.object(plugins, '_save_run'),
           patch.object(plugins.registry, 'request', return_value={'run_id': 'run'}) as send):
         plugins.invoke_action('device-info-agent', 'research', plugins.InvokeIn(entity_id='d'), request, db, user)
     sent = send.call_args.args[3]['entities'][0]['_plugin_roles']
@@ -206,16 +209,19 @@ def test_unscoped_default_export_includes_type_only_fields():
                 link_overrides={})
     fields = [field('unique_id', storage='column'), field('imei')]
     db = Mock()
-    db.scalars.return_value.all.return_value = [device]
+    db.scalars.side_effect = lambda _query: iter([device])
+    db.scalar.return_value = 1
     with (patch.object(devices, '_union_fields', return_value=fields),
-          patch.object(devices, '_query_devices', return_value=Mock()),
+          patch.object(devices, '_query_devices', return_value=select(Device)),
+          patch.object(devices, 'database_export_rows', side_effect=lambda rows: rows(db)),
           patch.object(devices, '_device_dict', return_value={'unique_id': 'phone-1', 'misc_data': {}})):
         response = devices.export_devices(format='json', columns_mode='type', expand_misc=True,
                                            request=None, db=db, user=None)
+        exported = json.loads(_streamed(response))
     # `link_overrides` rides along in every field-column export, blank when the
     # device overrides nothing: it is the one part of a device no field column
     # describes, and leaving it out is what used to make a restore lossy.
-    assert json.loads(_streamed(response)) == [
+    assert exported == [
         {'device_type': 'phone', 'unique_id': 'phone-1', 'imei': '123', 'link_overrides': None},
     ]
 

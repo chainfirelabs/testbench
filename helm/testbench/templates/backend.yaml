@@ -34,6 +34,8 @@ spec:
             - secretRef: {name: {{ required "applicationSecret.existingSecret is required" .Values.applicationSecret.existingSecret }}}
           env:
             {{- include "testbench.databaseEnv" . | nindent 12 }}
+            - name: TB_AUDIT_DELETE_DEVICE_CHANGELOGS
+              value: {{ .Values.backend.auditCleanup.deleteDeviceChangelogs | quote }}
             {{- if .Values.authentik.tls.existingConfigMap }}
             - name: SSL_CERT_FILE
               value: /etc/testbench/authentik-ca/{{ required "authentik.tls.key is required when authentik.tls.existingConfigMap is set" .Values.authentik.tls.key }}

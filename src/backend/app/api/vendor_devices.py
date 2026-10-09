@@ -33,6 +33,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.io import (
+    database_export_rows,
     download_response,
     parse_import,
     safe_filename,
@@ -546,25 +547,27 @@ def export_vendor_devices(
 ):
     software = _get_software(db, software_id)
     filters = _component_filters(dict(request.query_params))
-    items = db.scalars(_query(db, software, search, filters).order_by(VendorDevice.match_key)).all()
+    count = db.scalar(select(func.count()).select_from(_query(db, software, search, filters).subquery())) or 0
     fields = [field for field, payload in _effective_fields(db, software)
               if payload["visible"] and field.key != COMPONENT_SUPPORT_FIELD]
-    rows = []
-    for item in items:
-        payload = _vd_dict(item)
-        rows.append({
-            **project_fields(payload, fields, "misc_data"),
-            COMPONENT_SUPPORT_FIELD: payload[COMPONENT_SUPPORT_FIELD],
-        })
     log_action(
         db, user, "software.vendor_devices.export", "software", software.id,
-        {"format": format, "count": len(rows)}, request,
+        {"format": format, "count": count}, request,
     )
     db.commit()
+    def rows(export_db: Session):
+        export_software = _get_software(export_db, software_id)
+        result = export_db.scalars(_query(export_db, export_software, search, filters)
+                                   .order_by(VendorDevice.match_key)
+                                   .execution_options(yield_per=100))
+        for item in result:
+            payload = _vd_dict(item)
+            yield {**project_fields(payload, fields, "misc_data"),
+                   COMPONENT_SUPPORT_FIELD: payload[COMPONENT_SUPPORT_FIELD]}
     # The stem carries a software name, which is free text: safe_filename keeps a
     # quote or newline in it from breaking out of the Content-Disposition header.
     return streaming_export_response(
-        rows, [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD],
+        database_export_rows(rows), [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD],
         format, f"{software.name}-vendor-devices",
     )
 
@@ -1023,25 +1026,30 @@ def export_vendor_device_catalog(
     would not merely omit the field: re-importing writes the whole row, so the
     absent column would read as "no value" and clear what an operator typed.
     """
-    q = _catalog_query(db, search, dict(request.query_params))
-    q = q.order_by(Software.name.asc(), VendorDevice.match_key.asc())
-    pairs = [tuple(row) for row in db.execute(q).all()]
+    params = dict(request.query_params)
+    q = _catalog_query(db, search, params)
+    count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     fields = _catalog_export_fields(db)
     columns = (CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
                + list(FLAT_COMPONENT_FIELDS) + [COMPONENT_SUPPORT_FIELD])
-    rows = []
-    for item in _catalog_rows(db, pairs):
-        row = item.model_dump(mode="json")
-        rows.append({
-            "software_name": row["software_name"],
-            "software_version": row["software_version"],
-            **project_fields(row, fields, "misc_data"),
-            COMPONENT_SUPPORT_FIELD: row[COMPONENT_SUPPORT_FIELD],
-        })
     log_action(db, user, "vendor_devices.catalog_export", "vendor_device", None,
-               {"format": format, "count": len(rows)}, request)
+               {"format": format, "count": count}, request)
     db.commit()
-    return streaming_export_response(rows, columns, format, "vendor-devices")
+    def rows(export_db: Session):
+        query = _catalog_query(export_db, search, params).order_by(
+            Software.name.asc(), VendorDevice.match_key.asc())
+        result = export_db.execute(query.execution_options(yield_per=100))
+        for batch in result.partitions(100):
+            for item in _catalog_rows(export_db, [tuple(pair) for pair in batch]):
+                row = item.model_dump(mode="json")
+                yield {
+                    "software_name": row["software_name"],
+                    "software_version": row["software_version"],
+                    **project_fields(row, fields, "misc_data"),
+                    **{key: None for key in FLAT_COMPONENT_FIELDS},
+                    COMPONENT_SUPPORT_FIELD: row[COMPONENT_SUPPORT_FIELD],
+                }
+    return streaming_export_response(database_export_rows(rows), columns, format, "vendor-devices")
 
 
 # ---------- creating and importing from the catalogue ----------
@@ -1092,7 +1100,8 @@ def vendor_device_catalog_template(db: Session = Depends(get_db), user: User = D
     that invites someone to fill it in for nothing.
     """
     fields = [field for field in _catalog_export_fields(db) if field.writable]
-    columns = CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields] + [COMPONENT_SUPPORT_FIELD]
+    columns = (CATALOG_SOFTWARE_COLUMNS + [field.key for field in fields]
+               + list(FLAT_COMPONENT_FIELDS) + [COMPONENT_SUPPORT_FIELD])
     return download_response(
         template_csv(columns), "vendor-devices-template.csv", "text/csv",
     )

@@ -1,5 +1,23 @@
 # Release notes
 
+## 1.9.9
+
+- Audit log retention is configurable in the web UI and defaults to `0` (keep
+  logs indefinitely). Administrators can preview and delete every eligible log
+  before a selected date. Manual deletion now runs as a tracked job with
+  progress, retry, and recovery after a backend restart.
+- Device changelog entries are protected from scheduled and manual cleanup by
+  default. Only the Helm `backend.auditCleanup.deleteDeviceChangelogs` setting
+  can allow their deletion.
+- Audit, device, test, software, and vendor claim exports read database rows in
+  bounded batches, reducing memory use for large downloads.
+- Plugin run state and progress are saved in PostgreSQL. After a controller
+  restart, a lost run is shown as interrupted. Worker output remains transient
+  because it can contain device credentials.
+- Global search uses PostgreSQL trigram indexes to speed substring matches.
+  Migration 0014 creates `pg_trgm`; migrations 0012 and 0013 add cleanup jobs
+  and plugin run status tables.
+
 ## 1.9.8
 
 - Software and Vendor Claims component lists open in a searchable, scrollable modal.

@@ -3,10 +3,13 @@ import io
 import json
 import re
 from collections.abc import Iterable, Iterator
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import HTTPException
 from fastapi.responses import Response, StreamingResponse
+
+from ..db import SessionLocal
+from sqlalchemy.orm import Session
 
 # Cells a spreadsheet would evaluate rather than display. A device named
 # `=cmd|'/c calc'!A0` is a formula to Excel and Sheets, and our exports are
@@ -181,6 +184,12 @@ def export_response(rows: list[dict[str, Any]], columns: list[str], fmt: str, st
 # a 30,000-row export into thirty hops rather than several hundred thousand,
 # and the per-hop cost stops mattering.
 STREAM_CHUNK_ROWS = 1000
+
+
+def database_export_rows(factory: Callable[[Session], Iterable[dict[str, Any]]]) -> Iterator[dict[str, Any]]:
+    """Keep a dedicated database session open for the lifetime of a download."""
+    with SessionLocal() as db:
+        yield from factory(db)
 
 
 def _stream_csv(rows: Iterable[dict[str, Any]], columns: list[str]) -> Iterator[str]:

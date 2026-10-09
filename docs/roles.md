@@ -28,7 +28,7 @@ editable, so upgrading changes nobody's access.
 | `software.edit` | Add and change software and versions, and the vendor compatibility claims under them. |
 | `tests.edit` | Add, change and delete test results. |
 | `views.save` | Save named column, filter and sort layouts for the list pages. |
-| `audit.view` | Read and export the full audit log. |
+| `audit.view` | Read and export the full audit log. Together with `settings.manage`, configure retention and delete old logs. |
 | `users.manage` | Create accounts, reset passwords, assign roles, and define what roles grant. |
 | `schema.manage` | Define device types, device fields, and the fields on software, tests and vendor devices. |
 | `plugins.manage` | Enable plugins for device types and configure how they run. |

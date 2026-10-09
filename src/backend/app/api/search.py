@@ -1,7 +1,7 @@
 """Global search across devices, software, tests and vendor claims."""
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, and_, cast, false, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -29,6 +29,9 @@ def global_search(
     user: User = Depends(get_current_user),
 ):
     like = f"%{q}%"
+    # JSON renders quotes, backslashes and controls with escapes. For those
+    # terms the raw JSON prefilter could hide a real field match.
+    json_prefilter_safe = not any(char in {'"', '\\'} or ord(char) < 32 for char in q)
     device_terms = [
         device_field_expression(field).ilike(like)
         for field in union_field_map(db).values()
@@ -49,27 +52,34 @@ def global_search(
         if field.field_type in {"text", "textarea", "select"}
         and field.key not in {"device_unique_id", "software_name", "created_by_username"}
     ]
+    # The JSON text prefilter uses a trigram index. The field predicates remain
+    # authoritative, so a match inside a sensitive field cannot produce a hit.
+    device_json_match = or_(*device_terms) if device_terms else false()
+    software_json_match = or_(*software_terms) if software_terms else false()
+    test_json_match = or_(*test_terms) if test_terms else false()
+    if json_prefilter_safe:
+        device_json_match = and_(cast(Device._data, Text).ilike(like), device_json_match)
+        software_json_match = and_(cast(Software._data, Text).ilike(like), software_json_match)
+        test_json_match = and_(cast(Test._data, Text).ilike(like), test_json_match)
+    device_match = or_(Device.unique_id.ilike(like), device_json_match) if device_terms else Device.unique_id.ilike(like)
+    software_match = software_json_match if software_terms else Software.id.ilike(like)
+    test_match = or_(Device.unique_id.ilike(like), Software.name.ilike(like),
+                     test_json_match)
     device_q = (
         select(Device)
-        .where(or_(*device_terms) if device_terms else Device.id.ilike(like))
+        .where(device_match)
         .order_by(Device.unique_id)
     )
     software_q = (
         select(Software)
-        .where(or_(*software_terms) if software_terms else Software.id.ilike(like))
+        .where(software_match)
         .order_by(Software.name)
     )
     tests_q = (
         select(Test)
         .join(Device, Test.device_id == Device.id)
         .join(Software, Test.software_id == Software.id)
-        .where(
-            or_(
-                Device.unique_id.ilike(like),
-                Software.name.ilike(like),
-                *test_terms,
-            )
-        )
+        .where(test_match)
         .order_by(Test.created_at.desc())
     )
 

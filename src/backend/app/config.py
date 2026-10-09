@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     checkout_sweep_minutes: int = 60  # 0 disables the sweep
     checkout_warn_days: int = 3  # warn daily from this many days before the due date
 
+    # Helm-owned audit policy. Device changelogs are projections of per-device
+    # audit rows, so cleanup preserves those rows unless explicitly opted in.
+    audit_delete_device_changelogs: bool = False
+
     # Network scanning (online/offline detection)
     scan_interval_minutes: int = 15  # 0 disables the periodic scan
     scan_timeout_seconds: float = 2.0  # per-probe timeout

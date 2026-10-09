@@ -4,7 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 const props = defineProps<{ title: string; run: Record<string, any> }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'cancel'): void }>()
 const output = ref<HTMLElement | null>(null)
-const terminal = computed(() => ['completed', 'failed', 'cancelled'].includes(props.run.state))
+const terminal = computed(() => ['completed', 'failed', 'cancelled', 'interrupted'].includes(props.run.state))
 const now = ref(Date.now())
 const followOutput = ref(true)
 let timer: ReturnType<typeof setInterval> | null = null
@@ -76,6 +76,7 @@ function onOutputScroll() {
 .plugin-run-state.completed { color: var(--success); }
 .plugin-run-state.failed { color: var(--danger); }
 .plugin-run-state.cancelled { color: var(--danger); }
+.plugin-run-state.interrupted { color: var(--danger); }
 .plugin-run-meta, .plugin-run-note { color: var(--text-muted); font-size: 12px; }
 .plugin-run-output, .plugin-run-result pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #111318; color: #e4e7ec; border-radius: var(--r-md); padding: 12px; font: 12px/1.5 ui-monospace, monospace; }
 .plugin-run-output { min-height: 220px; max-height: 52vh; overflow: auto; }

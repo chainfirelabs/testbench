@@ -1063,6 +1063,7 @@ async function runPluginAction(action: PluginAction, row?: any) {
           showToast(`${action.label} stopped${row ? ` for ${row.unique_id}` : ''}`)
           break
         }
+        if (status.state === 'interrupted') throw new Error(`${action.label} was interrupted when its controller restarted`)
         if (status.state === 'failed') throw new Error(status.error || `${action.label} failed`)
       }
     }
@@ -1088,7 +1089,7 @@ async function monitorRestoredPluginRun(key: string, action: PluginAction, view:
       const updated = { ...current, status }
       activePluginRuns.set(key, updated)
       if (pluginRun.value?.status.run_id === status.run_id) pluginRun.value = updated
-      if (['completed', 'failed', 'cancelled'].includes(status.state)) {
+      if (['completed', 'failed', 'cancelled', 'interrupted'].includes(status.state)) {
         if (status.state === 'completed') await load()
         break
       }
@@ -1109,7 +1110,7 @@ async function restoreActivePluginRuns() {
       const action = pluginActions.value.find((candidate) =>
         candidate.plugin_id === run.plugin_id && candidate.id === run.action_id)
       if (!action) continue
-      const entityId = run.entity_ids?.[0]
+      const entityId = action.scope === 'collection' ? undefined : run.entity_ids?.[0]
       const row = entityId ? rows.value.find((candidate) => String(candidate.id) === String(entityId)) : undefined
       const key = `${action.plugin_id}:${action.id}:${entityId || 'collection'}`
       const view: PluginRunView = {

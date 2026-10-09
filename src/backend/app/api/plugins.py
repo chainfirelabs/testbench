@@ -1,4 +1,5 @@
 import hmac
+import httpx
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db, utcnow
-from ..models import Device, DeviceType, DeviceTypePlugin, PluginArtifact, PluginResultReceipt, User
+from ..models import Device, DeviceType, DeviceTypePlugin, PluginArtifact, PluginResultReceipt, PluginRun, User
 from ..services.audit import field_diff, log_action
 from ..services.device_schema import (
     PluginPolicyError,
@@ -266,6 +267,8 @@ def invoke_action(
         result = registry.request(plugin_id, "POST", f"/plugin/v1/actions/{action_id}/invoke", payload)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Plugin invocation failed: {exc}") from exc
+    _save_run(db, plugin_id, {**result, "action_id": action_id,
+                              "entity_ids": [device.id for device in eligible]})
     log_action(db, user, "plugin.action.invoke", body.entity, body.entity_id, {
         "plugin_id": plugin_id, "action_id": action_id, "run_id": result.get("run_id"),
         "devices": [device.unique_id for device in eligible[:50]], "count": len(eligible),
@@ -358,31 +361,93 @@ def delete_device_plugin_configuration(
     return {"configuration": {}, "effective_configuration": effective, "source": source}
 
 
+_RUN_STATUS_FIELDS = {"run_id", "action_id", "entity_ids", "state", "started_at",
+                      "finished_at", "total", "scanned", "completed", "succeeded", "failed"}
+_ACTIVE_STATES = {"starting", "running"}
+
+
+def _save_run(db: Session, plugin_id: str, payload: dict) -> None:
+    run_id = payload.get("run_id")
+    if not run_id:
+        return
+    safe = {key: value for key, value in payload.items() if key in _RUN_STATUS_FIELDS}
+    if isinstance(safe.get("entity_ids"), list):
+        safe["entity_ids"] = safe["entity_ids"][:50]
+    row = db.scalar(select(PluginRun).where(PluginRun.plugin_id == plugin_id,
+                                           PluginRun.run_id == str(run_id)))
+    if row is None:
+        row = PluginRun(plugin_id=plugin_id, run_id=str(run_id), state=str(safe.get("state", "starting")))
+        db.add(row)
+    row.status = {**(row.status or {}), **safe}
+    row.state = str(safe.get("state", row.state))
+
+
+def _stored_run(db: Session, plugin_id: str, run_id: str) -> PluginRun | None:
+    return db.scalar(select(PluginRun).where(PluginRun.plugin_id == plugin_id,
+                                             PluginRun.run_id == run_id))
+
+
+def _interrupted(db: Session, row: PluginRun) -> dict:
+    if row.state in _ACTIVE_STATES:
+        row.state = "interrupted"
+        row.status = {**row.status, "state": "interrupted", "finished_at": utcnow().isoformat()}
+        db.commit()
+    return {**row.status, "output": "Plugin controller restarted; earlier live output is unavailable."}
+
+
 @router.get("/runs/active")
-def active_runs(user: User = Depends(get_current_user)):
+def active_runs(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     runs = []
     for manifest in registry.manifests():
         plugin_id = manifest["id"]
         try:
             payload = registry.request(plugin_id, "GET", "/plugin/v1/runs")
-            runs.extend({**run, "plugin_id": plugin_id} for run in payload.get("runs", []))
+            live = payload.get("runs", [])
+            runs.extend({**run, "plugin_id": plugin_id} for run in live)
+            live_ids = {str(run.get("run_id")) for run in live}
+            for run in live:
+                _save_run(db, plugin_id, run)
+            for row in list(db.scalars(select(PluginRun).where(PluginRun.plugin_id == plugin_id,
+                                                               PluginRun.state.in_(_ACTIVE_STATES)))):
+                if row.run_id not in live_ids:
+                    try:
+                        finished = registry.request(plugin_id, "GET", f"/plugin/v1/runs/{row.run_id}")
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            _interrupted(db, row)
+                    except Exception:
+                        pass  # Keep the saved state until the controller responds again.
+                    else:
+                        _save_run(db, plugin_id, finished)
         except Exception:  # A temporarily unavailable plugin must not hide the others.
             continue
+    db.commit()
     return runs
 
 
 @router.get("/{plugin_id}/runs/{run_id}")
-def run_status(plugin_id: str, run_id: str, user: User = Depends(get_current_user)):
+def run_status(plugin_id: str, run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     try:
-        return registry.request(plugin_id, "GET", f"/plugin/v1/runs/{run_id}")
+        result = registry.request(plugin_id, "GET", f"/plugin/v1/runs/{run_id}")
+        _save_run(db, plugin_id, result)
+        db.commit()
+        return result
     except Exception as exc:  # noqa: BLE001
+        if row := _stored_run(db, plugin_id, run_id):
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 404:
+                return _interrupted(db, row)
+            return {**row.status, "output": "Plugin controller is unavailable; showing the last saved status.",
+                    "status_stale": True}
         raise HTTPException(status_code=502, detail=f"Plugin status failed: {exc}") from exc
 
 
 @router.delete("/{plugin_id}/runs/{run_id}")
-def cancel_run(plugin_id: str, run_id: str, user: User = Depends(require_devices_edit)):
+def cancel_run(plugin_id: str, run_id: str, db: Session = Depends(get_db), user: User = Depends(require_devices_edit)):
     try:
-        return registry.request(plugin_id, "DELETE", f"/plugin/v1/runs/{run_id}")
+        result = registry.request(plugin_id, "DELETE", f"/plugin/v1/runs/{run_id}")
+        _save_run(db, plugin_id, result)
+        db.commit()
+        return result
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Plugin cancellation failed: {exc}") from exc
 

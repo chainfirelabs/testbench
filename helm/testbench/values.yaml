@@ -34,7 +34,7 @@ frontend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/frontend
-    tag: "1.9.8"
+    tag: "1.9.9"
     digest: "" # Example: sha256:...
     pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
   service:
@@ -50,13 +50,17 @@ frontend:
 backend:
   # Number of API Pods. Database schema setup runs in a separate Helm hook Job.
   replicaCount: 2
+  auditCleanup:
+    # Preserve per-device audit rows used by device changelogs, including
+    # during manual cleanup. Only a Helm upgrade can change this policy.
+    deleteDeviceChangelogs: false
   image:
     # Backend/database-schema image. A nonempty digest overrides the tag.
     # Optional override: omit to inherit global.imageRegistry.
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/backend
-    tag: "1.9.8"
+    tag: "1.9.9"
     digest: ""
     pullPolicy: ""
   # Scheduler requests and container limits for each backend Pod.
@@ -73,7 +77,7 @@ mcp:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/mcp
-    tag: "1.9.8"
+    tag: "1.9.9"
     digest: ""
     pullPolicy: ""
   service:
@@ -260,7 +264,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/network-scan
-      tag: "1.9.8"
+      tag: "1.9.9"
       digest: "" # Optional immutable digest; overrides tag.
       pullPolicy: ""
     # Per-port TCP connection timeout.
@@ -304,7 +308,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/device-info
-      tag: "1.9.8"
+      tag: "1.9.9"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -383,7 +387,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/reboot
-      tag: "1.9.8"
+      tag: "1.9.9"
       digest: ""
       pullPolicy: ""
     researchImage:

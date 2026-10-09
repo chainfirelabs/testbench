@@ -110,7 +110,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.9.8`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.9.9`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -194,6 +194,45 @@ Secret names can additionally be set with
 `plugins.networkScan.worker.imagePullSecrets`,
 `plugins.deviceInfo.research.imagePullSecrets`, and
 `plugins.reboot.worker.imagePullSecrets`.
+
+## Audit log retention
+
+Audit logs are retained indefinitely by default. An administrator with both
+`audit.view` and `settings.manage` can set a retention period in **Audit Log →
+Audit log cleanup**. `0` disables automatic deletion. The chart installs a
+daily cleanup CronJob at 02:17 UTC; it reads the current period from PostgreSQL
+on each run, so changing the period in the UI does not require a Helm upgrade.
+Rows are deleted in batches of 500.
+
+The same page shows a preview count, then can start a tracked job to delete all
+eligible audit rows before a selected UTC date in batches of 500. It shows
+progress and can retry a failed job. The API also exposes the recent jobs at
+`GET /api/v1/audit_logs/cleanup/jobs`. A separate once-per-minute CronJob
+resumes queued or interrupted jobs after a backend restart. Cleanup records
+each committed batch in the audit log and preserves the most recent 15 minutes
+for sign-in throttling. Per-device audit rows are also protected by default,
+so device changelogs survive both scheduled and manual cleanup. An operator
+can opt into deleting those rows only through Helm:
+
+```yaml
+backend:
+  auditCleanup:
+    deleteDeviceChangelogs: true
+```
+
+This flag is not editable in the web UI. It affects existing eligible rows
+when the next cleanup runs; setting it back to `false` cannot restore rows
+already deleted.
+
+## Search and exports
+
+Global search uses PostgreSQL `pg_trgm` indexes for substring matches. The
+migration creates the extension if needed, so the migration database user
+needs permission to create trusted extensions in the database. Export routes
+read database rows in bounded batches while the download is in progress.
+Plugin run metadata is saved in PostgreSQL. If a controller restarts and loses
+an active run, the UI shows the last saved progress as interrupted; worker
+output is not stored because it can contain device credentials.
 
 ## MCP server
 

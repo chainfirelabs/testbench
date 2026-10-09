@@ -2,21 +2,158 @@ from typing import Annotated
 
 from datetime import datetime
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..db import get_db
-from ..models import AuditLog, User
+from ..models import AuditCleanupJob, AuditLog, AuditRetention, User
 from ..schemas import AuditOut, Page
 from ..services.audit import log_action
-from ..services.io import streaming_export_response
+from ..services.audit_cleanup_jobs import process_pending_cleanup_jobs
+from ..services.audit_retention import eligible_count, retention_days, safe_cutoff
+from ..services.io import database_export_rows, streaming_export_response
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
-from .deps import require_audit_view
+from .deps import require_audit_view, require_settings_manage
 
 router = APIRouter(prefix="/audit_logs", tags=["audit_logs"])
 
 EXPORT_COLUMNS = ["id", "timestamp", "username", "action", "entity_type", "entity_id", "detail", "ip_address"]
+
+
+class RetentionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    days: int = Field(ge=0, le=36500)
+
+
+class CleanupIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    before: datetime
+
+
+def _cleanup_cutoff(before: datetime) -> datetime:
+    try:
+        return safe_cutoff(before)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/retention")
+def get_retention(
+    db: Session = Depends(get_db),
+    _viewer: User = Depends(require_audit_view),
+):
+    return {"days": retention_days(db),
+            "delete_device_changelogs": settings.audit_delete_device_changelogs}
+
+
+@router.put("/retention")
+def set_retention(
+    body: RetentionIn, request: Request, db: Session = Depends(get_db),
+    user: User = Depends(require_settings_manage),
+    _viewer: User = Depends(require_audit_view),
+):
+    row = db.get(AuditRetention, 1)
+    if row is None:
+        row = AuditRetention(id=1, days=0)
+        db.add(row)
+    old_days = row.days
+    row.days = body.days
+    log_action(db, user, "audit_logs.retention.update", "audit_log", None,
+               {"old_days": old_days, "new_days": body.days}, request)
+    db.commit()
+    return {"days": row.days,
+            "delete_device_changelogs": settings.audit_delete_device_changelogs}
+
+
+@router.post("/cleanup/preview")
+def preview_cleanup(
+    body: CleanupIn, db: Session = Depends(get_db),
+    _manager: User = Depends(require_settings_manage),
+    _viewer: User = Depends(require_audit_view),
+):
+    cutoff = _cleanup_cutoff(body.before)
+    eligible = eligible_count(db, cutoff)
+    total = db.scalar(select(func.count()).select_from(AuditLog).where(AuditLog.timestamp < cutoff)) or 0
+    return {"eligible": eligible, "protected": total - eligible,
+            "before": cutoff.isoformat(),
+            "delete_device_changelogs": settings.audit_delete_device_changelogs}
+
+
+@router.post("/cleanup", status_code=202)
+def cleanup_logs(
+    body: CleanupIn, request: Request, background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_settings_manage),
+    _viewer: User = Depends(require_audit_view),
+):
+    cutoff = _cleanup_cutoff(body.before)
+    job = AuditCleanupJob(
+        before=cutoff, delete_device_changelogs=settings.audit_delete_device_changelogs,
+        requested_by=user.username, total=eligible_count(db, cutoff),
+    )
+    db.add(job)
+    db.flush()
+    log_action(db, user, "audit_logs.cleanup.request", "audit_log", None,
+               {"job_id": job.id, "before": cutoff.isoformat(), "total": job.total}, request)
+    db.commit()
+    background_tasks.add_task(process_pending_cleanup_jobs)
+    return _cleanup_job_out(job)
+
+
+def _cleanup_job_out(job: AuditCleanupJob) -> dict:
+    return {
+        "id": job.id, "before": job.before.isoformat(), "state": job.state,
+        "total": job.total, "deleted": job.deleted, "error": job.error,
+        "requested_by": job.requested_by,
+        "delete_device_changelogs": job.delete_device_changelogs,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+    }
+
+
+@router.get("/cleanup/jobs")
+def list_cleanup_jobs(
+    db: Session = Depends(get_db),
+    _manager: User = Depends(require_settings_manage),
+    _viewer: User = Depends(require_audit_view),
+):
+    jobs = db.scalars(select(AuditCleanupJob).order_by(AuditCleanupJob.created_at.desc()).limit(20)).all()
+    return [_cleanup_job_out(job) for job in jobs]
+
+
+@router.get("/cleanup/jobs/{job_id}")
+def get_cleanup_job(
+    job_id: str, db: Session = Depends(get_db),
+    _manager: User = Depends(require_settings_manage),
+    _viewer: User = Depends(require_audit_view),
+):
+    job = db.get(AuditCleanupJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Cleanup job not found")
+    return _cleanup_job_out(job)
+
+
+@router.post("/cleanup/jobs/{job_id}/retry")
+def retry_cleanup_job(
+    job_id: str, request: Request, background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_settings_manage),
+    _viewer: User = Depends(require_audit_view),
+):
+    job = db.get(AuditCleanupJob, job_id)
+    if job is None:
+        raise HTTPException(404, "Cleanup job not found")
+    if job.state != "failed":
+        raise HTTPException(409, "Only failed cleanup jobs can be retried")
+    job.state = "queued"
+    job.error = None
+    log_action(db, user, "audit_logs.cleanup.retry", "audit_log", None,
+               {"job_id": job.id}, request)
+    db.commit()
+    background_tasks.add_task(process_pending_cleanup_jobs)
+    return _cleanup_job_out(job)
 
 
 def _as_datetime(value: str | None, field: str) -> datetime | None:
@@ -122,8 +259,12 @@ def export_audit_logs(
     db: Session = Depends(get_db),
     user: User = Depends(require_audit_view),
 ):
-    items = db.scalars(_query_logs(db, username, action, entity_type, None, date_from, date_to).order_by(AuditLog.timestamp)).all()
-    rows = [AuditOut.model_validate(a).model_dump(mode="json") for a in items]
-    log_action(db, user, "export.audit_logs", "audit_log", None, {"format": format, "count": len(rows)}, request)
+    q = _query_logs(db, username, action, entity_type, None, date_from, date_to)
+    count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
+    log_action(db, user, "export.audit_logs", "audit_log", None, {"format": format, "count": count}, request)
     db.commit()
-    return streaming_export_response(rows, EXPORT_COLUMNS, format, "audit_logs")
+    def rows(export_db: Session):
+        query = _query_logs(export_db, username, action, entity_type, None, date_from, date_to)
+        for item in export_db.scalars(query.order_by(AuditLog.timestamp, AuditLog.id).execution_options(yield_per=500)):
+            yield AuditOut.model_validate(item).model_dump(mode="json")
+    return streaming_export_response(database_export_rows(rows), EXPORT_COLUMNS, format, "audit_logs")

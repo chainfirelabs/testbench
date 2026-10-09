@@ -13,6 +13,8 @@ dicts. The application's own seed script creates devices one at a time, so this
 was reachable from the first thing a new installation runs.
 """
 
+from datetime import date, timedelta
+
 from test_device_schema_api import SchemaCase
 
 
@@ -46,7 +48,7 @@ class UnconfiguredDateFieldTests(SchemaCase):
         checked-out device — the refusal below is that rule, not this bug."""
         created = self.post("/api/v1/devices", {
             "unique_id": "dt-4", "status": "checked_out",
-            "checkout_purpose": "lab", "checkout_due": "2026-09-25",
+            "checkout_purpose": "lab", "checkout_due": (date.today() + timedelta(days=1)).isoformat(),
         })
         self.assertEqual(created.status_code, 201, created.text)
 

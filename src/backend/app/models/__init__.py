@@ -11,6 +11,8 @@ from .vendor_device_field_override import VendorDeviceFieldOverride
 from .test import Test
 from .saved_filter import SavedFilter
 from .audit import AuditLog
+from .audit_retention import AuditRetention
+from .audit_cleanup_job import AuditCleanupJob
 from .notification import Notification
 from .entity_field import EntityField
 from .device_schema import (
@@ -21,6 +23,7 @@ from .device_schema import (
     DeviceTypePlugin,
 )
 from .plugin_artifact import PluginArtifact, PluginResultReceipt
+from .plugin_run import PluginRun
 from .ai_provider import AiProviderProfile, AiPluginDefault
 
 __all__ = [
@@ -37,6 +40,8 @@ __all__ = [
     "Test",
     "SavedFilter",
     "AuditLog",
+    "AuditRetention",
+    "AuditCleanupJob",
     "Notification",
     "EntityField",
     "DeviceFieldDefinition",
@@ -46,6 +51,7 @@ __all__ = [
     "DeviceFieldIndex",
     "PluginArtifact",
     "PluginResultReceipt",
+    "PluginRun",
     "AiProviderProfile",
     "AiPluginDefault",
 ]

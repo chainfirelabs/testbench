@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
 from sqlalchemy import case, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..db import get_db, utcnow
 from ..models import (
@@ -28,7 +28,7 @@ from ..schemas import (
     VendorComponentSupportIn,
 )
 from ..services.audit import field_diff, log_action
-from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.io import database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.versions import newest_version, version_key
@@ -478,27 +478,36 @@ def export_software(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    items = db.scalars(_query_software(db, search, latest_only).order_by(Software.name, Software.created_at)).all()
-    items = list(items)
-    rows = []
+    q = _query_software(db, search, latest_only)
+    matched = q.subquery()
+    count = db.scalar(select(func.count()).select_from(matched)) or 0
+    vendor_total = db.scalar(select(func.count()).select_from(VendorDevice).where(
+        VendorDevice.software_id.in_(select(matched.c.id)))) or 0
     fields = get_entity_fields(db, "software")
-    annotated = {item.id: item for item in _annotate(db, items)}
-    vendor_total = 0
-    for t in items:
-        vendor_devices = _vendor_device_rows(t)
-        vendor_total += len(vendor_devices)
-        rows.append({
-            **project_fields(annotated[t.id].model_dump(mode="json"), fields, "misc_data"),
-            "bundle_components": [item.model_dump(mode="json") for item in annotated[t.id].bundle_components],
-            "vendor_devices": vendor_devices,
-        })
     log_action(
         db, user, "export.software", "software", None,
-        {"format": format, "count": len(rows), "vendor_devices": vendor_total}, request,
+        {"format": format, "count": count, "vendor_devices": vendor_total}, request,
     )
     db.commit()
     columns = [field.key for field in fields if field.key != "bundle_components"]
-    return streaming_export_response(rows, columns + ["bundle_components", "vendor_devices"], format, "software")
+    def rows(export_db: Session):
+        export_fields = get_entity_fields(export_db, "software")
+        query = _query_software(export_db, search, latest_only)
+        query = query.options(selectinload(Software.vendor_devices)
+                              .selectinload(VendorDevice.component_support)
+                              .joinedload(VendorDeviceComponentSupport.component))
+        result = export_db.scalars(query.order_by(Software.name, Software.created_at, Software.id)
+                                   .execution_options(yield_per=100))
+        for batch in result.partitions(100):
+            annotated = _annotate(export_db, list(batch))
+            for item, output in zip(batch, annotated):
+                yield {
+                    **project_fields(output.model_dump(mode="json"), export_fields, "misc_data"),
+                    "bundle_components": [part.model_dump(mode="json") for part in output.bundle_components],
+                    "vendor_devices": _vendor_device_rows(item),
+                }
+    return streaming_export_response(database_export_rows(rows),
+                                     columns + ["bundle_components", "vendor_devices"], format, "software")
 
 
 @router.get("/template")

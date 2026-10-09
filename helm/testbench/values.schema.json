@@ -456,6 +456,14 @@
     "backend": {
       "type": "object",
       "properties": {
+        "auditCleanup": {
+          "type": "object",
+          "properties": {
+            "deleteDeviceChangelogs": {
+              "type": "boolean"
+            }
+          }
+        },
         "image": {
           "$ref": "#/$defs/image"
         }

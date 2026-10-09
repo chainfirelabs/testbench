@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "testbench.fullname" . }}-audit-cleanup
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+spec:
+  schedule: "17 2 * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: {app.kubernetes.io/name: testbench, app.kubernetes.io/component: audit-cleanup, app.kubernetes.io/instance: {{ .Release.Name }}}
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 12 }}
+          containers:
+            - name: audit-cleanup
+              image: {{ include "testbench.image" (dict "root" $ "image" .Values.backend.image) }}
+              imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.backend.image) }}
+              command: ["/usr/bin/python3", "-m", "app.audit_cleanup_job"]
+              env:
+                {{- include "testbench.databaseEnv" . | nindent 16 }}
+                - name: TB_AUDIT_DELETE_DEVICE_CHANGELOGS
+                  value: {{ .Values.backend.auditCleanup.deleteDeviceChangelogs | quote }}
+              resources:
+                requests: {cpu: 20m, memory: 64Mi}
+                limits: {memory: 256Mi}
+              securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}

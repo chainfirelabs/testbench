@@ -38,7 +38,7 @@ from ..services.changelog import changelog_entries
 from ..services.checkout import overdue_clause, today
 from ..services.compat import compatible_software
 from ..services.hooks import emit_status_change
-from ..services.io import download_response, streaming_export_response, parse_import, strip_nulls, template_csv
+from ..services.io import database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
 from ..services.device_info import DockerError, launch_device_info, missing_required_fields
@@ -706,19 +706,42 @@ def export_devices(
         {**dynamic, "device_type": device_type, "online": online, "overdue": overdue},
         search,
     )
-    items = db.scalars(q.order_by(Device.created_at)).all()
+    count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     resolved = _resolve_device_type(db, device_type, allow_disabled=True) if device_type and device_type != "uncategorized" else None
     # An unscoped export represents the fleet, not just its global schema.
     effective_mode = "all" if columns_mode == "type" and device_type is None else columns_mode
     columns, projector = _export_shape(db, resolved, effective_mode)
-    rows = [projector(device) for device in items]
+    expand_misc = expand_misc and "misc_data" in columns
     if expand_misc:
-        rows, columns = _expand_misc_columns(rows, columns)
+        reserved = ENVELOPE_KEYS | IMPORT_IGNORED
+        known = set(columns)
+        expanded: set[str] = set()
+        residual = False
+        for device in db.scalars(q.order_by(Device.created_at, Device.id).execution_options(yield_per=500)):
+            for key in (projector(device).get("misc_data") or {}):
+                if key in reserved:
+                    residual = True
+                elif key not in known:
+                    expanded.add(key)
+        columns = ([column for column in columns if column != "misc_data"]
+                   + sorted(expanded) + (["misc_data"] if residual else []))
     log_action(db, user, "export.devices", "device", None,
-               {"format": format, "count": len(rows), "columns": effective_mode,
+               {"format": format, "count": count, "columns": effective_mode,
                 "expand_misc": expand_misc}, request)
     db.commit()
-    return streaming_export_response(rows, columns, format, "devices")
+    def rows(export_db: Session):
+        query = _query_devices(
+            export_db,
+            {**dynamic, "device_type": device_type, "online": online, "overdue": overdue},
+            search,
+        )
+        export_type = (_resolve_device_type(export_db, device_type, allow_disabled=True)
+                       if device_type and device_type != "uncategorized" else None)
+        _, export_projector = _export_shape(export_db, export_type, effective_mode)
+        for device in export_db.scalars(query.order_by(Device.created_at, Device.id).execution_options(yield_per=500)):
+            row = export_projector(device)
+            yield _expand_misc_row(row) if expand_misc else row
+    return streaming_export_response(database_export_rows(rows), columns, format, "devices")
 
 
 def _expand_misc_columns(rows: list[dict], columns: list[str]) -> tuple[list[dict], list[str]]:
@@ -754,24 +777,24 @@ def _expand_misc_columns(rows: list[dict], columns: list[str]) -> tuple[list[dic
                 expanded.add(key)
 
     for row in rows:
-        misc = row.pop("misc_data", None) or {}
-        for key, value in misc.items():
-            if key in reserved:
-                continue
-            # A key that already has a column of its own was filled from this
-            # same document, so the two agree; never overwrite what the layout
-            # resolved with a copy of it.
-            if row.get(key) in (None, ""):
-                row[key] = value
-        # Only the devices that actually have one carry the residual column;
-        # the rest leave the cell blank rather than showing an empty object.
-        held_back = {key: value for key, value in misc.items() if key in reserved}
-        if held_back:
-            row["misc_data"] = held_back
+        _expand_misc_row(row)
 
     columns = ([column for column in columns if column != "misc_data"]
                + sorted(expanded) + (["misc_data"] if residual else []))
     return rows, columns
+
+
+def _expand_misc_row(row: dict) -> dict:
+    """Lift one row's misc values after the export-wide columns are known."""
+    reserved = ENVELOPE_KEYS | IMPORT_IGNORED
+    misc = row.pop("misc_data", None) or {}
+    for key, value in misc.items():
+        if key not in reserved and row.get(key) in (None, ""):
+            row[key] = value
+    held_back = {key: value for key, value in misc.items() if key in reserved}
+    if held_back:
+        row["misc_data"] = held_back
+    return row
 
 
 def _export_shape(db: Session, device_type: DeviceType | None, mode: str):
