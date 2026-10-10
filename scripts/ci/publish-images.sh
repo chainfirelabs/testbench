@@ -1,6 +1,7 @@
 #!/bin/sh
 # Shared GitHub Actions / GitLab CI publisher; no .env or Compose dependency.
 set -eu
+publish_latest=true
 
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
   default_registry=ghcr.io
@@ -17,6 +18,9 @@ elif [ "${GITLAB_CI:-}" = true ]; then
   commit=$CI_COMMIT_SHA
   source_url=$CI_PROJECT_URL
   release_tag=${CI_COMMIT_TAG:-}
+  if [ -z "$release_tag" ] && [ -n "${CI_COMMIT_BRANCH:-}" ] && [ "$CI_COMMIT_BRANCH" != "${CI_DEFAULT_BRANCH:-}" ]; then
+    publish_latest=false
+  fi
   default_user=$CI_REGISTRY_USER
   default_password=$CI_REGISTRY_PASSWORD
 else
@@ -44,8 +48,8 @@ password=${TB_REGISTRY_PASSWORD:-$default_password}
 : "${password:?Registry password is required}"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-# Branch builds use the product version too, so chart tags and the frontend
-# label match the images published from main. Explicit release tags take priority.
+# The chart version labels the frontend and is published as the image tag for
+# default-branch and feature-branch builds. Explicit release tags take priority.
 version=$(sed -n 's/^appVersion: *"\([^"]*\)" *$/\1/p' "$repo_root/helm/testbench/Chart.yaml")
 if [ -n "$release_tag" ]; then
   version=${release_tag#v}
@@ -95,7 +99,7 @@ for component in backend frontend mcp network-scan device-info reboot; do
   docker push "$image:sha-$commit"
   docker tag "$image:sha-$commit" "$image:$version"
   docker push "$image:$version"
-  if [ -z "$release_tag" ]; then
+  if [ -z "$release_tag" ] && [ "$publish_latest" = true ]; then
     docker tag "$image:sha-$commit" "$image:latest"
     docker push "$image:latest"
   fi

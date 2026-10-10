@@ -35,14 +35,21 @@ images such as PostgreSQL are not built by these Dockerfiles and are unchanged.
 
 ## Build triggers and tags
 
-Default-branch pushes publish the chart's `appVersion` (currently `1.9.10`),
+Default-branch pushes publish the chart's `appVersion` (currently `1.10.0`),
 `latest`, and `sha-<full-commit-SHA>` tags. Rebuilding the same product version
 updates its version tag; use a digest or SHA tag to pin an exact build.
 Pushing a version tag such as `v1.7.3` publishes `1.7.3` and the SHA tag.
 Prerelease tags such as `v1.6.8-rc.1` are supported. Version-tag builds do not
-change `latest`. Builds use the runner's native architecture (GitHub's configured
-runner is Linux amd64). Feature branches and pull/merge requests do not publish.
-Manual runs are available on the default branch or version tags.
+change `latest`. GitLab pushes to `feature/*` publish
+the chart's `appVersion` and `sha-<full-commit-SHA>` tags. A feature build updates
+the same GitLab registry version tag as a default-branch or release build, so
+the most recent push of each image determines what `1.10.0` points to there.
+Feature builds do not update `latest`. The SHA tag identifies an exact build.
+GitHub continues to publish only its default branch and version tags. Builds
+use the runner's native architecture (GitHub's configured runner is Linux
+amd64). Merge request pipelines do not publish.
+Manual GitLab runs are available on the default branch, feature branches, and
+version tags.
 
 Each run builds backend, frontend, mcp, network-scan, device-info, and reboot
 before pushing any images. A build/push failure fails the job; registry pushes
@@ -61,6 +68,16 @@ See [GitHub's publishing documentation](https://docs.github.com/en/actions/tutor
 
 Enable the project's container registry. The pipeline publishes to
 `$CI_REGISTRY_IMAGE/<component>` using GitLab's built-in registry credentials.
+For example, a successful pipeline for `feature/dashboard-widgets-plan` makes
+`$CI_REGISTRY_IMAGE/frontend:1.10.0` available when the chart's `appVersion` is
+`1.10.0`.
+Use the pipeline's commit SHA tag when you need to reproduce a particular build.
+To pull a private image locally, authenticate to `$CI_REGISTRY` with a GitLab
+account or token that has `read_registry`, then run
+`docker pull "$CI_REGISTRY_IMAGE/frontend:1.10.0"`
+with the actual registry image path from the GitLab project. Protected CI/CD
+variables are unavailable to unprotected feature branches; configure any
+required runner or mirror variables accordingly.
 The job needs a Docker executor runner configured for privileged Docker-in-Docker
 with TLS and a shared `/certs/client` volume, for example in runner `config.toml`:
 
@@ -201,11 +218,19 @@ The chart defaults to GHCR: `global.imageRegistry: ghcr.io` with repositories
 such as `chainfirelabs/testbench/backend` and `chainfirelabs/testbench/frontend`.
 These match GitHub workflow publications from the `chainfirelabs/testbench`
 repository. For a different GitHub owner/project, update the component repository
-paths accordingly. The default tag is `1.9.10`; publish Git tag `v1.9.10` to produce
+paths accordingly. The default tag is `1.10.0`; publish Git tag `v1.10.0` to produce
 that image tag, or override the chart tags to another published version.
 
 GitLab defaults to its project registry. Override `global.imageRegistry` and,
 if its project path differs, the component repository paths to use those images.
+The chart's default image tags match its `appVersion`, so a successful feature
+build can use those defaults after pointing the chart at the GitLab registry.
+Use `sha-<full-commit-SHA>` for all six application images to pin an exact
+pipeline. Add `global.imagePullSecrets` when the GitLab registry is private.
+Helm does not change the image tag based on the checked-out Git branch.
+When reusing the version tag, set `global.imagePullPolicy: Always` and restart
+the application Deployments after the pipeline completes. An unchanged image
+tag alone does not cause Kubernetes to replace running Pods.
 The external research image must be published/mirrored separately and configured
 under each plugin's `researchImage`; the workflow does not build it. Set
 `researchImage.registry` to its registry to override the global default, or
@@ -235,6 +260,6 @@ passes the release version through Docker's `VERSION` build argument, which the
 frontend build exposes as `VITE_APP_VERSION`. The same value labels the image;
 changing a Helm image tag does not rewrite a previously built frontend.
 
-For a direct image build, pass `--build-arg VERSION=1.9.10`. For a local frontend
-build or dev server, set `VITE_APP_VERSION=1.9.10` when running `npm run build` or
+For a direct image build, pass `--build-arg VERSION=1.10.0`. For a local frontend
+build or dev server, set `VITE_APP_VERSION=1.10.0` when running `npm run build` or
 `npm run dev` in `src/frontend`. Without a version, the label is `TestBench dev`.

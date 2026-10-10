@@ -80,13 +80,16 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
         </div>
 
         <nav class="drawer-nav">
-          <details class="drawer-group" :open="$route.path === '/' || $route.path.startsWith('/devices')">
+          <router-link v-for="l in links.filter((link) => link.to === '/')" :key="l.to" :to="l.to" class="drawer-link">
+            {{ l.label }}
+          </router-link>
+          <details class="drawer-group" :open="$route.path.startsWith('/devices')">
             <summary class="drawer-link">Devices</summary>
             <router-link v-for="l in deviceLinks" :key="l.to" :to="l.to" class="drawer-link drawer-sublink">
               {{ l.label }}
             </router-link>
           </details>
-          <router-link v-for="l in links" :key="l.to" :to="l.to" class="drawer-link">
+          <router-link v-for="l in links.filter((link) => link.to !== '/')" :key="l.to" :to="l.to" class="drawer-link">
             {{ l.label }}
           </router-link>
           <!-- The top bar collapses to the hamburger on a phone, and the bell

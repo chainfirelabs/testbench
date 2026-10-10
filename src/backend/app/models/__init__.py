@@ -12,6 +12,7 @@ from .test import Test
 from .saved_filter import SavedFilter
 from .audit import AuditLog
 from .audit_retention import AuditRetention
+from .dashboard_layout import DashboardLayout
 from .audit_cleanup_job import AuditCleanupJob
 from .notification import Notification
 from .entity_field import EntityField
@@ -41,6 +42,7 @@ __all__ = [
     "SavedFilter",
     "AuditLog",
     "AuditRetention",
+    "DashboardLayout",
     "AuditCleanupJob",
     "Notification",
     "EntityField",

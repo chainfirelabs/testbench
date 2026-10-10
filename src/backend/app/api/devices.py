@@ -467,6 +467,20 @@ def _query_devices(db: Session, filters: dict, search: str | None = None) -> sel
                 q = q.where(Device.device_type_id.is_(None))
             else:
                 q = q.join(DeviceType).where(DeviceType.key == value)
+        elif name == "scan_state":
+            if value == "never_scanned":
+                q = q.where(Device.last_scanned_at.is_(None))
+            elif value == "online":
+                q = q.where(Device.last_scanned_at.is_not(None), Device.online_status.is_(True))
+            elif value == "offline":
+                q = q.where(Device.last_scanned_at.is_not(None), Device.online_status.is_not(True))
+        elif name == "make_group":
+            if value == "Unknown":
+                q = q.where(or_(Device.make.is_(None), func.btrim(Device.make).in_(("", "Unknown"))))
+            else:
+                q = q.where(func.btrim(Device.make) == value)
+        elif name == "status" and value == "available":
+            q = q.where(func.coalesce(func.nullif(Device.status, ""), "available") == value)
         elif name in catalog and catalog[name].storage in {"data", "column"}:
             field = catalog[name]
             expression = device_field_expression(field)

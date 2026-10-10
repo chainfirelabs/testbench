@@ -8,6 +8,7 @@ from sqlalchemy import select
 from .api import (
     audit,
     auth,
+    dashboard,
     devices,
     device_schema,
     device_types,
@@ -123,6 +124,7 @@ app.add_middleware(
 
 API_PREFIX = "/api/v1"
 app.include_router(auth.router, prefix=API_PREFIX)
+app.include_router(dashboard.router, prefix=API_PREFIX)
 app.include_router(search.router, prefix=API_PREFIX)
 app.include_router(suggestions.router, prefix=API_PREFIX)
 app.include_router(devices.router, prefix=API_PREFIX)

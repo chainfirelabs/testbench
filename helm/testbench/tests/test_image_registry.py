@@ -121,8 +121,9 @@ class ImageRegistryTests(unittest.TestCase):
         values['global']['imagePullPolicy'] = 'Always'
         result = render(values)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Six controllers/deployments plus two database-schema Jobs.
-        self.assertEqual(result.stdout.count('imagePullPolicy: Always'), 8)
+        # Six controllers/deployments, two audit-cleanup workloads, and two
+        # database-schema Job containers.
+        self.assertEqual(result.stdout.count('imagePullPolicy: Always'), 10)
         for variable in (
             'TB_SCAN_WORKER_IMAGE_PULL_POLICY',
             'TB_INFO_RESEARCH_IMAGE_PULL_POLICY',

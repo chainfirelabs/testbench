@@ -29,6 +29,7 @@ class PublisherTests(unittest.TestCase):
                 env.update(GITLAB_CI="true", CI_REGISTRY="registry.gitlab.example",
                            CI_REGISTRY_IMAGE="registry.gitlab.example/group/project",
                            CI_COMMIT_SHA=SHA, CI_PROJECT_URL="https://gitlab.example/group/project",
+                           CI_COMMIT_BRANCH="main", CI_DEFAULT_BRANCH="main",
                            CI_REGISTRY_USER="ci-user", CI_REGISTRY_PASSWORD="test-password")
             else:
                 env.update(GITHUB_ACTIONS="true", GITHUB_REPOSITORY="Owner/Project",
@@ -64,6 +65,20 @@ class PublisherTests(unittest.TestCase):
             pushes = [c[1] for c in calls if c[0] == "push"]
             self.assertEqual(sum(p.endswith(f":{version}") for p in pushes), 6)
             self.assertFalse(any(p.endswith(":latest") for p in pushes))
+
+    def test_gitlab_feature_branch_publishes_version_and_sha_without_latest(self):
+        result, calls = self.run_publisher({
+            "CI_COMMIT_BRANCH": "feature/dashboard-widgets-plan",
+        }, gitlab=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pushes = [c[1] for c in calls if c[0] == "push"]
+        version = (SCRIPT.parents[2] / "helm/testbench/Chart.yaml").read_text().split('appVersion: "')[1].split('"')[0]
+        self.assertEqual(len(pushes), 12)
+        for component in ["backend", "frontend", "mcp", "network-scan", "device-info", "reboot"]:
+            image = f"registry.gitlab.example/group/project/{component}"
+            self.assertIn(f"{image}:sha-{SHA}", pushes)
+            self.assertIn(f"{image}:{version}", pushes)
+            self.assertNotIn(f"{image}:latest", pushes)
 
     def test_custom_registry(self):
         result, calls = self.run_publisher({"TB_REGISTRY": "internal:5000/", "TB_IMAGE_PREFIX": "internal:5000/mirror/testbench/", "TB_REGISTRY_USER": "robot", "TB_REGISTRY_PASSWORD": "test-password"})

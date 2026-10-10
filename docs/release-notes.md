@@ -1,5 +1,25 @@
 # Release notes
 
+## Unreleased
+
+- Administrators can edit the shared Home dashboard: add or remove the Fleet
+  summary widget, change its title, description, width, and breakdown bar, and
+  save or cancel. Other users can view the saved layout but cannot change it.
+- Dashboard edits are audited and use a revision check to prevent one admin
+  from silently overwriting another's changes. Migration 0015 adds the shared
+  dashboard layout table.
+
+## 1.10.0
+
+- Home now opens a dashboard with a live Fleet summary widget showing total,
+  online, offline, and never-scanned device counts. The summary can be refreshed
+  without reloading the page.
+- All Devices has moved to `/devices`, with Home and Devices links in desktop and
+  mobile navigation. Device detail and device-type links keep their existing paths.
+- This is the dashboard layout proof of concept. Widget selection and editing
+  remain planned; the dashboard is read-only for all users in this release.
+- No database migration is required.
+
 ## 1.9.10
 
 - Exports for devices, tests, software, vendor claims, and audit logs honor the

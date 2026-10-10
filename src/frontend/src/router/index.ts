@@ -5,6 +5,13 @@ const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: () => import('../views/LoginView.vue') },
   {
     path: '/',
+    name: 'home',
+    component: () => import('../views/DashboardView.vue'),
+    meta: { title: 'Home' },
+  },
+  {
+    path: '/devices',
+    name: 'devices',
     component: () => import('../views/DevicesView.vue'),
     meta: { title: 'Devices' },
   },

@@ -40,6 +40,16 @@ import { remoteTableParams } from '../remoteTable'
 
 const auth = useAuthStore()
 const route = useRoute()
+const dashboardFilters = computed(() => ({
+  scan_state: typeof route.query.scan_state === 'string' ? route.query.scan_state : undefined,
+  make_group: typeof route.query.make_group === 'string' ? route.query.make_group : undefined,
+  status: typeof route.query.status === 'string' ? route.query.status : undefined,
+}))
+const dashboardFilterLabel = computed(() => [
+  dashboardFilters.value.scan_state?.split('_').join(' '),
+  dashboardFilters.value.make_group && `Make: ${dashboardFilters.value.make_group}`,
+  dashboardFilters.value.status && `Status: ${dashboardFilters.value.status.split('_').join(' ')}`,
+].filter(Boolean).join(' · '))
 const rows = ref<any[]>([])
 const toast = ref('')
 const toastError = ref(false)
@@ -285,6 +295,7 @@ async function loadRemoteDevices(request: RemoteTableRequest) {
   const params = remoteTableParams(request, {
     device_type: activeTypeKey.value || undefined,
     overdue: showOverdueOnly.value || undefined,
+    ...dashboardFilters.value,
   })
   if (!request.sortModel.length) {
     params.set('sort', 'unique_id')
@@ -1259,6 +1270,7 @@ watch(activeTypeKey, async () => {
 })
 
 watch(showOverdueOnly, () => reloadRows())
+watch(dashboardFilters, () => reloadRows())
 
 // Leaving the page ends the polling with it; nothing here outlives the view.
 onBeforeUnmount(() => {
@@ -1344,6 +1356,7 @@ onBeforeUnmount(() => {
         </OverflowMenu>
       </div>
     </div>
+    <p v-if="dashboardFilterLabel">Dashboard filter: {{ dashboardFilterLabel }} · <router-link to="/devices">Clear filter</router-link></p>
     <p v-if="loadProgress" role="status">
       Loading devices: {{ loadProgress.loaded }}<template v-if="loadProgress.total"> of {{ loadProgress.total }}</template>…
     </p>

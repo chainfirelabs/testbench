@@ -76,12 +76,13 @@ const deviceMenuOpen = ref(false)
  * navigation cannot drift apart.
  */
 const deviceLinks = computed<NavLink[]>(() => [
-  { to: '/', label: 'All Devices' },
+  { to: '/devices', label: 'All Devices' },
   ...deviceTypes.value.map((type) => ({ to: `/devices/type/${type.key}`, label: type.label })),
 ])
 
 const navLinks = computed<NavLink[]>(() => {
   const links: NavLink[] = [
+    { to: '/', label: 'Home' },
     { to: '/software', label: 'Software' },
     // "Claims", not "Devices": these are assertions a vendor makes, not
     // hardware this fleet owns, and the word is what tells a reader that
@@ -295,11 +296,12 @@ onBeforeUnmount(() => {
         <span class="brand-name">TestBench</span>
       </div>
       <nav class="nav">
+        <router-link v-for="l in navLinks.filter((link) => link.to === '/')" :key="l.to" :to="l.to">{{ l.label }}</router-link>
         <div class="device-menu">
           <button
             type="button"
             class="device-menu-trigger"
-            :class="{ active: route.path === '/' || route.path.startsWith('/devices') }"
+            :class="{ active: route.path.startsWith('/devices') }"
             :aria-expanded="deviceMenuOpen"
             @click="deviceMenuOpen = !deviceMenuOpen"
           >
@@ -309,7 +311,7 @@ onBeforeUnmount(() => {
             <router-link v-for="link in deviceLinks" :key="link.to" :to="link.to">{{ link.label }}</router-link>
           </div>
         </div>
-        <router-link v-for="l in navLinks" :key="l.to" :to="l.to">{{ l.label }}</router-link>
+        <router-link v-for="l in navLinks.filter((link) => link.to !== '/')" :key="l.to" :to="l.to">{{ l.label }}</router-link>
       </nav>
       <div class="spacer"></div>
       <button
