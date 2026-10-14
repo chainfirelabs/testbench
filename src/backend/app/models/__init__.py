@@ -25,6 +25,7 @@ from .device_schema import (
 )
 from .plugin_artifact import PluginArtifact, PluginResultReceipt
 from .plugin_run import PluginRun
+from .replication_tombstone import ReplicationTombstone
 from .ai_provider import AiProviderProfile, AiPluginDefault
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "PluginArtifact",
     "PluginResultReceipt",
     "PluginRun",
+    "ReplicationTombstone",
     "AiProviderProfile",
     "AiPluginDefault",
 ]

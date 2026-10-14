@@ -40,6 +40,15 @@ def render(values):
 
 @unittest.skipUnless(shutil.which('helm'), 'helm is required')
 class ImageRegistryTests(unittest.TestCase):
+    def test_object_storage_size_renders_as_decimal_integer(self):
+        for size in (1048576, 10485760):
+            with self.subTest(size=size):
+                values = copy.deepcopy(BASE)
+                values['backend'] = {'objectStorage': {'maxBytes': size}}
+                result = render(values)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f'TB_OBJECT_STORAGE_MAX_BYTES: "{size}"', result.stdout)
+
     def test_default_database_source_does_not_require_configmap(self):
         values = copy.deepcopy(BASE)
         values.pop('schema')

@@ -220,6 +220,20 @@
             }
           }
         },
+        "replication": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "mode": {"type": "string", "enum": ["push", "push_pull", "receive"]},
+            "peerUrl": {"type": "string"},
+            "intervalMinutes": {"type": "integer", "minimum": 0},
+            "token": {
+              "type": "object",
+              "properties": {"existingSecret": {"type": "string"}, "key": {"type": "string"}}
+            },
+            "image": {"$ref": "#/$defs/image"}
+          }
+        },
         "networkScan": {
           "type": "object",
           "properties": {
@@ -456,6 +470,15 @@
     "backend": {
       "type": "object",
       "properties": {
+        "objectStorage": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "url": {"type": "string"},
+            "bucket": {"type": "string"},
+            "maxBytes": {"type": "integer", "minimum": 1, "maximum": 10485760}
+          }
+        },
         "auditCleanup": {
           "type": "object",
           "properties": {

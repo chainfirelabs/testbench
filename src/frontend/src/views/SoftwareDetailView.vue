@@ -31,6 +31,8 @@ import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { groupBundleComponents } from '../bundleComponentGroups'
 import { componentSupportColumn } from '../vendorComponentSupport'
 import { componentSummaryLabel, type ComponentPanelState } from '../componentPanel'
+import { softwareVersionDeletionUrl } from '../softwareVersionDeletion'
+import { softwareSearchUrl } from '../globalSearch'
 
 const route = useRoute()
 const router = useRouter()
@@ -96,6 +98,7 @@ function onTestedGridReady() {
  */
 
 const versions = ref<any[]>([])
+const deletingVersion = ref(false)
 const showNewVersion = ref(false)
 const creatingVersion = ref(false)
 const newVersion = ref<Record<string, any>>({})
@@ -225,16 +228,43 @@ async function createComponent(values: Record<string, any>) {
 /**
  * Switch versions.
  *
- * The newest version lives at the bare /software/:name; older ones carry their
- * version in the URL. An unversioned row has nothing to put there, so it uses
- * the bare name too — a cold load of that link resolves to whichever version
- * is current, which is the one case the URL cannot express.
+ * The newest version lives at the bare /software/:name; older named versions
+ * carry their version in the URL. An older unversioned row uses its ID.
  */
 function goToVersion(v: any) {
-  const name = encodeURIComponent(v.name)
-  router.push(
-    v.is_latest || !v.version ? `/software/${name}` : `/software/${name}/${encodeURIComponent(v.version)}`,
-  )
+  router.push(softwareSearchUrl(v))
+}
+
+async function deleteVersion() {
+  const target = software.value
+  if (!target?.id || deletingVersion.value) return
+  deletingVersion.value = true
+  try {
+    const impact = await api<{ software_id: string; tests: number; vendor_claims: number; components: number }>(
+      `/software/${target.id}/deletion-impact`,
+    )
+    if (impact.software_id !== target.id) throw new Error('The selected version changed. Reload and try again.')
+    const label = `${target.name} ${versionLabel(target)}`
+    if (!confirm(
+      `Delete software version "${label}"?\n\n` +
+      `This also deletes ${impact.tests} test result(s), ${impact.vendor_claims} vendor claim(s), ` +
+      `and ${impact.components} component(s) belonging to this version.`,
+    )) return
+    await api(`/software/${target.id}`, { method: 'DELETE' })
+    const remaining = versions.value.filter((version) => version.id !== target.id)
+    const destination = softwareVersionDeletionUrl(target.name, target.version, remaining.length)
+    if (!remaining.length) {
+      await router.replace(destination)
+      return
+    }
+    if (route.params.id === target.name && !route.params.version) await load()
+    else await router.replace(destination)
+    showToast(`Deleted ${label}`)
+  } catch (e: any) {
+    showToast(e.message, true)
+  } finally {
+    deletingVersion.value = false
+  }
 }
 
 const tabs = [
@@ -1022,14 +1052,14 @@ async function load() {
       showToast(`${resolved.name} has no version ${wanted}; showing ${versionLabel(software.value)}`, true)
     }
 
-    // Normalise the URL to the software's name (the stable identity).
-    if (route.params.id !== software.value.name) {
-      const name = encodeURIComponent(software.value.name)
-      router.replace(
-        software.value.is_latest || !software.value.version
-          ? `/software/${name}`
-          : `/software/${name}/${encodeURIComponent(software.value.version)}`,
-      )
+    // Keep a stable name URL for named versions. An older unversioned row
+    // needs its ID because a bare name resolves to the current version.
+    const canonicalPath = softwareSearchUrl(software.value)
+    const canonicalId = software.value.is_latest || software.value.version
+      ? software.value.name : software.value.id
+    const canonicalVersion = software.value.is_latest ? '' : software.value.version
+    if (route.params.id !== canonicalId || String(route.params.version || '') !== canonicalVersion) {
+      router.replace(canonicalPath)
     }
     // The tested grid is not mounted until its tab opens. Fetch its total
     // independently so both count labels are correct on the Details tab.
@@ -1077,6 +1107,9 @@ onMounted(load)
           </button>
           <button v-if="!editing" class="btn" title="Add a component beneath this software version" @click="openNewComponent">
             + New component
+          </button>
+          <button v-if="!editing" class="btn btn-danger" :disabled="deletingVersion" @click="deleteVersion">
+            {{ deletingVersion ? 'Deleting…' : 'Delete version' }}
           </button>
           <template v-else>
             <button class="btn btn-primary" :disabled="saving" @click="saveEdit">

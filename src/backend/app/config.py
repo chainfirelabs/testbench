@@ -92,6 +92,22 @@ class Settings(BaseSettings):
     # Kubernetes Secret and never enter the database.
     credential_encryption_key: str = ""
 
+    # Optional, externally managed S3-compatible storage for device output.
+    # Credentials are supplied through the deployment environment, never the UI.
+    object_storage_enabled: bool = False
+    object_storage_url: str = ""
+    object_storage_bucket: str = ""
+    object_storage_access_key: str = ""
+    object_storage_secret_key: str = ""
+    object_storage_region: str = "us-east-1"
+    object_storage_max_bytes: int = 1_048_576
+
+    # Optional peer replication. The same token is installed on both peers;
+    # the controller uses it only for the narrow replication exchange API.
+    replication_enabled: bool = False
+    replication_mode: str = "push"
+    replication_token: str = ""
+
     # Helm's optional MCP deployment receives the same generated credential.
     # It authenticates only as a synthetic readonly identity and is never
     # persisted as a user or API-key row.

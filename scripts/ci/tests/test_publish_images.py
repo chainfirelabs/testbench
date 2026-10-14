@@ -47,10 +47,10 @@ class PublisherTests(unittest.TestCase):
             with self.subTest(gitlab=gitlab):
                 result, calls = self.run_publisher(gitlab=gitlab)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual([c[0] for c in calls[:7]], ["login"] + ["build"] * 6)
+                self.assertEqual([c[0] for c in calls[:8]], ["login"] + ["build"] * 7)
                 pushes = [c[1] for c in calls if c[0] == "push"]
-                self.assertEqual(len(pushes), 18)
-                for component in ["backend", "frontend", "mcp", "network-scan", "device-info", "reboot"]:
+                self.assertEqual(len(pushes), 21)
+                for component in ["backend", "frontend", "mcp", "network-scan", "device-info", "reboot", "replication"]:
                     self.assertIn(f"{prefix}/{component}:latest", pushes)
                     version = (SCRIPT.parents[2] / "helm/testbench/Chart.yaml").read_text().split('appVersion: "')[1].split('"')[0]
                     self.assertIn(f"{prefix}/{component}:{version}", pushes)
@@ -63,7 +63,7 @@ class PublisherTests(unittest.TestCase):
             result, calls = self.run_publisher({"CI_COMMIT_TAG": f"v{version}"}, gitlab=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             pushes = [c[1] for c in calls if c[0] == "push"]
-            self.assertEqual(sum(p.endswith(f":{version}") for p in pushes), 6)
+            self.assertEqual(sum(p.endswith(f":{version}") for p in pushes), 7)
             self.assertFalse(any(p.endswith(":latest") for p in pushes))
 
     def test_gitlab_feature_branch_publishes_version_and_sha_without_latest(self):
@@ -73,8 +73,8 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         pushes = [c[1] for c in calls if c[0] == "push"]
         version = (SCRIPT.parents[2] / "helm/testbench/Chart.yaml").read_text().split('appVersion: "')[1].split('"')[0]
-        self.assertEqual(len(pushes), 12)
-        for component in ["backend", "frontend", "mcp", "network-scan", "device-info", "reboot"]:
+        self.assertEqual(len(pushes), 14)
+        for component in ["backend", "frontend", "mcp", "network-scan", "device-info", "reboot", "replication"]:
             image = f"registry.gitlab.example/group/project/{component}"
             self.assertIn(f"{image}:sha-{SHA}", pushes)
             self.assertIn(f"{image}:{version}", pushes)
@@ -112,7 +112,7 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("image=registry.example.com/docker/moby/buildkit:buildx-stable-1", create)
         builder = create[create.index("--name") + 1]
         builds = [c for c in calls if c[:2] == ["buildx", "build"]]
-        self.assertEqual(len(builds), 6)
+        self.assertEqual(len(builds), 7)
         for build in builds:
             self.assertIn("--load", build)
             self.assertEqual(build[build.index("--builder") + 1], builder)
@@ -154,7 +154,7 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn(private_index, json.dumps(calls) + result.stdout + result.stderr)
             builds = [c for c in calls if c[0] == "build"]
-            self.assertEqual(len(builds), 6)
+            self.assertEqual(len(builds), 7)
             for build in builds:
                 expected = gitlab and not build[-1].endswith("/frontend")
                 self.assertEqual("--secret" in build, expected)
@@ -189,7 +189,7 @@ class PublisherTests(unittest.TestCase):
                 result, calls = self.run_publisher({"TB_HTTP_PROXY": proxy}, gitlab=gitlab)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 builds = [c for c in calls if c[0] == "build"]
-                self.assertEqual(len(builds), 6)
+                self.assertEqual(len(builds), 7)
                 for build in builds:
                     # Only the frontend build fetches npm and Debian packages.
                     expected = gitlab and build[-1].endswith("/frontend")
@@ -213,7 +213,7 @@ class PublisherTests(unittest.TestCase):
         # A secret the Dockerfile never mounts would silently leave pip on PyPI.
         contexts = {"backend": "src/backend", "frontend": "src/frontend", "mcp": "src/mcp-server",
                     "network-scan": "src/plugins/network-scan", "device-info": "src/plugins/device-info",
-                    "reboot": "src/plugins/reboot"}
+                    "reboot": "src/plugins/reboot", "replication": "src/plugins/replication"}
         for component, context in contexts.items():
             with self.subTest(component=component):
                 dockerfile = (SCRIPT.parents[2] / context / "Dockerfile").read_text()
@@ -227,7 +227,7 @@ class PublisherTests(unittest.TestCase):
         result, calls = self.run_publisher({"GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": "v1.7.3"})
         self.assertEqual(result.returncode, 0, result.stderr)
         pushes = [c[1] for c in calls if c[0] == "push"]
-        self.assertEqual(sum(p.endswith(":1.7.3") for p in pushes), 6)
+        self.assertEqual(sum(p.endswith(":1.7.3") for p in pushes), 7)
         self.assertFalse(any(p.endswith(":latest") for p in pushes))
 
 

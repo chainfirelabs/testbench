@@ -5,12 +5,16 @@ from sqlalchemy import Text, and_, cast, false, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Device, Test, Software, User, VendorDevice
-from ..schemas import DeviceOut, SearchResults, TestOut, SoftwareOut
+from ..models import Device, Test, Software, SoftwareComponent, User, VendorDevice
+from ..schemas import (
+    DeviceSearchOut, SearchResults, SoftwareBundleComponentOut, SoftwareSearchOut,
+    TestOut, TestedComponentSummary,
+)
 from ..services.device_schema import device_field_expression, union_field_map
 from ..services.entity_fields import entity_field_expression, get_entity_fields
 from .devices import device_out
 from .deps import get_current_user
+from .software import _annotate
 from .vendor_devices import CATALOG_TEXT_FILTERS, _catalog_rows
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -62,9 +66,10 @@ def global_search(
         software_json_match = and_(cast(Software._data, Text).ilike(like), software_json_match)
         test_json_match = and_(cast(Test._data, Text).ilike(like), test_json_match)
     device_match = or_(Device.unique_id.ilike(like), device_json_match) if device_terms else Device.unique_id.ilike(like)
-    software_match = software_json_match if software_terms else Software.id.ilike(like)
-    test_match = or_(Device.unique_id.ilike(like), Software.name.ilike(like),
-                     test_json_match)
+    component_match = or_(SoftwareComponent.name.ilike(like), SoftwareComponent.version.ilike(like))
+    matching_component_ids = select(SoftwareComponent.software_id).where(component_match)
+    software_match = or_(software_json_match, Software.id.in_(matching_component_ids))
+    test_match = or_(device_match, Software.name.ilike(like), test_json_match)
     device_q = (
         select(Device)
         .where(device_match)
@@ -105,9 +110,47 @@ def global_search(
     tests = db.scalars(tests_q.limit(limit)).all()
     vendor_pairs = [tuple(row) for row in db.execute(vendor_q.limit(limit)).all()]
 
+    software_results = [SoftwareSearchOut.model_validate(row) for row in _annotate(db, software)]
+    if software_results:
+        matching = db.scalars(select(SoftwareComponent).where(
+            SoftwareComponent.software_id.in_([row.id for row in software_results]), component_match,
+        ).order_by(SoftwareComponent.position, SoftwareComponent.id)).all()
+        by_software = {row.id: row for row in software_results}
+        for component in matching:
+            by_software[component.software_id].matching_components.append(SoftwareBundleComponentOut(
+                id=component.id, name=component.name, version=component.version,
+                required=component.required, position=component.position,
+            ))
+
+    device_results = [DeviceSearchOut.model_validate(device_out(db, device, {})) for device in devices]
+    if device_results:
+        # Three recent component-linked runs per device keep the search dropdown
+        # useful even for devices with years of test history.
+        ranked = select(
+            Test.id.label("test_id"), Test.device_id, Test.outcome.label("outcome"),
+            SoftwareComponent.name.label("component_name"),
+            SoftwareComponent.version.label("component_version"),
+            Software.name.label("software_name"), Software.version.label("software_version"),
+            func.row_number().over(
+                partition_by=Test.device_id,
+                order_by=(Test.created_at.desc(), Test.id.desc()),
+            ).label("rank"),
+        ).join(SoftwareComponent, Test.component_id == SoftwareComponent.id).join(
+            Software, Test.software_id == Software.id,
+        ).where(Test.device_id.in_([device.id for device in device_results])).subquery()
+        by_device = {device.id: device for device in device_results}
+        for row in db.execute(select(ranked).where(ranked.c.rank <= 3).order_by(
+            ranked.c.device_id, ranked.c.rank,
+        )):
+            by_device[row.device_id].tested_components.append(TestedComponentSummary(
+                test_id=row.test_id, name=row.component_name, version=row.component_version,
+                software_name=row.software_name, software_version=row.software_version,
+                outcome=row.outcome,
+            ))
+
     return SearchResults(
-        devices=[device_out(db, d, {}) for d in devices],
-        software=[SoftwareOut.model_validate(t) for t in software],
+        devices=device_results,
+        software=software_results,
         tests=[TestOut.model_validate(t) for t in tests],
         vendor_devices=_catalog_rows(db, vendor_pairs),
         devices_total=_count(db, device_q) if len(devices) == limit else len(devices),

@@ -1,0 +1,50 @@
+{{- if and .Values.plugins.replication.enabled (ne .Values.plugins.replication.mode "receive") }}
+{{- if not (has .Values.plugins.replication.mode (list "push" "push_pull")) }}{{- fail "plugins.replication.mode must be push, push_pull, or receive" }}{{- end }}
+{{- $peer := required "plugins.replication.peerUrl is required" .Values.plugins.replication.peerUrl }}
+{{- if not (hasPrefix "https://" $peer) }}{{- fail "plugins.replication.peerUrl must use HTTPS" }}{{- end }}
+{{- $tokenSecret := required "plugins.replication.token.existingSecret is required" .Values.plugins.replication.token.existingSecret }}
+{{- $pluginSecret := required "plugins.sharedSecret.existingSecret is required" .Values.plugins.sharedSecret.existingSecret }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "testbench.fullname" . }}-replication
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: testbench-replication, app.kubernetes.io/instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "testbench.fullname" . }}-replication
+  labels: {{- include "testbench.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: testbench-replication, app.kubernetes.io/instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: testbench-replication, app.kubernetes.io/instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      containers:
+        - name: controller
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.replication.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.replication.image) }}
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: TB_TESTBENCH_URL, value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}}
+            - {name: TB_REPLICATION_PEER_URL, value: {{ $peer | quote }}}
+            - {name: TB_REPLICATION_MODE, value: {{ .Values.plugins.replication.mode | quote }}}
+            - {name: TB_REPLICATION_INTERVAL_MINUTES, value: {{ .Values.plugins.replication.intervalMinutes | quote }}}
+            - name: TB_REPLICATION_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ $tokenSecret }}, key: {{ .Values.plugins.replication.token.key }}}}
+            - name: TB_PLUGIN_SHARED_SECRET
+              valueFrom: {secretKeyRef: {name: {{ $pluginSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
+          readinessProbe: {httpGet: {path: /plugin/v1/health, port: http}, periodSeconds: 10}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, capabilities: {drop: ["ALL"]}}
+{{- end }}

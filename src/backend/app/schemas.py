@@ -249,6 +249,23 @@ class SoftwareOut(SoftwareBase):
     updated_at: datetime | None = None
 
 
+class SoftwareSearchOut(SoftwareOut):
+    matching_components: list[SoftwareBundleComponentOut] = Field(default_factory=list)
+
+
+class TestedComponentSummary(BaseModel):
+    test_id: str
+    name: str
+    version: str
+    software_name: str
+    software_version: str
+    outcome: str
+
+
+class DeviceSearchOut(DeviceOut):
+    tested_components: list[TestedComponentSummary] = Field(default_factory=list)
+
+
 class SoftwareVersionCreate(BaseModel):
     """Add a version to an existing software, starting from another version."""
 
@@ -868,8 +885,8 @@ class DeviceInfoLaunchOut(BaseModel):
 # ---------- Global search ----------
 
 class SearchResults(BaseModel):
-    devices: list[DeviceOut]
-    software: list[SoftwareOut]
+    devices: list[DeviceSearchOut]
+    software: list[SoftwareSearchOut]
     tests: list[TestOut]
     vendor_devices: list["VendorDeviceCatalogOut"] = Field(default_factory=list)
     # Totals ignoring the per-group limit, so the UI can say "showing 50 of 132".

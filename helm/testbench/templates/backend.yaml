@@ -44,7 +44,11 @@ spec:
             - name: TB_MCP_INTERNAL_TOKEN
               valueFrom: {secretKeyRef: {name: {{ include "testbench.fullname" . }}-mcp-internal, key: token}}
             {{- end }}
-            {{- if or .Values.plugins.networkScan.enabled .Values.plugins.deviceInfo.enabled .Values.plugins.reboot.enabled }}
+            {{- if .Values.plugins.replication.enabled }}
+            - name: TB_REPLICATION_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ required "plugins.replication.token.existingSecret is required" .Values.plugins.replication.token.existingSecret }}, key: {{ .Values.plugins.replication.token.key }}}}
+            {{- end }}
+            {{- if or .Values.plugins.networkScan.enabled .Values.plugins.deviceInfo.enabled .Values.plugins.reboot.enabled (and .Values.plugins.replication.enabled (ne .Values.plugins.replication.mode "receive")) }}
             - name: TB_PLUGIN_SHARED_SECRET
               valueFrom: {secretKeyRef: {name: {{ required "plugins.sharedSecret.existingSecret is required when a plugin is enabled" .Values.plugins.sharedSecret.existingSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
             {{- end }}

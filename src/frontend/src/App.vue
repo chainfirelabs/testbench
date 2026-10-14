@@ -7,6 +7,7 @@ import NavDrawer, { type NavLink } from './components/NavDrawer.vue'
 import { PERMISSION, useAuthStore } from './stores/auth'
 import { useNotificationsStore } from './stores/notifications'
 import { deviceTypes, loadDeviceTypes } from './deviceTypes'
+import { componentSearchLabel, deviceSearchUrl, softwareSearchUrl, testSearchUrl } from './globalSearch'
 
 const buildVersion = (import.meta.env.VITE_APP_VERSION || 'dev').trim().replace(/^v/, '')
 const versionLabel = buildVersion === 'dev' ? 'TestBench dev' : `TestBench v${buildVersion}`
@@ -98,6 +99,7 @@ const navLinks = computed<NavLink[]>(() => {
   if (auth.can(PERMISSION.auditView)) links.push({ to: '/audit', label: 'Audit Log' })
   if (auth.can(PERMISSION.usersManage)) links.push({ to: '/users', label: 'Users' })
   if (auth.can(PERMISSION.settingsManage)) links.push({ to: '/settings/ai', label: 'AI Providers' })
+  if (auth.can(PERMISSION.settingsManage)) links.push({ to: '/settings/replication', label: 'Replication' })
   if (auth.can(PERMISSION.schemaManage)) links.push({ to: '/settings/schema', label: 'Schema' })
   return links
 })
@@ -356,10 +358,14 @@ onBeforeUnmount(() => {
                 v-for="d in results.devices"
                 :key="d.id"
                 class="search-item"
-                @click="openResult(`/devices/${d.unique_id}`)"
+                @click="openResult(deviceSearchUrl(d))"
               >
                 <span class="search-item-title">{{ d.unique_id }}</span>
                 <span class="search-item-sub">{{ [d.make, d.model, d.location].filter(Boolean).join(' · ') }}</span>
+                <span v-if="d.tested_components?.length" class="search-item-sub">
+                  Tested components: {{ d.tested_components.map(componentSearchLabel).join(', ') }}
+                  · Open tests
+                </span>
               </button>
             </div>
             <div v-if="results.software.length" class="search-group">
@@ -370,10 +376,10 @@ onBeforeUnmount(() => {
                 v-for="t in results.software"
                 :key="t.id"
                 class="search-item"
-                @click="openResult(`/software/${encodeURIComponent(t.name)}`)"
+                @click="openResult(softwareSearchUrl(t))"
               >
                 <span class="search-item-title">{{ t.name }}</span>
-                <span class="search-item-sub">{{ t.version ? `v${t.version}` : '' }}</span>
+                <span class="search-item-sub">{{ t.version ? `v${t.version}` : '(unversioned)' }}<template v-if="t.matching_components?.length"> · Component: {{ t.matching_components.map(componentSearchLabel).join(', ') }}</template></span>
               </button>
             </div>
             <div v-if="results.vendor_devices.length" class="search-group">
@@ -400,10 +406,13 @@ onBeforeUnmount(() => {
                 v-for="t in results.tests"
                 :key="t.id"
                 class="search-item"
-                @click="openResult(`/tests`)"
+                @click="openResult(testSearchUrl(t))"
               >
                 <span class="search-item-title">{{ t.software_name }} on {{ t.device_unique_id }}</span>
-                <span class="search-item-sub">{{ t.outcome }} · {{ t.tag }}{{ t.run_at ? ' · ' + new Date(t.run_at).toLocaleString() : '' }}</span>
+                <span class="search-item-sub">
+                  {{ t.software_version || '(unversioned)' }}<template v-if="t.component_name"> · Component: {{ t.component_name }}{{ t.component_version ? ` ${t.component_version}` : '' }}</template>
+                  · {{ t.outcome }} · {{ t.tag }}{{ t.run_at ? ' · ' + new Date(t.run_at).toLocaleString() : '' }}
+                </span>
               </button>
             </div>
           </template>

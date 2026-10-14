@@ -60,6 +60,7 @@ from ..services.device_schema import (
 )
 from ..services.scan import manager, scan_device
 from ..services.permissions import AUDIT_VIEW
+from ..services.object_storage import OutputError, read_ascii_output
 from .deps import get_current_user, holds, require_devices_edit
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -1003,6 +1004,30 @@ def get_device(device_id: str, db: Session = Depends(get_db), user: User = Depen
     detail.verified_tests = [TestOut.model_validate(t) for t in verified]
     detail.all_tests = [TestOut.model_validate(t) for t in all_tests]
     return detail
+
+
+@router.get("/{device_id}/output")
+def get_device_output(
+    device_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Fetch the configured object's ASCII content when the user opens it."""
+    if not settings.object_storage_enabled:
+        raise HTTPException(status_code=404, detail="Object storage is disabled")
+    device = _get_device(db, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not any(
+        field.key == "output" and field.visible and field.protected
+        for field in get_effective_fields(db, device.device_type_id)
+    ):
+        raise HTTPException(status_code=404, detail="Output is not assigned to this device type")
+    value = device.data.get("output")
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=404, detail="This device has no output URL")
+    try:
+        return {"text": read_ascii_output(value)}
+    except OutputError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
 
 
 @router.get("/{device_id}/actions")

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, toRaw } from 'vue'
+import { useRoute } from 'vue-router'
 import DataTable, { type RemoteTableRequest } from '../components/DataTable.vue'
 import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
@@ -24,6 +25,7 @@ import { groupBundleComponents } from '../bundleComponentGroups'
 import { componentSummaryLabel, type ComponentPanelState } from '../componentPanel'
 
 const auth = useAuthStore()
+const route = useRoute()
 const rows = ref<any[]>([])
 const toast = ref('')
 const toastError = ref(false)
@@ -686,7 +688,14 @@ async function onImportFile(e: Event) {
   }
 }
 
-onMounted(() => Promise.all([load(), loadFields()]))
+onMounted(() => {
+  const deletedVersion = route.query.deleted_version
+  if (typeof deletedVersion === 'string') {
+    showToast(`Deleted ${deletedVersion}`)
+    void router.replace({ path: '/software' })
+  }
+  return Promise.all([load(), loadFields()])
+})
 </script>
 
 <template>

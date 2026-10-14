@@ -80,6 +80,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'AI Providers', permission: PERMISSION.settingsManage },
   },
   {
+    path: '/settings/replication',
+    name: 'replication',
+    component: () => import('../views/ReplicationView.vue'),
+    meta: { title: 'Replication', permission: PERMISSION.settingsManage },
+  },
+  {
     path: '/settings/schema',
     name: 'schema',
     component: () => import('../views/DeviceSchemaView.vue'),

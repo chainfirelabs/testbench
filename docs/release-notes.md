@@ -1,6 +1,15 @@
 # Release notes
 
-## Unreleased
+## 1.11.1
+
+- The Replication settings page shows its Helm-managed mode, schedule, and
+  destination URL in read-only fields.
+- Manual sync requests and completed manual or scheduled syncs are recorded in
+  the audit log with their destination URL and outcome. Audit reporting retries
+  transient failures and shows an error on the Replication page if it cannot
+  record the result.
+
+## 1.11.0
 
 - Administrators can edit the shared Home dashboard: add or remove the Fleet
   summary widget, change its title, description, width, and breakdown bar, and
@@ -8,6 +17,17 @@
 - Dashboard edits are audited and use a revision check to prevent one admin
   from silently overwriting another's changes. Migration 0015 adds the shared
   dashboard layout table.
+- Software details can delete a specific version, including an older version,
+  and navigate to the remaining current version after deletion.
+- Global search finds software suites by component name or version and shows
+  matching component details in software, device, and test results.
+- Optional external S3-compatible object storage lets a device's Output field
+  reference an ASCII text file for on-demand viewing. TestBench does not deploy
+  or manage the object store.
+- Optional replication syncs devices, software, vendor claims, and tests between
+  instances on a schedule or by manual trigger. Push-only and bidirectional
+  modes are available; newer edits and deletion markers resolve conflicts.
+  Migration 0016 adds replication deletion markers.
 
 ## 1.10.0
 

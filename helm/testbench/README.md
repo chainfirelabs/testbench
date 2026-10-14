@@ -110,7 +110,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.10.0`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.11.1`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -262,7 +262,16 @@ add an `auth-token` key to a Secret and set
 `mcp.authToken.existingSecret`; expose the Service through your own Ingress or
 gateway if clients outside the cluster need access.
 
-All plugins are disabled by default, in two independent senses. A plugin is not
+The replication controller is also disabled by default. Enable it on both
+instances with `plugins.replication.enabled=true`, set `peerUrl` to the other
+instance's HTTPS `/api/v1` URL, and configure the same token Secret on both.
+Choose `mode: push` or `mode: push_pull` on the sender, and `mode: receive` on
+the receiver when it should not initiate a reverse sync. `intervalMinutes: 0` leaves only the
+manual **Replication → Sync now** action. This controller is installation-wide
+and does not need a per-device plugin assignment. See the main README for its
+record scope and conflict rules.
+
+Device action plugins are disabled by default, in two independent senses. A plugin is not
 deployed unless its `plugins.*.enabled` value turns it on — and a deployed
 plugin is still unavailable to every device type until an administrator enables
 it for that type under **Schema → Plugins**, or a `DeviceSchema` document

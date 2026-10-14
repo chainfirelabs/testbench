@@ -25,7 +25,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.10.0`.
+`chainfirelabs/testbench` and tag `1.11.1`.
 
 | Image repository | Purpose |
 |---|---|
@@ -163,6 +163,8 @@ starter device catalog.
 | `frontend.service.port` / `nodePort` | `80` / unset; optional fixed node port for NodePort or LoadBalancer services. |
 | `applicationSecret.existingSecret` | Required existing Secret containing application `TB_*` secrets. |
 | `TB_CREDENTIAL_ENCRYPTION_KEY` | Application Secret value used to encrypt API keys entered under **AI Providers**. Required only for GUI-managed credentials. |
+| `backend.objectStorage.enabled` / `url` / `bucket` / `maxBytes` | External S3-compatible output reader. Disabled by default; maximum file size defaults to 1 MiB. The chart creates no bucket or S3 service. |
+| `TB_OBJECT_STORAGE_ACCESS_KEY` / `TB_OBJECT_STORAGE_SECRET_KEY` | Put these in `applicationSecret.existingSecret` when object storage is enabled. The backend uses them only to read objects. |
 | `authentik.tls.existingConfigMap` / `key` | Optional ConfigMap and PEM key for trusting a private Authentik CA; empty by default. |
 | `config.frontendUrl` | Required public URL, such as `https://testbench.example.com`. |
 | `config.corsOrigins` | Required comma-separated browser origins. Usually the public URL. |
@@ -182,6 +184,52 @@ starter device catalog.
 | `database.credentials.existingSecret` | Required Secret containing the database login. |
 | `database.credentials.usernameKey` / `passwordKey` | `username` / `password`; keys within that Secret. |
 | `database.waitTimeoutSeconds` / `waitIntervalSeconds` | `120` / `5`; how long schema setup waits for the database and how often it retries. |
+
+### Device output from external S3
+
+Set `backend.objectStorage.enabled: true`, `backend.objectStorage.url` to the
+S3-compatible service endpoint (for example, `https://s3.example.com`), and
+`backend.objectStorage.bucket` to the dedicated bucket name. Put
+`TB_OBJECT_STORAGE_ACCESS_KEY` and `TB_OBJECT_STORAGE_SECRET_KEY` in the existing
+application Secret. Outside Helm, set `TB_OBJECT_STORAGE_ENABLED=true`,
+`TB_OBJECT_STORAGE_URL`, `TB_OBJECT_STORAGE_BUCKET`, and the same two credential
+variables on the backend.
+The default `TB_OBJECT_STORAGE_MAX_BYTES` is 1048576. TestBench does not create
+or manage buckets and never receives the credentials in the browser.
+
+When enabled, **Output** appears in the device field catalog. In **Schema →
+Device Fields**, assign it to the relevant device type (or globally), then put
+an `s3://bucket/key` URL in that device's Output field. The device detail page
+offers **View output** and reads the object when clicked. The reader accepts
+ASCII text with ordinary line breaks and tabs; it rejects larger files, binary
+content, and other URLs. Keep the bucket private and give the configured S3
+identity read access only to the intended buckets.
+
+### Replication between TestBench instances
+
+Enable `plugins.replication.enabled` in the Helm values on both instances.
+Give both instances the same random token through
+`plugins.replication.token.existingSecret` and keep the shared plugin Secret
+configured locally. Set `plugins.replication.peerUrl` on the sending instance
+to the receiving instance's HTTPS API base URL, such as
+`https://peer.example.com/api/v1`. Choose `mode: push` for one-way delivery or
+`mode: push_pull` to reconcile both instances using the newest record edit.
+Set the destination to `mode: receive` when it should accept data without
+starting its own outbound sync; it does not need a `peerUrl`.
+`intervalMinutes` defaults to 60; set it to 0 for manual-only syncing. A user
+with `settings.manage` can start a sync and see its result on the
+**Replication** page. The page shows the Helm-configured destination URL.
+Manual sync requests and completed manual or scheduled syncs appear in the
+audit log with the destination URL and outcome.
+
+Replication exchanges devices, software versions and their components, vendor
+claims, and tests. It preserves record IDs and propagates deletes using durable deletion
+markers. User accounts, roles, API keys, local settings, and device fields
+marked sensitive are not copied. Configure matching device types and field
+schemas on both instances before syncing; a missing device type or a duplicate
+natural identifier with a different record ID stops that batch with an error
+instead of silently overwriting data. Keep both clocks synchronized: newest
+edit resolution uses record timestamps.
 
 ### Inventory fields
 

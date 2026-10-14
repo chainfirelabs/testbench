@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DetailModal from '../components/DetailModal.vue'
 import DetailValue from '../components/DetailValue.vue'
@@ -28,7 +28,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const detail = ref<any>(null)
-const tab = ref('details')
+const tab = ref(route.query.tab === 'tests' ? 'tests' : 'details')
 const error = ref('')
 const toast = ref('')
 /*
@@ -39,6 +39,25 @@ const toast = ref('')
 const displayFields = ref<SchemaField[]>([])
 const configuredType = computed(() => deviceTypes.value.find((item) => item.id === detail.value?.device_type_id))
 const visibleFields = computed(() => displayFields.value.filter((field) => field.visible))
+const outputOpen = ref(false)
+const outputLoading = ref(false)
+const outputText = ref('')
+const outputError = ref('')
+
+async function openOutput() {
+  outputOpen.value = true
+  outputLoading.value = true
+  outputText.value = ''
+  outputError.value = ''
+  try {
+    const result = await api<{ text: string }>(`/devices/${encodeURIComponent(detail.value.id)}/output`)
+    outputText.value = result.text
+  } catch (error: any) {
+    outputError.value = error.message || 'Could not load output'
+  } finally {
+    outputLoading.value = false
+  }
+}
 const writableFields = computed(() =>
   visibleFields.value.filter((field) => field.writable && field.storage !== 'derived'),
 )
@@ -750,10 +769,15 @@ async function scanNow() {
 
 async function load() {
   try {
-    detail.value = await api<any>(`/devices/${route.params.id}`)
+    const key = String(route.params.id)
+    // A unique ID may contain a slash. Keep it in a query parameter so the
+    // backend does not interpret part of the ID as another path segment.
+    detail.value = await api<any>(key.includes('/')
+      ? `/devices/lookup/by-unique-id?unique_id=${encodeURIComponent(key)}`
+      : `/devices/${encodeURIComponent(key)}`)
     // Normalize the URL to the device's unique_id (e.g. /devices/dev-0001)
     if (detail.value.unique_id && route.params.id !== detail.value.unique_id) {
-      router.replace(`/devices/${encodeURIComponent(detail.value.unique_id)}`)
+      router.replace({ path: `/devices/${encodeURIComponent(detail.value.unique_id)}`, query: route.query })
     }
   } catch (e: any) {
     error.value = e.message
@@ -765,12 +789,22 @@ watch(
   () => detail.value?.unique_id,
   (uid) => {
     if (uid && route.params.id !== uid && !editing.value) {
-      router.replace(`/devices/${encodeURIComponent(uid)}`)
+      router.replace({ path: `/devices/${encodeURIComponent(uid)}`, query: route.query })
     }
   },
 )
 
-const testCols = ['software_name', 'software_version', 'outcome', 'tag', 'run_at', 'notes', 'misc_data', 'created_by_username']
+const testCols = ['software_name', 'software_version', 'component_name', 'component_version', 'outcome', 'tag', 'run_at', 'notes', 'misc_data', 'created_by_username']
+
+watch(() => route.query.tab, (requested) => {
+  if (requested === 'tests') tab.value = 'tests'
+})
+
+watch([detail, tab, () => route.query.test], async () => {
+  if (tab.value !== 'tests' || typeof route.query.test !== 'string') return
+  await nextTick()
+  document.getElementById(`test-${route.query.test}`)?.scrollIntoView({ block: 'center' })
+}, { flush: 'post' })
 
 /*
  * Notes and misc data are longer than a table cell: the rows offer them and
@@ -936,6 +970,10 @@ watch(() => detail.value?.device_type_id, () => {
               </template>
               <template v-else-if="field.type === 'select'">
                 {{ fieldValue(detail, field) ? optionLabel(fieldValue(detail, field)) : '—' }}
+              </template>
+              <template v-else-if="field.key === 'output' && field.protected">
+                <button v-if="fieldValue(detail, field)" class="btn btn-mini" type="button" @click="openOutput">View output</button>
+                <template v-else>—</template>
               </template>
               <!-- An address the device answers on opens its web page. The
                    address itself is the link here, unlike the grid: nothing on
@@ -1251,9 +1289,11 @@ watch(() => detail.value?.device_type_id, () => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in detail.all_tests" :key="t.id">
+          <tr v-for="t in detail.all_tests" :id="`test-${t.id}`" :key="t.id" :class="{ 'test-search-target': route.query.test === t.id }">
             <td class="row-heading" data-label="Software">{{ t.software_name }}</td>
             <td data-label="Version">{{ t.software_version || '—' }}</td>
+            <td data-label="Component">{{ t.component_name || '—' }}</td>
+            <td data-label="Component version">{{ t.component_version || '—' }}</td>
             <td data-label="Outcome">
               <span class="status-pill" style="font-size: 11px" :style="{ background: outcomeBadge(t.outcome) }">
                 {{ t.outcome }}
@@ -1354,6 +1394,18 @@ watch(() => detail.value?.device_type_id, () => {
       @close="detail_ = null"
     />
 
+    <div v-if="outputOpen" class="modal-backdrop" @click.self="outputOpen = false" @keydown.esc="outputOpen = false">
+      <div class="modal-card modal-wide" role="dialog" aria-modal="true" aria-label="Device output">
+        <h3 class="modal-title">Device output</h3>
+        <div class="modal-body">
+          <p v-if="outputLoading">Loading output…</p>
+          <p v-else-if="outputError" class="login-error">{{ outputError }}</p>
+          <pre v-else class="output-text">{{ outputText }}</pre>
+        </div>
+        <div class="modal-actions"><button class="btn btn-primary" type="button" @click="outputOpen = false">Close</button></div>
+      </div>
+    </div>
+
     <div v-if="toast" class="toast">{{ toast }}</div>
   </div>
   <div v-else-if="error" class="page">
@@ -1362,6 +1414,7 @@ watch(() => detail.value?.device_type_id, () => {
 </template>
 
 <style scoped>
+.output-text { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* ---------- changelog ----------
  * A list of events, not a table: entries have between zero and a dozen field
  * changes each, and a table with one row per change loses which change belongs
@@ -1662,6 +1715,11 @@ watch(() => detail.value?.device_type_id, () => {
   /* Enough for five digits and the spinner, and no more: a port is a short
      value and a full-width box would read as the more important of the two. */
   flex: 0 0 9.5em;
+}
+
+.test-search-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 </style>

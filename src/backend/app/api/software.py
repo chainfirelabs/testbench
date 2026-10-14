@@ -824,6 +824,22 @@ def update_software(
     return _annotate(db, [software])[0]
 
 
+@router.get("/{software_id}/deletion-impact")
+def deletion_impact(
+    software_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    """Counts used to confirm deletion of one exact software version."""
+    software = _get_software(db, software_id)
+    if software is None:
+        raise HTTPException(status_code=404, detail="Software not found")
+    return {
+        "software_id": software.id,
+        "tests": db.scalar(select(func.count(Test.id)).where(Test.software_id == software.id)) or 0,
+        "vendor_claims": db.scalar(select(func.count(VendorDevice.id)).where(VendorDevice.software_id == software.id)) or 0,
+        "components": db.scalar(select(func.count(SoftwareComponent.id)).where(SoftwareComponent.software_id == software.id)) or 0,
+    }
+
+
 @router.delete("/{software_id}", status_code=204)
 def delete_software(
     software_id: str,
