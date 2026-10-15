@@ -11,6 +11,11 @@
 # nodeSelector, tolerations, and fullnameOverride keys are not supported.
 
 global:
+  tls:
+    # Existing ConfigMap with a PEM CA bundle for outbound HTTPS clients.
+    # Create it in the release namespace and any separate plugin worker namespaces.
+    existingConfigMap: ""
+    key: ca.crt
   # Default registry host (optional port/path), without https://.
   # Images inherit this registry unless their registry property is specified.
   # Set empty to use local or fully qualified repositories as written.
@@ -34,7 +39,7 @@ frontend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/frontend
-    tag: "1.11.1"
+    tag: "1.11.2"
     digest: "" # Example: sha256:...
     pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
   service:
@@ -68,7 +73,7 @@ backend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/backend
-    tag: "1.11.1"
+    tag: "1.11.2"
     digest: ""
     pullPolicy: ""
   # Scheduler requests and container limits for each backend Pod.
@@ -85,7 +90,7 @@ mcp:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/mcp
-    tag: "1.11.1"
+    tag: "1.11.2"
     digest: ""
     pullPolicy: ""
   service:
@@ -134,8 +139,7 @@ applicationSecret:
 
 authentik:
   tls:
-    # Optional ConfigMap containing the PEM CA certificate used to verify the
-    # Authentik issuer during OIDC discovery, token exchange, and userinfo.
+    # Legacy backend-only CA setting. global.tls takes precedence when set.
     existingConfigMap: ""
     key: ca.crt
 
@@ -274,7 +278,7 @@ plugins:
       key: token
     image:
       repository: chainfirelabs/testbench/replication
-      tag: "1.11.1"
+      tag: "1.11.2"
       digest: ""
       pullPolicy: ""
 
@@ -290,7 +294,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/network-scan
-      tag: "1.11.1"
+      tag: "1.11.2"
       digest: "" # Optional immutable digest; overrides tag.
       pullPolicy: ""
     # Per-port TCP connection timeout.
@@ -334,7 +338,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/device-info
-      tag: "1.11.1"
+      tag: "1.11.2"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -413,7 +417,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/reboot
-      tag: "1.11.1"
+      tag: "1.11.2"
       digest: ""
       pullPolicy: ""
     researchImage:

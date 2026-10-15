@@ -13,6 +13,13 @@
     "global": {
       "type": "object",
       "properties": {
+        "tls": {
+          "type": "object",
+          "properties": {
+            "existingConfigMap": {"type": "string"},
+            "key": {"type": "string", "minLength": 1}
+          }
+        },
         "imagePullSecrets": {
           "type": "array",
           "items": {

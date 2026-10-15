@@ -34,9 +34,10 @@ spec:
             - secretRef: {name: {{ required "applicationSecret.existingSecret is required" .Values.applicationSecret.existingSecret }}}
           env:
             {{- include "testbench.databaseEnv" . | nindent 12 }}
+            {{- include "testbench.globalCaEnv" . | nindent 12 }}
             - name: TB_AUDIT_DELETE_DEVICE_CHANGELOGS
               value: {{ .Values.backend.auditCleanup.deleteDeviceChangelogs | quote }}
-            {{- if .Values.authentik.tls.existingConfigMap }}
+            {{- if and (not .Values.global.tls.existingConfigMap) .Values.authentik.tls.existingConfigMap }}
             - name: SSL_CERT_FILE
               value: /etc/testbench/authentik-ca/{{ required "authentik.tls.key is required when authentik.tls.existingConfigMap is set" .Values.authentik.tls.key }}
             {{- end }}
@@ -52,12 +53,13 @@ spec:
             - name: TB_PLUGIN_SHARED_SECRET
               valueFrom: {secretKeyRef: {name: {{ required "plugins.sharedSecret.existingSecret is required when a plugin is enabled" .Values.plugins.sharedSecret.existingSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
             {{- end }}
-          {{- if or .Values.authentik.tls.existingConfigMap (eq .Values.schema.devices.source "configMap") }}
+          {{- if or .Values.global.tls.existingConfigMap .Values.authentik.tls.existingConfigMap (eq .Values.schema.devices.source "configMap") }}
           # Read once at start and whenever an administrator asks the API to
           # reconcile. A ConfigMap update reaches the pod as a changed file
           # rather than as an event, so nothing here watches it.
           volumeMounts:
-            {{- if .Values.authentik.tls.existingConfigMap }}
+            {{- include "testbench.globalCaMount" . | nindent 12 }}
+            {{- if and (not .Values.global.tls.existingConfigMap) .Values.authentik.tls.existingConfigMap }}
             - name: authentik-ca
               mountPath: /etc/testbench/authentik-ca
               readOnly: true
@@ -73,9 +75,10 @@ spec:
           livenessProbe: {httpGet: {path: /api/v1/health, port: http}, periodSeconds: 20, failureThreshold: 3}
           resources: {{- toYaml .Values.backend.resources | nindent 12 }}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
-      {{- if or .Values.authentik.tls.existingConfigMap (eq .Values.schema.devices.source "configMap") }}
+      {{- if or .Values.global.tls.existingConfigMap .Values.authentik.tls.existingConfigMap (eq .Values.schema.devices.source "configMap") }}
       volumes:
-        {{- if .Values.authentik.tls.existingConfigMap }}
+        {{- include "testbench.globalCaVolume" . | nindent 8 }}
+        {{- if and (not .Values.global.tls.existingConfigMap) .Values.authentik.tls.existingConfigMap }}
         - name: authentik-ca
           configMap:
             name: {{ .Values.authentik.tls.existingConfigMap }}

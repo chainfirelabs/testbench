@@ -1,5 +1,14 @@
 # Release notes
 
+## 1.11.2
+
+- A single `global.tls` ConfigMap can supply a PEM CA bundle to the backend,
+  replication controller, MCP, enabled plugin controllers, and Device Info and
+  Reboot research Jobs for outbound HTTPS. The older backend-only
+  `authentik.tls` setting remains supported.
+- Replication can verify peers signed by a private CA from that bundle. Create
+  the ConfigMap in each namespace used by plugin research workers.
+
 ## 1.11.1
 
 - The Replication settings page shows its Helm-managed mode, schedule, and

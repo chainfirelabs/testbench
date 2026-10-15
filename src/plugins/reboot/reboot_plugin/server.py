@@ -327,6 +327,16 @@ def _job(run_id: str, entity: dict):
                 client.V1EnvVar(name="LITELLM_MCP", value="off"),
             ]
             RUNS[run_id].update(model=model, model_selection="saved_recipe" if recipe else "discovery", execution_mode="acp")
+        ca_configmap = os.getenv("TB_WORKER_CA_CONFIGMAP", "")
+        if ca_configmap:
+            ca_key = os.getenv("TB_WORKER_CA_KEY", "ca.crt")
+            ca_path = f"/etc/testbench/ca/{ca_key}"
+            env.extend(client.V1EnvVar(name=name, value=ca_path) for name in
+                       ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+                        "AWS_CA_BUNDLE", "CURL_CA_BUNDLE"))
+            volume_mounts.append(client.V1VolumeMount(name="global-ca", mount_path="/etc/testbench/ca", read_only=True))
+            volumes.append(client.V1Volume(name="global-ca", config_map=client.V1ConfigMapVolumeSource(
+                name=ca_configmap, items=[client.V1KeyToPath(key=ca_key, path=ca_key)])))
         container = client.V1Container(name="reboot", image=image, image_pull_policy=image_pull_policy,
             command=command, args=args, env=env, env_from=env_from,
             volume_mounts=volume_mounts,

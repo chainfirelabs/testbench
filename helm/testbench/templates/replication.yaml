@@ -34,6 +34,7 @@ spec:
           imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.replication.image) }}
           ports: [{name: http, containerPort: 8080}]
           env:
+            {{- include "testbench.globalCaEnv" . | nindent 12 }}
             - {name: TB_TESTBENCH_URL, value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}}
             - {name: TB_REPLICATION_PEER_URL, value: {{ $peer | quote }}}
             - {name: TB_REPLICATION_MODE, value: {{ .Values.plugins.replication.mode | quote }}}
@@ -42,9 +43,15 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ $tokenSecret }}, key: {{ .Values.plugins.replication.token.key }}}}
             - name: TB_PLUGIN_SHARED_SECRET
               valueFrom: {secretKeyRef: {name: {{ $pluginSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
+          {{- if .Values.global.tls.existingConfigMap }}
+          volumeMounts: {{- include "testbench.globalCaMount" . | nindent 12 }}
+          {{- end }}
           readinessProbe: {httpGet: {path: /plugin/v1/health, port: http}, periodSeconds: 10}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 512Mi}
           securityContext: {allowPrivilegeEscalation: false, runAsNonRoot: true, capabilities: {drop: ["ALL"]}}
+      {{- if .Values.global.tls.existingConfigMap }}
+      volumes: {{- include "testbench.globalCaVolume" . | nindent 8 }}
+      {{- end }}
 {{- end }}

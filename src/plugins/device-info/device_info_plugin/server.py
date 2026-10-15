@@ -572,16 +572,29 @@ def _create_and_watch(run_id: str, entity: dict):
         ]
         provider_env.append(client.V1EnvVar(name="TB_INFO_RUN_PROMPT", value_from=client.V1EnvVarSource(
             secret_key_ref=client.V1SecretKeySelector(name=prompt_secret, key="prompt"))))
+        volume_mounts = [client.V1VolumeMount(name="run-config", mount_path="/run/testbench", read_only=True)]
+        volumes = [client.V1Volume(name="run-config", secret=client.V1SecretVolumeSource(
+            secret_name=prompt_secret, items=[client.V1KeyToPath(key="acp_worker.py", path="acp_worker.py")]))]
+        ca_configmap = os.getenv("TB_WORKER_CA_CONFIGMAP", "")
+        if ca_configmap:
+            ca_key = os.getenv("TB_WORKER_CA_KEY", "ca.crt")
+            ca_path = f"/etc/testbench/ca/{ca_key}"
+            provider_env.extend(client.V1EnvVar(name=name, value=ca_path) for name in
+                                ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+                                 "AWS_CA_BUNDLE", "CURL_CA_BUNDLE"))
+            volume_mounts.append(client.V1VolumeMount(name="global-ca", mount_path="/etc/testbench/ca", read_only=True))
+            volumes.append(client.V1Volume(name="global-ca", config_map=client.V1ConfigMapVolumeSource(
+                name=ca_configmap, items=[client.V1KeyToPath(key=ca_key, path=ca_key)])))
         container = client.V1Container(name="research", image=IMAGE, image_pull_policy=os.getenv("TB_INFO_RESEARCH_IMAGE_PULL_POLICY", "IfNotPresent"),
             command=["python3", "/run/testbench/acp_worker.py"], env=provider_env,
-            volume_mounts=[client.V1VolumeMount(name="run-config", mount_path="/run/testbench", read_only=True)],
+            volume_mounts=volume_mounts,
             security_context=client.V1SecurityContext(allow_privilege_escalation=False, run_as_non_root=True, run_as_user=1000, run_as_group=1000, capabilities=client.V1Capabilities(drop=["ALL"])),
             resources=client.V1ResourceRequirements(requests={"cpu": "250m", "memory": "512Mi"}, limits={"cpu": "2", "memory": "2Gi"}))
         pull_secrets = [client.V1LocalObjectReference(name=name) for name in os.getenv("TB_INFO_WORKER_IMAGE_PULL_SECRETS", "").split(",") if name]
         pod = client.V1PodTemplateSpec(metadata=client.V1ObjectMeta(labels=labels), spec=client.V1PodSpec(
             restart_policy="Never", service_account_name=os.getenv("TB_INFO_WORKER_SERVICE_ACCOUNT", "testbench-device-info-research"), automount_service_account_token=False,
             termination_grace_period_seconds=15, image_pull_secrets=pull_secrets, containers=[container],
-            volumes=[client.V1Volume(name="run-config", secret=client.V1SecretVolumeSource(secret_name=prompt_secret, items=[client.V1KeyToPath(key="acp_worker.py", path="acp_worker.py")]))],
+            volumes=volumes,
             security_context=client.V1PodSecurityContext(run_as_non_root=True, seccomp_profile=client.V1SeccompProfile(type="RuntimeDefault"))))
         if RUNS[run_id].get("state") == "cancelled": return
         batch.create_namespaced_job(NAMESPACE, client.V1Job(metadata=client.V1ObjectMeta(name=name, labels=labels), spec=client.V1JobSpec(

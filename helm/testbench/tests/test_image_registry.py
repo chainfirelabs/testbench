@@ -81,6 +81,29 @@ class ImageRegistryTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('/authentik/tls/key', result.stderr)
 
+    def test_global_ca_reaches_https_clients_and_overrides_legacy_backend_ca(self):
+        values = copy.deepcopy(BASE)
+        values['global']['tls'] = {'existingConfigMap': 'testbench-ca', 'key': 'roots.pem'}
+        values['authentik'] = {'tls': {'existingConfigMap': 'old-authentik-ca', 'key': 'old.pem'}}
+        values['plugins']['replication'] = {
+            'enabled': True, 'peerUrl': 'https://peer.example/api/v1',
+            'token': {'existingSecret': 'replication-token'},
+        }
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count('name: SSL_CERT_FILE'), 6)
+        self.assertEqual(result.stdout.count('value: /etc/testbench/ca/roots.pem'), 30)
+        self.assertEqual(result.stdout.count('name: global-ca'), 12)
+        self.assertIn('name: TB_WORKER_CA_CONFIGMAP, value: "testbench-ca"', result.stdout)
+        self.assertNotIn('old-authentik-ca', result.stdout)
+
+    def test_global_ca_requires_a_key(self):
+        values = copy.deepcopy(BASE)
+        values['global']['tls'] = {'existingConfigMap': 'testbench-ca', 'key': ''}
+        result = render(values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('/global/tls/key', result.stderr)
+
     def test_reboot_image_capture_defaults_off_and_can_be_enabled(self):
         values = copy.deepcopy(BASE)
         result = render(values)

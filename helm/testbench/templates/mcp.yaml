@@ -54,6 +54,7 @@ spec:
           imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.mcp.image) }}
           ports: [{name: http, containerPort: {{ .Values.mcp.service.port }}}]
           env:
+            {{- include "testbench.globalCaEnv" . | nindent 12 }}
             # Keep MCP-to-API traffic on the release's backend ClusterIP
             # Service. This is intentionally not configurable as an external URL.
             - name: TB_MCP_API_BASE
@@ -77,6 +78,9 @@ spec:
             - {name: TB_MCP_DEFAULT_LIMIT, value: {{ .Values.mcp.defaultLimit | quote }}}
             - {name: TB_MCP_MAX_LIMIT, value: {{ .Values.mcp.maxLimit | quote }}}
             - {name: TB_MCP_MAX_RESPONSE_BYTES, value: {{ .Values.mcp.maxResponseBytes | quote }}}
+          {{- if .Values.global.tls.existingConfigMap }}
+          volumeMounts: {{- include "testbench.globalCaMount" . | nindent 12 }}
+          {{- end }}
           startupProbe:
             exec: {command: [python, /app/healthcheck.py]}
             periodSeconds: 3
@@ -90,4 +94,7 @@ spec:
             failureThreshold: 3
           resources: {{- toYaml .Values.mcp.resources | nindent 12 }}
           securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+      {{- if .Values.global.tls.existingConfigMap }}
+      volumes: {{- include "testbench.globalCaVolume" . | nindent 8 }}
+      {{- end }}
 {{- end }}

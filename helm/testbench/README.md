@@ -54,26 +54,33 @@ database service that is still starting. A missing database, invalid login, or
 unreachable service still fails after the bounded timeout; the chart never
 creates the database or application login.
 
-### Private Authentik CA
+### Custom CA for outbound HTTPS
 
-When the Authentik OIDC issuer uses a certificate signed by a private CA,
-create a ConfigMap in the release namespace and configure the backend to trust
-it:
+Create a ConfigMap containing a PEM CA bundle in the release namespace and set
+`global.tls`. The chart mounts it in the backend, MCP, and enabled plugin
+controllers, including replication. Device Info and Reboot research Jobs also
+receive it when they are created. The bundle is used for outbound HTTPS to the
+Authentik issuer, replication peer, AI providers, and other configured services.
 
 ```bash
-kubectl --namespace testbench create configmap authentik-ca \
-  --from-file=ca.crt=authentik-ca.crt
+kubectl --namespace testbench create configmap testbench-ca \
+  --from-file=ca.crt=ca-bundle.pem
 ```
 
 ```yaml
-authentik:
+global:
   tls:
-    existingConfigMap: authentik-ca
+    existingConfigMap: testbench-ca
     key: ca.crt
 ```
 
-The certificate hostname must still match the Authentik issuer URL. Restart
-the backend after replacing CA data so its cached OIDC discovery is refreshed.
+If Device Info research or Reboot workers run in a different namespace, create
+the same ConfigMap there. The PEM file should contain all CAs needed by the
+configured HTTPS endpoints because Python clients use it as their trust bundle.
+Certificate hostnames must still match their URLs. Restart affected Pods after
+changing the CA bundle; restart the backend to refresh cached OIDC discovery.
+The older `authentik.tls` setting remains available for backend-only trust;
+`global.tls` takes precedence on the backend when both are set.
 
 ### AI provider ownership
 
@@ -110,7 +117,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.11.1`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.11.2`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
