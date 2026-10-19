@@ -28,6 +28,7 @@ import FilterProfilesMenu from '../components/FilterProfilesMenu.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import DetailModal from '../components/DetailModal.vue'
 import ComponentModal from '../components/ComponentModal.vue'
+import InventoryMatchesModal from '../components/InventoryMatchesModal.vue'
 import FormModal, { type FormField } from '../components/FormModal.vue'
 import ComponentSupportEditor from '../components/ComponentSupportEditor.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
@@ -46,6 +47,7 @@ import SuggestCellEditor from '../components/SuggestCellEditor.vue'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { componentSupportColumn } from '../vendorComponentSupport'
+import { INVENTORY_DEVICES_FIELD, inventoryDevicesColumn } from '../inventoryDevices'
 import type { ComponentPanelState } from '../componentPanel'
 
 const route = useRoute()
@@ -61,6 +63,8 @@ const { fields: vendorFields, ready: columnsReady, loadFields: loadVendorFields 
 /** Notes run to a paragraph, which is not a cell's worth of text. */
 const detail = ref<{ title: string; value: any } | null>(null)
 const componentPanel = ref<ComponentPanelState | null>(null)
+// The claim whose matching inventory devices are open in a dialog.
+const inventoryClaim = ref<any | null>(null)
 
 function openDetail(title: string, value: any) {
   detail.value = { title, value }
@@ -201,7 +205,9 @@ const columns = computed(() => {
     .map((field) => {
       const builtIn = field.key === 'component_support'
         ? componentSupportColumn((panel) => { componentPanel.value = panel })
-        : baseColumns.find((column: any) => column.field === field.key)
+        : field.key === INVENTORY_DEVICES_FIELD
+          ? inventoryDevicesColumn((row) => { inventoryClaim.value = row })
+          : baseColumns.find((column: any) => column.field === field.key)
       const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
       if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
       return column
@@ -803,6 +809,8 @@ async function onImportFile(e: Event) {
       @close="detail = null"
     />
     <ComponentModal v-if="componentPanel" :panel="componentPanel" @close="componentPanel = null" />
+    <InventoryMatchesModal v-if="inventoryClaim" :software-id="inventoryClaim.software_id" :claim="inventoryClaim"
+      @close="inventoryClaim = null" />
     <FormModal
       v-if="newClaim"
       title="New vendor device"

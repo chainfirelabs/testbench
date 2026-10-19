@@ -16,7 +16,7 @@ from sqlalchemy import Boolean, Numeric, and_, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db, utcnow
-from ..models import (EntityField, Software, SoftwareComponent, User, VendorDevice,
+from ..models import (Device, EntityField, Software, SoftwareComponent, User, VendorDevice,
                       VendorDeviceComponentSupport, VendorDeviceFieldOverride)
 from ..models.vendor_device import VENDOR_SUPPORT_STATUSES, build_match_key
 from ..schemas import (
@@ -31,6 +31,7 @@ from ..schemas import (
     VendorComponentSupportIn,
     VendorComponentMatchOut,
 )
+from ..services.compat import inventory_match_condition, inventory_match_summary
 from ..services.audit import field_diff, log_action
 from ..services.io import (
     ExportRequest,
@@ -88,10 +89,13 @@ EDITABLE_FIELDS = [
 ]
 
 COMPONENT_SUPPORT_FIELD = "component_support"
+# Derived from inventory on every read; never stored, imported or exported.
+INVENTORY_DEVICES_FIELD = "inventory_devices"
 FLAT_COMPONENT_FIELDS = ("component_name", "component_version", "component_status")
 
 # Fields the API owns; an import file carrying them is ignored rather than rejected.
-IMPORT_IGNORED = {"id", "software_id", "vendor", "match_key", "created_at", "updated_at", "created_by", "updated_by"}
+IMPORT_IGNORED = {"id", "software_id", "vendor", "match_key", "created_at", "updated_at", "created_by", "updated_by",
+                  INVENTORY_DEVICES_FIELD, "inventory_match_count"}
 
 # The columns an import template offers. None is required on its own, but a row
 # has to say something about which device it describes (see build_match_key).
@@ -112,6 +116,23 @@ class VendorFieldLayoutIn(BaseModel):
 
 def _vd_dict(vd: VendorDevice) -> dict:
     return VendorDeviceOut.model_validate(vd).model_dump(mode="json")
+
+
+def _with_inventory(db: Session, items: list) -> list:
+    """Fill each claim's inventory count and preview, for a page at once.
+
+    Takes output models or payload dicts, keyed by `id` either way.
+    """
+    def ident(item):
+        return item["id"] if isinstance(item, dict) else item.id
+    summary = inventory_match_summary(db, [ident(item) for item in items])
+    for item in items:
+        count, ids = summary.get(ident(item), (0, []))
+        if isinstance(item, dict):
+            item["inventory_match_count"], item[INVENTORY_DEVICES_FIELD] = count, ids
+        else:
+            item.inventory_match_count, item.inventory_devices = count, ids
+    return items
 
 
 def _effective_fields(db: Session, software: Software) -> list[tuple[EntityField, dict]]:
@@ -457,8 +478,8 @@ def list_grouped_vendor_devices(
     members = db.scalars(source_query.where(or_(*clauses))).all()
     matched = _matching_components(db, members, filters, search)
     by_key: dict[tuple[str, str, str], list[dict]] = {}
-    for member in members:
-        payload = _vd_dict(member)
+    payloads = _with_inventory(db, [_vd_dict(member) for member in members])
+    for member, payload in zip(members, payloads):
         payload["matching_components"] = matched.get(member.id, [])
         key = tuple(str(payload.get(name) or "").strip().lower()
                     for name in ("make", "model", "hardware_version"))
@@ -538,7 +559,7 @@ def list_vendor_devices(
                                        for match in matched.get(item.id, [])]
         out.append(payload)
     return Page(
-        items=out,
+        items=_with_inventory(db, out),
         total=total,
         page=page,
         page_size=page_size,
@@ -566,7 +587,7 @@ def export_vendor_devices(
         return _scoped_export_query(session, scoped, search, filters, params)
     count = db.scalar(select(func.count()).select_from(export_query(db, software).subquery())) or 0
     fields = [field for field, payload in _effective_fields(db, software)
-              if payload["visible"] and field.key != COMPONENT_SUPPORT_FIELD]
+              if payload["visible"] and field.key not in {COMPONENT_SUPPORT_FIELD, INVENTORY_DEVICES_FIELD}]
     log_action(
         db, user, "software.vendor_devices.export", "software", software.id,
         {"format": format, "count": count}, request,
@@ -801,7 +822,7 @@ def update_vendor_device(
     )
     db.commit()
     db.refresh(vd)
-    return VendorDeviceOut.model_validate(vd)
+    return _with_inventory(db, [VendorDeviceOut.model_validate(vd)])[0]
 
 
 @router.delete("/{vd_id}", status_code=204)
@@ -875,7 +896,7 @@ def _catalog_export_fields(db: Session) -> list[EntityField]:
     """
     return [
         field for field in get_entity_fields(db, "vendor_devices")
-        if field.key not in {"misc_data", COMPONENT_SUPPORT_FIELD}
+        if field.key not in {"misc_data", COMPONENT_SUPPORT_FIELD, INVENTORY_DEVICES_FIELD}
     ]
 
 # Query parameters that steer the request rather than filter it.
@@ -973,7 +994,7 @@ def _catalog_rows(db: Session, pairs: list[tuple[VendorDevice, Software]],
         item.matching_components = [VendorComponentMatchOut.model_validate(match)
                                     for match in matched.get(vendor_device.id, [])]
         out.append(item)
-    return out
+    return _with_inventory(db, out)
 
 
 @catalog_router.get("", response_model=Page[VendorDeviceCatalogOut])
@@ -1309,3 +1330,21 @@ def delete_vendor_devices_from_catalog(
         db.delete(vd)
     db.commit()
     return None
+
+
+@router.get("/{vd_id}/inventory-matches")
+def vendor_inventory_matches(
+    software_id: str, vd_id: str,
+    page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db), user: User = Depends(get_current_user),
+):
+    software = _get_software(db, software_id)
+    claim = _get_vd(db, software, vd_id)
+    query = (select(Device.id, Device.unique_id)
+             .join(VendorDevice, inventory_match_condition())
+             .where(VendorDevice.id == claim.id))
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.execute(query.order_by(Device.unique_id, Device.id)
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [{"id": row.id, "unique_id": row.unique_id} for row in rows],
+            "total": total, "page": page, "page_size": page_size}

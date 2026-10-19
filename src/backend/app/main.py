@@ -17,6 +17,8 @@ from .api import (
     search,
     suggestions,
     tests,
+    test_artifacts,
+    test_outputs,
     software,
     users,
     vendor_devices,
@@ -136,6 +138,8 @@ app.include_router(software.router, prefix=API_PREFIX)
 app.include_router(vendor_devices.router, prefix=API_PREFIX)
 # The same rows at /vendor-devices, searchable without naming a software first.
 app.include_router(vendor_devices.catalog_router, prefix=API_PREFIX)
+app.include_router(test_artifacts.router, prefix=API_PREFIX)
+app.include_router(test_outputs.router, prefix=API_PREFIX)
 app.include_router(tests.router, prefix=API_PREFIX)
 app.include_router(saved_filters.router, prefix=API_PREFIX)
 app.include_router(notifications.router, prefix=API_PREFIX)

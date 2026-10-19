@@ -1,9 +1,13 @@
-{{- if and .Values.plugins.replication.enabled (ne .Values.plugins.replication.mode "receive") }}
-{{- if not (has .Values.plugins.replication.mode (list "push" "push_pull")) }}{{- fail "plugins.replication.mode must be push, push_pull, or receive" }}{{- end }}
-{{- $peer := required "plugins.replication.peerUrl is required" .Values.plugins.replication.peerUrl }}
-{{- if not (hasPrefix "https://" $peer) }}{{- fail "plugins.replication.peerUrl must use HTTPS" }}{{- end }}
-{{- $tokenSecret := required "plugins.replication.token.existingSecret is required" .Values.plugins.replication.token.existingSecret }}
-{{- $pluginSecret := required "plugins.sharedSecret.existingSecret is required" .Values.plugins.sharedSecret.existingSecret }}
+{{- /* Replication was configured under plugins before 1.13.2. Refuse the old
+key rather than ignore it, which would turn replication off on upgrade. */}}
+{{- if hasKey (.Values.plugins | default dict) "replication" }}
+{{- fail "plugins.replication has moved to the top-level replication key; replication is no longer a plugin and no longer needs plugins.sharedSecret" }}
+{{- end }}
+{{- if and .Values.replication.enabled (ne .Values.replication.mode "receive") }}
+{{- if not (has .Values.replication.mode (list "push" "push_pull")) }}{{- fail "replication.mode must be push, push_pull, or receive" }}{{- end }}
+{{- $peer := required "replication.peerUrl is required" .Values.replication.peerUrl }}
+{{- if not (hasPrefix "https://" $peer) }}{{- fail "replication.peerUrl must use HTTPS" }}{{- end }}
+{{- $tokenSecret := required "replication.token.existingSecret is required" .Values.replication.token.existingSecret }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -30,23 +34,22 @@ spec:
       imagePullSecrets: {{ toYaml .Values.global.imagePullSecrets | nindent 8 }}
       containers:
         - name: controller
-          image: {{ include "testbench.image" (dict "root" $ "image" .Values.plugins.replication.image) }}
-          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.plugins.replication.image) }}
+          image: {{ include "testbench.image" (dict "root" $ "image" .Values.replication.image) }}
+          imagePullPolicy: {{ include "testbench.imagePullPolicy" (dict "root" $ "image" .Values.replication.image) }}
           ports: [{name: http, containerPort: 8080}]
           env:
             {{- include "testbench.globalCaEnv" . | nindent 12 }}
             - {name: TB_TESTBENCH_URL, value: {{ printf "http://%s-backend:8000/api/v1" (include "testbench.fullname" .) | quote }}}
             - {name: TB_REPLICATION_PEER_URL, value: {{ $peer | quote }}}
-            - {name: TB_REPLICATION_MODE, value: {{ .Values.plugins.replication.mode | quote }}}
-            - {name: TB_REPLICATION_INTERVAL_MINUTES, value: {{ .Values.plugins.replication.intervalMinutes | quote }}}
+            - {name: TB_REPLICATION_MODE, value: {{ .Values.replication.mode | quote }}}
+            - {name: TB_REPLICATION_INTERVAL_MINUTES, value: {{ .Values.replication.intervalMinutes | quote }}}
+            - {name: TB_REPLICATION_ENTITIES, value: {{ .Values.replication.entities | toJson | quote }}}
             - name: TB_REPLICATION_TOKEN
-              valueFrom: {secretKeyRef: {name: {{ $tokenSecret }}, key: {{ .Values.plugins.replication.token.key }}}}
-            - name: TB_PLUGIN_SHARED_SECRET
-              valueFrom: {secretKeyRef: {name: {{ $pluginSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
+              valueFrom: {secretKeyRef: {name: {{ $tokenSecret }}, key: {{ .Values.replication.token.key }}}}
           {{- if .Values.global.tls.existingConfigMap }}
           volumeMounts: {{- include "testbench.globalCaMount" . | nindent 12 }}
           {{- end }}
-          readinessProbe: {httpGet: {path: /plugin/v1/health, port: http}, periodSeconds: 10}
+          readinessProbe: {httpGet: {path: /v1/health, port: http}, periodSeconds: 10}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {memory: 512Mi}

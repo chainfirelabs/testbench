@@ -347,6 +347,10 @@ class DeviceCompatibleSoftwareOut(BaseModel):
     # A short list means a broad claim ("any Cisco"), not a weak one.
     matched_on: list[str] = Field(default_factory=list)
     vendor_devices: list["VendorDeviceOut"] = Field(default_factory=list)
+    # The claim fields this software version lists, in its order: the
+    # Schema → Vendor Claims layout with the version's own "Customize fields"
+    # override applied. The device page draws the claims with these columns.
+    fields: list[dict] = Field(default_factory=list)
 
 
 class DeviceCompatibilityOut(BaseModel):
@@ -426,6 +430,10 @@ class VendorDeviceUpdate(BaseModel):
 
 
 class VendorDeviceOut(VendorDeviceBase):
+    inventory_match_count: int | None = None
+    # The first few matching devices' unique IDs, for the list column; the
+    # count says how many more there are.
+    inventory_devices: list[str] = Field(default_factory=list)
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -530,6 +538,9 @@ class TestUpdate(BaseModel):
 
 
 class TestOut(BaseModel):
+    artifact_count: int = 0
+    output_filename: str | None = None
+    output_size_bytes: int | None = None
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -926,3 +937,14 @@ class ImportResult(BaseModel):
 
 
 DeviceDetail.model_rebuild()
+
+
+class TestArtifactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    test_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime

@@ -67,7 +67,7 @@ function roleColour(slug: string): string {
  */
 const columns = computed(() => [
   { field: 'username', headerName: 'Username', minWidth: 140 },
-  { field: 'email', headerName: 'Email', minWidth: 160, valueFormatter: (p: any) => p.value || '—' },
+  { field: 'email', headerName: 'Email', minWidth: 160, },
   { field: 'auth_provider', headerName: 'Provider' },
   {
     field: 'role',
@@ -82,6 +82,8 @@ const columns = computed(() => [
   {
     field: 'is_online',
     headerName: 'Session',
+    // The dot's colour is the value, including grey for "never logged in".
+    blankPlaceholder: false,
     cellRenderer: (p: any) => {
       const row = p.data
       // green = active now, red = logged in before (expired), gray = never logged in
@@ -93,7 +95,7 @@ const columns = computed(() => [
     },
   },
   { field: 'created_at', headerName: 'Created', valueFormatter: fmt, minWidth: 170 },
-  { field: 'last_login_at', headerName: 'Last Login', valueFormatter: (p: any) => (p.value ? new Date(p.value).toLocaleString() : '—'), minWidth: 170 },
+  { field: 'last_login_at', headerName: 'Last Login', valueFormatter: (p: any) => (p.value ? new Date(p.value).toLocaleString() : ''), minWidth: 170 },
 ])
 
 function showToast(msg: string, isError = false) {

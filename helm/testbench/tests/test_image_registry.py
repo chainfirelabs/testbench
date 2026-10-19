@@ -40,6 +40,49 @@ def render(values):
 
 @unittest.skipUnless(shutil.which('helm'), 'helm is required')
 class ImageRegistryTests(unittest.TestCase):
+    def test_replication_entity_selection_renders_and_rejects_invalid_lists(self):
+        values = copy.deepcopy(BASE)
+        values['replication'] = {
+            'enabled': True, 'peerUrl': 'https://peer.example/api/v1',
+            'token': {'existingSecret': 'replication-token'},
+            'entities': ['tests', 'devices'],
+        }
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('name: TB_REPLICATION_ENTITIES, value: "[\\"tests\\",\\"devices\\"]"', result.stdout)
+        for invalid in ([], ['devices', 'devices'], ['unknown']):
+            with self.subTest(invalid=invalid):
+                values['replication']['entities'] = invalid
+                result = render(values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('/replication/entities', result.stderr)
+
+    def test_replication_is_not_a_plugin(self):
+        values = copy.deepcopy(BASE)
+        values['plugins'] = {}  # No plugins, so no shared secret either.
+        values['replication'] = {
+            'enabled': True, 'peerUrl': 'https://peer.example/api/v1',
+            'token': {'existingSecret': 'replication-token'},
+        }
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('TB_PLUGINS: ""', result.stdout)
+        self.assertIn('TB_REPLICATION_CONTROLLER_URL: "http://testbench-testbench-replication:8080"', result.stdout)
+        self.assertNotIn('TB_PLUGIN_SHARED_SECRET', result.stdout)
+        self.assertIn('path: /v1/health', result.stdout)
+        values['replication']['mode'] = 'receive'
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('TB_REPLICATION_CONTROLLER_URL', result.stdout)
+        self.assertNotIn("kind: Deployment\nmetadata:\n  name: testbench-testbench-replication", result.stdout)
+
+    def test_old_plugins_replication_key_is_refused(self):
+        values = copy.deepcopy(BASE)
+        values['plugins']['replication'] = {'enabled': True}
+        result = render(values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('plugins.replication has moved to the top-level replication key', result.stderr)
+
     def test_object_storage_size_renders_as_decimal_integer(self):
         for size in (1048576, 10485760):
             with self.subTest(size=size):
@@ -48,6 +91,17 @@ class ImageRegistryTests(unittest.TestCase):
                 result = render(values)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f'TB_OBJECT_STORAGE_MAX_BYTES: "{size}"', result.stdout)
+
+    def test_artifact_limits_adjust_proxy_and_config(self):
+        for size in (104857600, 1073741824):
+            values = copy.deepcopy(BASE)
+            values['backend'] = {'objectStorage': {'artifactMaxBytes': size}}
+            result = render(values)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f'TB_ARTIFACT_MAX_BYTES: "{size}"', result.stdout)
+            self.assertIn(f'client_max_body_size {size + 1048576};', result.stdout)
+        values['backend']['objectStorage']['artifactMaxBytes'] = 0
+        self.assertNotEqual(render(values).returncode, 0)
 
     def test_default_database_source_does_not_require_configmap(self):
         values = copy.deepcopy(BASE)
@@ -85,7 +139,7 @@ class ImageRegistryTests(unittest.TestCase):
         values = copy.deepcopy(BASE)
         values['global']['tls'] = {'existingConfigMap': 'testbench-ca', 'key': 'roots.pem'}
         values['authentik'] = {'tls': {'existingConfigMap': 'old-authentik-ca', 'key': 'old.pem'}}
-        values['plugins']['replication'] = {
+        values['replication'] = {
             'enabled': True, 'peerUrl': 'https://peer.example/api/v1',
             'token': {'existingSecret': 'replication-token'},
         }

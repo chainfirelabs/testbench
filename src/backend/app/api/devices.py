@@ -58,9 +58,9 @@ from ..services.device_schema import (
     union_field_map,
     validate_device_document,
 )
+from .vendor_devices import _effective_fields as effective_claim_fields, _with_inventory
 from ..services.scan import manager, scan_device
 from ..services.permissions import AUDIT_VIEW
-from ..services.object_storage import OutputError, read_ascii_output
 from .deps import get_current_user, holds, require_devices_edit
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -1006,30 +1006,6 @@ def get_device(device_id: str, db: Session = Depends(get_db), user: User = Depen
     return detail
 
 
-@router.get("/{device_id}/output")
-def get_device_output(
-    device_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user),
-):
-    """Fetch the configured object's ASCII content when the user opens it."""
-    if not settings.object_storage_enabled:
-        raise HTTPException(status_code=404, detail="Object storage is disabled")
-    device = _get_device(db, device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    if not any(
-        field.key == "output" and field.visible and field.protected
-        for field in get_effective_fields(db, device.device_type_id)
-    ):
-        raise HTTPException(status_code=404, detail="Output is not assigned to this device type")
-    value = device.data.get("output")
-    if not isinstance(value, str) or not value.strip():
-        raise HTTPException(status_code=404, detail="This device has no output URL")
-    try:
-        return {"text": read_ascii_output(value)}
-    except OutputError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-
-
 @router.get("/{device_id}/actions")
 def device_actions(
     device_id: str,
@@ -1067,18 +1043,19 @@ def get_compatible_software(
     device = _get_device(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
-    return DeviceCompatibilityOut(
-        device_id=device.id,
-        items=[
-            DeviceCompatibleSoftwareOut(
-                software=SoftwareOut.model_validate(item["software"]),
-                support_status=item["support_status"],
-                matched_on=item["matched_on"],
-                vendor_devices=[VendorDeviceOut.model_validate(v) for v in item["vendor_devices"]],
-            )
-            for item in compatible_software(db, device)
-        ],
-    )
+    items = []
+    for item in compatible_software(db, device):
+        layout = [payload for _field, payload in effective_claim_fields(db, item["software"])
+                  if payload["visible"] and payload["list_visible"]]
+        items.append(DeviceCompatibleSoftwareOut(
+            software=SoftwareOut.model_validate(item["software"]),
+            support_status=item["support_status"],
+            matched_on=item["matched_on"],
+            vendor_devices=_with_inventory(
+                db, [VendorDeviceOut.model_validate(v) for v in item["vendor_devices"]]),
+            fields=layout,
+        ))
+    return DeviceCompatibilityOut(device_id=device.id, items=items)
 
 
 @router.get("/{device_id}/related-counts", response_model=DeviceRelatedCountsOut)

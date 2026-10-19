@@ -37,6 +37,7 @@ import {
 } from '../deviceSchema'
 import { deviceTypes, loadDeviceTypes, type DeviceType } from '../deviceTypes'
 import { invalidateEntityFields, type EntityField } from '../entityFields'
+import { BLANK_TEXT } from '../blankCell'
 
 const route = useRoute()
 const router = useRouter()
@@ -1408,8 +1409,8 @@ onMounted(async () => {
             <td data-label="Key"><code>{{ definition.key }}</code></td>
             <td data-label="Label">{{ definition.label }}</td>
             <td data-label="Type">{{ definition.field_type }}</td>
-            <td data-label="Role" class="muted">{{ definition.plugin_role || '—' }}</td>
-            <td data-label="Flags" class="muted">{{ flagsFor(definition) || '—' }}</td>
+            <td data-label="Role" class="muted">{{ definition.plugin_role || BLANK_TEXT }}</td>
+            <td data-label="Flags" class="muted">{{ flagsFor(definition) || BLANK_TEXT }}</td>
             <td data-label="In use" class="muted">
               {{ definition.usage.global ? 'global' : definition.usage.device_types.join(', ') || 'unassigned' }}
               <template v-if="definition.usage.devices_with_values">

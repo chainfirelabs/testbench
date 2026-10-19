@@ -17,6 +17,7 @@ interface Status {
   mode?: string
   interval_minutes?: number
   peer_url?: string
+  selected_entities?: string[]
   running?: boolean
   current_run?: Run | null
   last_run?: Run | null
@@ -25,6 +26,11 @@ interface Status {
 const status = ref<Status | null>(null)
 const error = ref('')
 const busy = ref(false)
+const entityLabels: Record<string, string> = {
+  devices: 'Devices', software: 'Software', vendor_claims: 'Vendor claims', tests: 'Tests',
+}
+const selectedEntityLabels = (entities?: string[]) =>
+  (entities || ['devices', 'software', 'vendor_claims', 'tests']).map((item) => entityLabels[item] || item).join(', ')
 let timer: ReturnType<typeof setInterval> | null = null
 
 async function refresh() {
@@ -74,6 +80,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
           <label>Mode<input :value="status.mode === 'push_pull' ? 'Push and pull' : status.mode === 'receive' ? 'Receive only' : 'Push only'" disabled /></label>
           <label v-if="status.mode !== 'receive'">Destination URL<input :value="status.peer_url || ''" :title="status.peer_url || ''" disabled /></label>
           <label v-if="status.mode !== 'receive'">Schedule<input :value="status.interval_minutes ? `Every ${status.interval_minutes} minutes` : 'Manual only'" disabled /></label>
+          <label v-if="status.mode !== 'receive'">Replicate<input :value="selectedEntityLabels(status.selected_entities)" disabled /></label>
         </div>
       </section>
       <section v-if="status.current_run" class="card">

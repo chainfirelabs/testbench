@@ -162,6 +162,48 @@ tb.tests.update(result, notes="retried, flaky network")
 tb.tests.delete(result)
 ```
 
+### Artifacts and output
+
+A run can carry files: any number of **artifacts** (reports, captures,
+screenshots, archives) and one **output** — the run's ASCII text log, which the
+TestBench UI shows in a viewer rather than as a download. Both are stored in the
+server's object store beside the run, at `tests/<test-id>/artifacts/…` and
+`tests/<test-id>/output/…`, so the server needs object storage enabled.
+
+Attach them when recording:
+
+```python
+tb.tests.create(
+    device="dev-0042", software="curl-smoke", outcome="fail",
+    artifacts=["capture.pcap", Path("report.html")],   # paths, bytes or open binary files
+    output=log_text,                                     # or output_file="run.log"
+)
+```
+
+The run is saved first and the files after it. If an upload fails, the run is
+still recorded and the exception carries it as `.test`, so the upload can be
+retried without recording the run twice.
+
+Or work with a recorded run directly:
+
+```python
+tb.tests.upload_artifact(result, "capture.pcap")
+tb.tests.upload_artifact(result, png_bytes, filename="screen.png")
+for artifact in tb.tests.artifacts(result):
+    tb.tests.download_artifact(result, artifact, "downloads/")   # or no dest: returns bytes
+tb.tests.delete_artifact(result, artifact)
+
+tb.tests.set_output(result, "all 42 checks passed\n")    # text
+tb.tests.upload_output(result, "run.log")                # or a file
+print(tb.tests.output(result).text)                       # None when the run has no output
+tb.tests.delete_output(result)
+```
+
+Output must be ASCII and within the server's limit (1 MiB by default); anything
+else is refused with a `ValidationError` before it is stored. Uploading output
+again replaces it. A `Test` reports what is attached through `artifact_count`,
+`output_filename` and `has_output`. Uploads and deletions need `tests.edit`.
+
 ### One run, one build
 
 A bare software name resolves once per client and stays resolved. If someone

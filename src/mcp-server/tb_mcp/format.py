@@ -132,6 +132,9 @@ def software_full(s: dict) -> dict:
 
 def test_brief(t: dict) -> dict:
     return drop_empty({
+        # The one identifier a run has; `get_test_output` and
+        # `list_test_artifacts` take it.
+        "id": t.get("id"),
         "device": t.get("device_unique_id"),
         "software": t.get("software_name"),
         "software_version": t.get("software_version") or None,
@@ -145,6 +148,8 @@ def test_brief(t: dict) -> dict:
         # `data` is free-form JSONB and can be arbitrarily large. Signal that it
         # exists; `get_device`/`find_tests` callers can ask about a specific row.
         "has_data": bool(t.get("data")) or None,
+        "artifacts": t.get("artifact_count") or None,
+        "output": t.get("output_filename"),
     })
 
 

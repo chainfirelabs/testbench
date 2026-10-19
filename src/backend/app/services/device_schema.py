@@ -1360,38 +1360,22 @@ def seed_device_schema(db: Session) -> None:
         if definition is not None and not definition.protected_system_field:
             definition.protected_system_field = True
 
-    # This field is offered in the catalog only when an external store is
-    # configured. No global assignment is made: an admin chooses which device
-    # types may carry a URL, then enters one on a device.
+    # Devices used to carry an `output` field holding an s3:// URL. Output now
+    # belongs to a test (see app/api/test_outputs.py), so an installation that
+    # still has the system field gets it switched off. A URL already entered
+    # stays in the device document, where it reads as misc data.
     output_changed = False
-    if settings.object_storage_enabled and "output" not in existing:
-        definition = DeviceFieldDefinition(
-            key="output", label="Output", field_type="text",
-            description="S3 URL of an ASCII text output file",
-            options=[], validation={}, sensitive=False, indexed=False,
-            unique_value=False, opens_web_page=False, link_scheme="http",
-            link_port=None, plugin_role=None, protected_system_field=True,
-            enabled=True, configuration_source="system",
-        )
-        db.add(definition)
-        existing["output"] = definition
-        output_changed = True
     output_definition = existing.get("output")
-    if (settings.object_storage_enabled and output_definition is not None
-            and (output_definition.configuration_source != "system"
-                 or output_definition.field_type != "text"
-                 or not output_definition.protected_system_field)):
-        raise ValueError("Cannot enable object storage: device field 'output' is already in use")
-    if output_definition is not None and output_definition.configuration_source == "system":
-        if output_definition.enabled != settings.object_storage_enabled:
-            output_definition.enabled = settings.object_storage_enabled
-            output_changed = True
+    if (output_definition is not None and output_definition.configuration_source == "system"
+            and output_definition.enabled):
+        output_definition.enabled = False
+        output_changed = True
 
     if first_run or not current_revision(db):
         publish_revision(db, source="system", note="Initial device schema",
                          summary={"fields": len(existing)})
     elif output_changed:
-        publish_revision(db, source="system", note="Object storage availability changed")
+        publish_revision(db, source="system", note="Device output field retired")
     db.commit()
     invalidate_cache()
 

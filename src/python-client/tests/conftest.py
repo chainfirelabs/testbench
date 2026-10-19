@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from email.parser import BytesParser
+from email.policy import HTTP
 
 import httpx
 import pytest
@@ -27,6 +29,9 @@ class FakeAPI:
         self.devices: dict[str, dict] = {}
         self.software: dict[str, dict] = {}
         self.tests: list[dict] = []
+        # test id -> attached files, as the object store would hold them.
+        self.artifacts: dict[str, list[dict]] = {}
+        self.outputs: dict[str, dict] = {}
         self.vendor_devices: list[dict] = []
         self.me = {
             "id": "u1", "username": "tester1", "role": "tester", "email": None,
@@ -314,6 +319,73 @@ class FakeAPI:
                 rows = [r for r in rows if r["outcome"] == params["outcome"]]
             return httpx.Response(200, json=self._page(rows, params))
 
+        if path.startswith("/tests/"):
+            return self._test_files(request, method, path)
+
+        return httpx.Response(404, json={"detail": f"no route for {method} {path}"})
+
+    def _test_files(self, request: httpx.Request, method: str, path: str) -> httpx.Response:
+        """One test, its artifacts and its output."""
+        parts = path.split("/")[2:]
+        test = next((t for t in self.tests if t["id"] == parts[0]), None)
+        if test is None:
+            return httpx.Response(404, json={"detail": "Test not found"})
+        artifacts = self.artifacts.setdefault(test["id"], [])
+        rest = parts[1:]
+        if not rest and method == "GET":
+            output = self.outputs.get(test["id"])
+            return httpx.Response(200, json={
+                **test, "artifact_count": len(artifacts),
+                "output_filename": output["filename"] if output else None,
+                "output_size_bytes": len(output["data"]) if output else None,
+            })
+        if rest == ["artifacts"] and method == "GET":
+            return httpx.Response(200, json={
+                "items": [{k: v for k, v in a.items() if k != "data"} for a in artifacts],
+                "storage_enabled": True, "max_bytes": 1024,
+            })
+        if rest == ["artifacts"] and method == "POST":
+            filename, content_type, data = _upload(request)
+            row = {"id": f"artifact-{sum(map(len, self.artifacts.values())) + 1}",
+                   "test_id": test["id"], "filename": filename, "content_type": content_type,
+                   "size_bytes": len(data), "created_at": "2026-01-01T00:00:00", "data": data}
+            artifacts.append(row)
+            return httpx.Response(201, json={k: v for k, v in row.items() if k != "data"})
+        if len(rest) >= 2 and rest[0] == "artifacts":
+            row = next((a for a in artifacts if a["id"] == rest[1]), None)
+            if row is None:
+                return httpx.Response(404, json={"detail": "Artifact not found"})
+            if rest[2:] == ["download"] and method == "GET":
+                return httpx.Response(200, content=row["data"],
+                                      headers={"content-type": "application/octet-stream"})
+            if len(rest) == 2 and method == "DELETE":
+                artifacts.remove(row)
+                return httpx.Response(204)
+        if rest == ["output"]:
+            output = self.outputs.get(test["id"])
+            if method == "GET":
+                meta = ({"filename": output["filename"], "size_bytes": len(output["data"]),
+                         "created_at": "2026-01-01T00:00:00", "updated_at": None} if output else None)
+                return httpx.Response(200, json={
+                    "output": meta, "text": output["data"].decode("ascii") if output else None,
+                    "error": None, "storage_enabled": True, "max_bytes": 64,
+                })
+            if method == "PUT":
+                filename, _, data = _upload(request)
+                if len(data) > 64:
+                    return httpx.Response(413, json={"detail": "Output exceeds the 64 byte limit"})
+                try:
+                    data.decode("ascii")
+                except UnicodeDecodeError:
+                    return httpx.Response(422, json={"detail": "Output file must contain only ASCII text"})
+                self.outputs[test["id"]] = {"filename": filename, "data": data}
+                return httpx.Response(200, json={"filename": filename, "size_bytes": len(data),
+                                                  "created_at": "2026-01-01T00:00:00", "updated_at": None})
+            if method == "DELETE":
+                if output is None:
+                    return httpx.Response(404, json={"detail": "This test has no output"})
+                del self.outputs[test["id"]]
+                return httpx.Response(204)
         return httpx.Response(404, json={"detail": f"no route for {method} {path}"})
 
     # -- helpers ----------------------------------------------------------
@@ -370,6 +442,15 @@ class FakeAPI:
         return {"items": rows[start:start + size], "total": len(rows),
                 "page": page, "page_size": size}
 
+
+
+def _upload(request: httpx.Request) -> tuple[str, str, bytes]:
+    """The one file in a multipart upload: its name, type and bytes."""
+    message = BytesParser(policy=HTTP).parsebytes(
+        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
+    )
+    part = next(message.iter_parts())
+    return part.get_filename(), part.get_content_type(), part.get_payload(decode=True)
 
 @pytest.fixture
 def api() -> FakeAPI:

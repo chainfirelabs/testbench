@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from mcp.server.mcpserver.exceptions import ToolError
 
+from .client import NotFound
 from .config import settings
 from .enums import (
     AUDIT_ENTITY_TYPES,
@@ -654,6 +655,72 @@ def _in_window(test: dict, start: datetime | None, end: datetime | None) -> bool
     if stamp is None:
         return False
     return not ((start and stamp < start) or (end and stamp >= end))
+
+
+# -- test files -----------------------------------------------------------
+
+
+@server.tool()
+async def get_test_output(test_id: str, tail: bool = False) -> dict:
+    """The text output (log) recorded for one test run.
+
+    `test_id` is the `id` from a `find_tests` or `get_device` row; rows whose
+    run has output show its filename under `output`. Long output is cut to fit
+    the response: by default the beginning is kept; pass `tail=true` for the
+    end, which is usually where a failure is reported.
+    """
+    try:
+        result = await api().get(f"/tests/{quote(test_id, safe='')}/output")
+    except NotFound:
+        return {"test_id": test_id, "found": False,
+                "note": "No test run has this id. Take `id` from a find_tests row."}
+    meta = result.get("output")
+    if not meta:
+        return {"test_id": test_id, "has_output": False}
+    out: dict[str, Any] = {
+        "test_id": test_id, "has_output": True,
+        "filename": meta.get("filename"), "size_bytes": meta.get("size_bytes"),
+    }
+    if result.get("error"):
+        out["error"] = result["error"]
+        return out
+    text = result.get("text") or ""
+    # Leave headroom under the byte budget for the fields around the text.
+    budget = max(1024, settings.max_response_bytes - 2048)
+    if len(text) > budget:
+        out["truncated"] = True
+        out["note"] = (
+            f"Showing the {'last' if tail else 'first'} {budget} of {len(text)} characters. "
+            f"Call again with tail={'false' if tail else 'true'} for the other end."
+        )
+        text = text[-budget:] if tail else text[:budget]
+    out["text"] = text
+    return out
+
+
+@server.tool()
+async def list_test_artifacts(test_id: str) -> dict:
+    """The files (reports, captures, screenshots) attached to one test run.
+
+    `test_id` is the `id` from a `find_tests` or `get_device` row. Lists names,
+    types and sizes only: the files themselves are downloaded in the TestBench
+    UI or with its API clients.
+    """
+    try:
+        result = await api().get(f"/tests/{quote(test_id, safe='')}/artifacts")
+    except NotFound:
+        return {"test_id": test_id, "found": False,
+                "note": "No test run has this id. Take `id` from a find_tests row."}
+    items = [
+        drop_empty({
+            "filename": item.get("filename"),
+            "content_type": item.get("content_type"),
+            "size_bytes": item.get("size_bytes"),
+            "uploaded": (item.get("created_at") or "").split("T")[0] or None,
+        })
+        for item in result.get("items", [])
+    ]
+    return envelope(items, test_id=test_id)
 
 
 # -- audit ----------------------------------------------------------------

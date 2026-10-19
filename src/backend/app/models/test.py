@@ -1,10 +1,10 @@
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, String, cast
+from sqlalchemy import Date, ForeignKey, String, cast, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.mutable import MutableDict
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, column_property
 
 from ..db import Base, TimestampMixin, new_uuid
 
@@ -113,3 +113,22 @@ from .device import Device  # noqa: E402
 from .software import Software  # noqa: E402
 from .software_component import SoftwareComponent  # noqa: E402
 from .user import User  # noqa: E402
+
+
+# Count without loading every artifact's metadata or adding a query per test.
+from .test_artifact import TestArtifact  # noqa: E402
+Test.artifact_count = column_property(
+    select(func.count(TestArtifact.id)).where(TestArtifact.test_id == Test.id)
+    .correlate_except(TestArtifact).scalar_subquery()
+)
+
+# The output's name and size, so a list can offer it without a query per test.
+from .test_output import TestOutput  # noqa: E402
+Test.output_filename = column_property(
+    select(TestOutput.filename).where(TestOutput.test_id == Test.id)
+    .correlate_except(TestOutput).scalar_subquery()
+)
+Test.output_size_bytes = column_property(
+    select(TestOutput.size_bytes).where(TestOutput.test_id == Test.id)
+    .correlate_except(TestOutput).scalar_subquery()
+)

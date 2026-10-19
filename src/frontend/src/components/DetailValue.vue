@@ -13,6 +13,7 @@
  */
 import { computed } from 'vue'
 import { isEmptyDetail } from '../detail'
+import { BLANK_TEXT } from '../blankCell'
 
 const props = withDefaults(
   defineProps<{
@@ -69,9 +70,9 @@ function isObject(v: any): boolean {
 }
 
 function leafText(v: any): string {
-  if (v === null) return '—'
+  if (v === null) return BLANK_TEXT
   if (typeof v === 'boolean') return v ? 'Yes' : 'No'
-  if (typeof v === 'string') return v === '' ? '—' : v
+  if (typeof v === 'string') return v === '' ? BLANK_TEXT : v
   return String(v)
 }
 

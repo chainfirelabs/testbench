@@ -17,6 +17,11 @@ data:
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         client_max_body_size 16m;
+        location ~ ^/api/v1/tests/[^/]+/artifacts(/|$) {
+          client_max_body_size {{ add (int64 .Values.backend.objectStorage.artifactMaxBytes) 1048576 }};
+          proxy_request_buffering off;
+          proxy_read_timeout 300s;
+        }
       }
       location / { try_files $uri $uri/ /index.html; }
     }
@@ -48,7 +53,7 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: testbench, app.kubernetes.io/component: frontend, app.kubernetes.io/instance: {{ .Release.Name }}}
-      annotations: {checksum/nginx: {{ .Values.frontend | toJson | sha256sum }}}
+      annotations: {checksum/nginx: {{ dict "frontend" .Values.frontend "artifactMaxBytes" .Values.backend.objectStorage.artifactMaxBytes | toJson | sha256sum }}}
     spec:
       serviceAccountName: {{ include "testbench.fullname" . }}-frontend
       automountServiceAccountToken: false

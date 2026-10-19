@@ -105,6 +105,10 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
         _field("misc_data", "Misc Data", "json"),
         _field("created_at", "Created", writable=False),
         _field("created_by_username", "Created By", writable=False),
+        _field("output", "Output", writable=False,
+               description="The test's text output, viewed in TestBench. Backed by output_filename."),
+        _field("artifacts", "Artifacts", writable=False,
+               description="Files attached to the test. Backed by artifact_count."),
     ],
     "vendor_devices": [
         _field("make", "Make"),
@@ -116,6 +120,8 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
                options=["supported", "partial", "unsupported", "planned"]),
         _field("component_support", "Components", writable=False,
                description="Component support for this vendor claim."),
+        _field("inventory_devices", "Inventory Devices", writable=False,
+               description="Inventory devices whose make, model and other details match this claim."),
         _field("source", "Source"),
         _field("notes", "Notes", "textarea"),
         _field("misc_data", "Misc Data", "json"),
@@ -147,9 +153,13 @@ REQUIRED_FIELDS = {
 # list columns can follow the schema layout.
 CORE_VISIBLE_FIELDS = {
     "software": {"bundle_components"},
-    "tests": {"component_name", "component_version"},
+    "tests": {"component_name", "component_version", "output", "artifacts"},
     "vendor_devices": {"component_support"},
 }
+# A test's output and artifacts are files in object storage, not values in its
+# row. They are catalog fields only so lists can show, hide and order them;
+# searches, filters, exports and imports skip them.
+TEST_FILE_FIELDS = {"output", "artifacts"}
 
 
 def _configured_fields() -> dict[str, list[dict]]:
@@ -222,7 +232,9 @@ def _configured_fields() -> dict[str, list[dict]]:
         # controls presentation and validation, not whether the field exists.
         ordered_keys = [
             *REQUIRED_FIELDS[entity],
-            *(key for key in BUILTINS[entity] if key in CORE_VISIBLE_FIELDS.get(entity, set())),
+            # File columns trail the selected fields, where they always sat.
+            *(key for key in BUILTINS[entity]
+              if key in CORE_VISIBLE_FIELDS.get(entity, set()) and key not in TEST_FILE_FIELDS),
             *ordered_selected,
         ]
         ordered_keys.extend(
@@ -301,6 +313,9 @@ def initialize_entity_fields() -> None:
                         candidate.update(visible=False, required=False)
                     db.add(EntityField(entity=entity, position=position, **candidate))
                     position += 1
+            # The session does not autoflush, and the rows just added have to
+            # be found below: a core field new in this release is shown too.
+            db.flush()
             for entity, keys in CORE_VISIBLE_FIELDS.items():
                 for item in db.scalars(select(EntityField).where(
                     EntityField.entity == entity, EntityField.key.in_(keys),
@@ -457,7 +472,8 @@ def field_database_storage(field: EntityField) -> str:
         "checked_out_by_username",
     }:
         return "relationship"
-    elif field.key in {"vendor_device_count", "version_count"}:
+    elif field.key in {"vendor_device_count", "version_count", "inventory_devices"} or (
+            field.entity == "tests" and field.key in TEST_FILE_FIELDS):
         return "derived"
     elif field.storage == "column":
         return "column"

@@ -1,4 +1,9 @@
-"""One optional controller for periodic or manually triggered peer sync."""
+"""One optional controller for periodic or manually triggered peer sync.
+
+Replication is an installation feature, not a plugin: the backend reaches this
+controller at a URL Helm gives it, never through plugin discovery, and both
+directions authenticate with the replication token the peers already share.
+"""
 
 import hashlib
 import hmac
@@ -14,15 +19,30 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 
-PLUGIN_ID = "replication"
 logger = logging.getLogger(__name__)
 MODE = os.getenv("TB_REPLICATION_MODE", "push")
 INTERVAL_MINUTES = int(os.getenv("TB_REPLICATION_INTERVAL_MINUTES", "60"))
 LOCAL_URL = os.getenv("TB_TESTBENCH_URL", "").rstrip("/")
 PEER_URL = os.getenv("TB_REPLICATION_PEER_URL", "").rstrip("/")
 TOKEN = os.getenv("TB_REPLICATION_TOKEN", "")
-PLUGIN_SECRET = os.getenv("TB_PLUGIN_SHARED_SECRET", "")
 ENTITIES = ("devices", "software", "vendor_claims", "tests")
+
+
+def parse_entities(raw: str) -> tuple[str, ...]:
+    try:
+        chosen = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Replication entities must be a JSON list") from exc
+    if (not isinstance(chosen, list) or not chosen
+            or any(not isinstance(entity, str) or entity not in ENTITIES for entity in chosen)
+            or len(set(chosen)) != len(chosen)):
+        raise ValueError("Replication entities must be a nonempty list of unique supported types")
+    # Dependencies must be sent before tests and vendor claims, regardless of
+    # the order in Helm values.
+    return tuple(entity for entity in ENTITIES if entity in chosen)
+
+
+SELECTED_ENTITIES = parse_entities(os.getenv("TB_REPLICATION_ENTITIES", json.dumps(ENTITIES)))
 STATE_LOCK = threading.Lock()
 RUNNING = False
 LAST_RUN: dict | None = None
@@ -64,9 +84,9 @@ def _different(winner: dict, current: dict | None) -> bool:
     return current is None or winner != current
 
 
-def _auth(plugin: str | None, secret: str | None) -> None:
-    if plugin != PLUGIN_ID or not PLUGIN_SECRET or not hmac.compare_digest(secret or "", PLUGIN_SECRET):
-        raise HTTPException(status_code=401, detail="Invalid plugin credential")
+def _auth(token: str | None) -> None:
+    if not TOKEN or not hmac.compare_digest(token or "", TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid replication credential")
 
 
 def _headers() -> dict[str, str]:
@@ -107,9 +127,10 @@ def sync_once() -> dict:
         raise ValueError("Replication mode must be push or push_pull")
     if not LOCAL_URL or not PEER_URL or not TOKEN or LOCAL_URL == PEER_URL:
         raise ValueError("Local URL, different peer URL, and replication token are required")
-    summary = {"mode": MODE, "entities": {}, "started_at": datetime.now(timezone.utc).isoformat()}
+    summary = {"mode": MODE, "selected_entities": list(SELECTED_ENTITIES),
+               "entities": {}, "started_at": datetime.now(timezone.utc).isoformat()}
     with httpx.Client(timeout=httpx.Timeout(60, connect=10), follow_redirects=False) as client:
-        for entity in ENTITIES:
+        for entity in SELECTED_ENTITIES:
             local = _get_all(client, LOCAL_URL, entity)
             peer = _get_all(client, PEER_URL, entity)
             winners = select_winners(local, peer, MODE)
@@ -143,9 +164,9 @@ def _run(run_id: str, trigger: str) -> None:
             with httpx.Client(timeout=httpx.Timeout(10, connect=5)) as client:
                 response = client.post(
                     f"{LOCAL_URL}/replication/run-result",
-                    headers={"X-TestBench-Plugin": PLUGIN_ID,
-                             "X-TestBench-Plugin-Secret": PLUGIN_SECRET},
-                    json={**result, "mode": MODE, "peer_url": PEER_URL},
+                    headers=_headers(),
+                    json={**result, "mode": MODE, "peer_url": PEER_URL,
+                          "selected_entities": list(SELECTED_ENTITIES)},
                 )
                 response.raise_for_status()
             break
@@ -170,6 +191,7 @@ def start_run(trigger: str) -> dict:
         run_id = str(uuid4())
         CURRENT_RUN = {"run_id": run_id, "trigger": trigger, "state": "running",
                        "peer_url": PEER_URL, "mode": MODE,
+                       "selected_entities": list(SELECTED_ENTITIES),
                        "started_at": datetime.now(timezone.utc).isoformat()}
         accepted = dict(CURRENT_RUN)
     threading.Thread(target=_run, args=(run_id, trigger), daemon=True).start()
@@ -194,31 +216,25 @@ async def lifespan(_app: FastAPI):
     STOP.set()
 
 
-app = FastAPI(title="TestBench replication plugin", lifespan=lifespan)
+app = FastAPI(title="TestBench replication controller", lifespan=lifespan)
 
 
-@app.get("/plugin/v1/health")
+@app.get("/v1/health")
 def health():
     return {"status": "ok"}
 
 
-@app.get("/plugin/v1/manifest")
-def manifest(x_testbench_plugin: str | None = Header(None), x_testbench_plugin_secret: str | None = Header(None)):
-    _auth(x_testbench_plugin, x_testbench_plugin_secret)
-    return {"id": PLUGIN_ID, "label": "Replication", "version": "1.0.0",
-            "protocol_version": 1, "actions": []}
-
-
-@app.get("/plugin/v1/status")
-def status(x_testbench_plugin: str | None = Header(None), x_testbench_plugin_secret: str | None = Header(None)):
-    _auth(x_testbench_plugin, x_testbench_plugin_secret)
+@app.get("/v1/status")
+def status(x_testbench_replication_token: str | None = Header(None)):
+    _auth(x_testbench_replication_token)
     with STATE_LOCK:
         return {"mode": MODE, "interval_minutes": INTERVAL_MINUTES,
-                "peer_url": PEER_URL, "running": RUNNING,
+                "peer_url": PEER_URL, "selected_entities": list(SELECTED_ENTITIES),
+                "running": RUNNING,
                 "current_run": CURRENT_RUN, "last_run": LAST_RUN}
 
 
-@app.post("/plugin/v1/run", status_code=202)
-def run(x_testbench_plugin: str | None = Header(None), x_testbench_plugin_secret: str | None = Header(None)):
-    _auth(x_testbench_plugin, x_testbench_plugin_secret)
+@app.post("/v1/run", status_code=202)
+def run(x_testbench_replication_token: str | None = Header(None)):
+    _auth(x_testbench_replication_token)
     return start_run("manual")

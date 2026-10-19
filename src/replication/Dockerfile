@@ -1,7 +1,7 @@
 FROM python:3.13-slim-trixie AS build
 WORKDIR /build
 COPY pyproject.toml ./
-COPY replication_plugin ./replication_plugin
+COPY replication_controller ./replication_controller
 RUN --mount=type=secret,id=pip_index_url,env=PIP_INDEX_URL \
     --mount=type=secret,id=pip_trusted_host,env=PIP_TRUSTED_HOST \
     pip install --no-cache-dir --target /opt/python .
@@ -12,4 +12,4 @@ WORKDIR /app
 COPY --from=build /opt/python /opt/python
 USER 65532:65532
 EXPOSE 8080
-ENTRYPOINT ["/usr/bin/python3", "-m", "uvicorn", "replication_plugin.server:app", "--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["/usr/bin/python3", "-m", "uvicorn", "replication_controller.server:app", "--host", "0.0.0.0", "--port", "8080"]

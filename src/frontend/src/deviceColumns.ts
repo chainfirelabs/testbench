@@ -82,6 +82,8 @@ function onlineColumn(field: SchemaField) {
     headerName: field.label,
     editable: false,
     valueGetter: (p: any) => fieldValue(p.data, field),
+    // The dot's colour is the value, including grey for "never scanned".
+    blankPlaceholder: false,
     cellRenderer: (p: any) => {
       // green = online, red = scanned but down, gray = never scanned / no address
       const state = p.value ? 'online' : p.data?.data?.last_scanned_at ? 'offline' : 'unknown'

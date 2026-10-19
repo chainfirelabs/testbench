@@ -99,6 +99,17 @@ class EntityFieldConfigurationTests(unittest.TestCase):
         self.assertTrue(vendor_claims["component_support"]["visible"])
         self.assertFalse(vendor_claims["component_support"]["writable"])
 
+    def test_test_files_are_read_only_list_fields_after_the_selected_ones(self):
+        configured = self.configured({"tests": {"optional_fields": ["tag", "output", "notes"]}})
+        keys = [field["key"] for field in configured["tests"] if field["visible"]]
+        # Listing a file field is accepted and changes nothing: they are always present.
+        self.assertEqual(keys[-2:], ["output", "artifacts"])
+        self.assertLess(keys.index("notes"), keys.index("output"))
+        for key in ("output", "artifacts"):
+            field = next(item for item in configured["tests"] if item["key"] == key)
+            self.assertFalse(field["writable"])
+            self.assertEqual(field_payload(EntityField(entity="tests", **field, position=0))["database_storage"], "derived")
+
     def test_minimal_catalog_and_custom_json_field(self):
         configured = self.configured({
             "devices": {"optional_fields": ["status"], "custom_fields": [{"key": "rack", "label": "Rack"}]},

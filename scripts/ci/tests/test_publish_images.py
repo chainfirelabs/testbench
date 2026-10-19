@@ -213,7 +213,7 @@ class PublisherTests(unittest.TestCase):
         # A secret the Dockerfile never mounts would silently leave pip on PyPI.
         contexts = {"backend": "src/backend", "frontend": "src/frontend", "mcp": "src/mcp-server",
                     "network-scan": "src/plugins/network-scan", "device-info": "src/plugins/device-info",
-                    "reboot": "src/plugins/reboot", "replication": "src/plugins/replication"}
+                    "reboot": "src/plugins/reboot", "replication": "src/replication"}
         for component, context in contexts.items():
             with self.subTest(component=component):
                 dockerfile = (SCRIPT.parents[2] / context / "Dockerfile").read_text()

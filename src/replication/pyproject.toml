@@ -1,5 +1,5 @@
 [project]
-name = "testbench-replication-plugin"
+name = "testbench-replication-controller"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["fastapi>=0.111", "uvicorn>=0.30", "httpx>=0.27"]
@@ -9,4 +9,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["replication_plugin*"]
+include = ["replication_controller*"]

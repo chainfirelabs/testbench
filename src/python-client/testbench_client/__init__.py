@@ -54,6 +54,8 @@ from .models import (
     Identity,
     Software,
     Test,
+    TestArtifact,
+    TestOutput,
     VendorDevice,
 )
 
@@ -63,6 +65,8 @@ __all__ = [
     "DeviceType",
     "Software",
     "Test",
+    "TestArtifact",
+    "TestOutput",
     "VendorDevice",
     "Identity",
     "DEVICE_STATUSES",

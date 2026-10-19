@@ -16,6 +16,7 @@
  */
 import { computed, defineComponent, h, onMounted, ref, watch, type PropType } from 'vue'
 import type { RowBadge } from './DataTable.vue'
+import { BLANK_CLASS, BLANK_TEXT, isBlankValue } from '../blankCell'
 
 /** One button on a card. Resolved by DataTable so the grid and the cards agree. */
 export interface CardAction {
@@ -82,7 +83,8 @@ const cards = computed(() =>
  * status dots, the links into detail pages) and `valueFormatter` (returns
  * text). Both are reused as-is so a card and a grid row never disagree about
  * how a value reads. The renderers in this app only ever touch `value` and
- * `data`, so that is what they are given.
+ * `data`, so that is what they are given. Blank cells read `N/A`, as they do
+ * in the grid.
  */
 const CellValue = defineComponent({
   name: 'CellValue',
@@ -98,8 +100,13 @@ const CellValue = defineComponent({
       const el = host.value
       if (!el) return
       el.textContent = ''
+      el.classList.remove(BLANK_CLASS)
       const col = cellProps.col
-      const value = col.field ? cellProps.row[col.field] : undefined
+      // Schema fields live under `data` and reach the grid through a getter;
+      // reading the row's own key would call every one of them blank.
+      const value = typeof col.valueGetter === 'function'
+        ? col.valueGetter({ data: cellProps.row, colDef: col })
+        : col.field ? cellProps.row[col.field] : undefined
 
       if (typeof col.cellRenderer === 'function') {
         const node = col.cellRenderer({ value, data: cellProps.row })
@@ -113,10 +120,12 @@ const CellValue = defineComponent({
 
       if (typeof col.valueFormatter === 'function') {
         el.textContent = col.valueFormatter({ value, data: cellProps.row }) ?? ''
+        if (el.textContent === BLANK_TEXT) el.classList.add(BLANK_CLASS)
         return
       }
 
-      el.textContent = value == null || value === '' ? '—' : String(value)
+      el.textContent = isBlankValue(value) ? BLANK_TEXT : String(value)
+      if (el.textContent === BLANK_TEXT) el.classList.add(BLANK_CLASS)
     }
 
     onMounted(paint)

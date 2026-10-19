@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"regexp"
@@ -112,16 +114,15 @@ func FromEnv(options Options) (*Client, error) {
 }
 func (c *Client) Close() { c.http.CloseIdleConnections() }
 
-// Request is the escape hatch for other API endpoints. Path must be a relative
-// API path beginning with /. Pass nil for an absent body or discarded response.
-func (c *Client) Request(ctx context.Context, method, path string, query url.Values, body, out any) error {
+// endpoint validates a relative API path and merges query into it.
+func endpoint(path string, query url.Values) (string, error) {
 	u, err := url.Parse(path)
 	if err != nil || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || u.IsAbs() || u.Host != "" || u.Fragment != "" {
-		return fmt.Errorf("testbench: invalid API path")
+		return "", fmt.Errorf("testbench: invalid API path")
 	}
 	for _, part := range strings.Split(u.Path, "/") {
 		if part == "." || part == ".." {
-			return fmt.Errorf("testbench: dot path segments are not supported")
+			return "", fmt.Errorf("testbench: dot path segments are not supported")
 		}
 	}
 	q := u.Query()
@@ -129,6 +130,56 @@ func (c *Client) Request(ctx context.Context, method, path string, query url.Val
 		q[k] = append([]string(nil), values...)
 	}
 	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func (c *Client) newRequest(ctx context.Context, method, target string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+target, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "testbench-go-client/0.1.0")
+	return req, nil
+}
+
+// apiError keeps the API's own detail when the body carries one.
+func apiError(status int, method, path string, raw []byte) *APIError {
+	var detail any = string(raw)
+	var parsed map[string]any
+	if json.Unmarshal(raw, &parsed) == nil {
+		if d, ok := parsed["detail"]; ok {
+			detail = d
+		} else {
+			detail = parsed
+		}
+	}
+	return &APIError{status, method, path, detail}
+}
+
+func (c *Client) wait(ctx context.Context, attempt int) error {
+	delay := time.Duration(attempt) * 250 * time.Millisecond
+	if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// Request is the escape hatch for other API endpoints. Path must be a relative
+// API path beginning with /. Pass nil for an absent body or discarded response.
+func (c *Client) Request(ctx context.Context, method, path string, query url.Values, body, out any) error {
+	target, err := endpoint(path, query)
+	if err != nil {
+		return err
+	}
 	var payload []byte
 	if body != nil {
 		payload, err = json.Marshal(body)
@@ -143,25 +194,14 @@ func (c *Client) Request(ctx context.Context, method, path string, query url.Val
 	}
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * 250 * time.Millisecond
-			if delay > 5*time.Second {
-				delay = 5 * time.Second
-			}
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
+			if err := c.wait(ctx, attempt); err != nil {
+				return err
 			}
 		}
-		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+u.String(), bytes.NewReader(payload))
+		req, err := c.newRequest(ctx, method, target, bytes.NewReader(payload))
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+c.token)
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", "testbench-go-client/0.1.0")
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -187,25 +227,118 @@ func (c *Client) Request(ctx context.Context, method, path string, query url.Val
 			if resp.StatusCode >= 500 && attempt+1 < attempts {
 				continue
 			}
-			var detail any = string(raw)
-			var parsed map[string]any
-			if json.Unmarshal(raw, &parsed) == nil {
-				if d, ok := parsed["detail"]; ok {
-					detail = d
-				} else {
-					detail = parsed
-				}
-			}
-			return &APIError{resp.StatusCode, method, path, detail}
+			return apiError(resp.StatusCode, method, path, raw)
 		}
-		if out == nil || len(raw) == 0 || resp.StatusCode == 204 {
-			return nil
-		}
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		return dec.Decode(out)
+		return decode(raw, resp.StatusCode, out)
 	}
 	return fmt.Errorf("testbench: request failed")
+}
+
+func decode(raw []byte, status int, out any) error {
+	if out == nil || len(raw) == 0 || status == 204 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(out)
+}
+
+// Download GETs an endpoint that answers with a file and copies it into w,
+// returning the bytes written. It is retried like any GET, but only until the
+// first byte reaches w: a retry after that would append a second copy.
+func (c *Client) Download(ctx context.Context, path string, w io.Writer) (int64, error) {
+	target, err := endpoint(path, nil)
+	if err != nil {
+		return 0, err
+	}
+	attempts := 1 + c.retries
+	var last error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if err := c.wait(ctx, attempt); err != nil {
+				return 0, err
+			}
+		}
+		req, err := c.newRequest(ctx, "GET", target, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("Accept", "*/*")
+		resp, err := c.http.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			last = err
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			last = apiError(resp.StatusCode, "GET", path, raw)
+			if resp.StatusCode >= 500 {
+				continue
+			}
+			return 0, last
+		}
+		n, err := io.Copy(w, resp.Body)
+		resp.Body.Close()
+		if err != nil && n == 0 && ctx.Err() == nil {
+			last = err
+			continue
+		}
+		return n, err
+	}
+	return 0, last
+}
+
+// upload sends one file as multipart/form-data under the field name "file".
+// Streamed through a pipe, so a large artifact is never held in memory; like
+// every write, it is not retried.
+func (c *Client) upload(ctx context.Context, method, path, filename, contentType string, r io.Reader, out any) error {
+	target, err := endpoint(path, nil)
+	if err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	form := multipart.NewWriter(pw)
+	go func() {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, filename))
+		header.Set("Content-Type", contentType)
+		part, err := form.CreatePart(header)
+		if err == nil {
+			_, err = io.Copy(part, r)
+		}
+		if err == nil {
+			err = form.Close()
+		}
+		pw.CloseWithError(err)
+	}()
+	// Closing the reader unblocks the writer if the server answers before
+	// reading the whole body, as it does when refusing an oversized file.
+	defer pr.Close()
+	req, err := c.newRequest(ctx, method, target, pr)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return apiError(resp.StatusCode, method, path, raw)
+	}
+	return decode(raw, resp.StatusCode, out)
 }
 
 // ListOptions accepts all API filters (including dynamic field keys). Limit=0

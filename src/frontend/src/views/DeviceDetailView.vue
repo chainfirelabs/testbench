@@ -2,6 +2,8 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import DetailModal from '../components/DetailModal.vue'
+import TestArtifactsModal from '../components/TestArtifactsModal.vue'
+import TestOutputModal from '../components/TestOutputModal.vue'
 import DetailValue from '../components/DetailValue.vue'
 import { api } from '../api/client'
 import { daysFromToday, daysUntil, formatDate } from '../dates'
@@ -23,10 +25,23 @@ import {
   type DeviceLinkOverrides,
 } from '../deviceInventory'
 import { deviceTypes, loadDeviceTypes } from '../deviceTypes'
+import { BLANK_TEXT } from '../blankCell'
+import { useEntityFields } from '../entityFields'
+import ComponentModal from '../components/ComponentModal.vue'
+import InventoryMatchesModal from '../components/InventoryMatchesModal.vue'
+import type { ComponentPanelState } from '../componentPanel'
+import {
+  NO_COMPONENT_CLAIMS, componentSupportPanel, componentSupportSummary, componentSupportTitle,
+} from '../vendorComponentSupport'
+import { INVENTORY_DEVICES_FIELD, inventoryDevicesCount, inventoryDevicesText } from '../inventoryDevices'
+import { fieldText, fieldValue as listValue, isBlank, listFields, opensDetail } from '../schemaTable'
+import { TEST_ARTIFACTS_FIELD, TEST_OUTPUT_FIELD } from '../testArtifacts'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
+const artifactTest = ref<any | null>(null)
+const outputTest = ref<any | null>(null)
 const detail = ref<any>(null)
 const tab = ref(route.query.tab === 'tests' ? 'tests' : 'details')
 const error = ref('')
@@ -39,25 +54,6 @@ const toast = ref('')
 const displayFields = ref<SchemaField[]>([])
 const configuredType = computed(() => deviceTypes.value.find((item) => item.id === detail.value?.device_type_id))
 const visibleFields = computed(() => displayFields.value.filter((field) => field.visible))
-const outputOpen = ref(false)
-const outputLoading = ref(false)
-const outputText = ref('')
-const outputError = ref('')
-
-async function openOutput() {
-  outputOpen.value = true
-  outputLoading.value = true
-  outputText.value = ''
-  outputError.value = ''
-  try {
-    const result = await api<{ text: string }>(`/devices/${encodeURIComponent(detail.value.id)}/output`)
-    outputText.value = result.text
-  } catch (error: any) {
-    outputError.value = error.message || 'Could not load output'
-  } finally {
-    outputLoading.value = false
-  }
-}
 const writableFields = computed(() =>
   visibleFields.value.filter((field) => field.writable && field.storage !== 'derived'),
 )
@@ -100,7 +96,7 @@ const tabs = [
 ]
 
 /** For the DATE columns, which have no time to render and no zone to shift. */
-const fmtDay = (v: any) => formatDate(v) || '—'
+const fmtDay = (v: any) => formatDate(v) || BLANK_TEXT
 
 /**
  * Days past the return date, or null. The same rule the API derives `overdue`
@@ -189,7 +185,7 @@ async function loadChangelog(page = 1) {
 
 /** A changed value as one line. `null` is "not set", not the word "null". */
 function changeText(value: any): string {
-  if (value === null || value === undefined || value === '') return '—'
+  if (value === null || value === undefined || value === '') return BLANK_TEXT
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
@@ -794,7 +790,34 @@ watch(
   },
 )
 
-const testCols = ['software_name', 'software_version', 'component_name', 'component_version', 'outcome', 'tag', 'run_at', 'notes', 'misc_data', 'created_by_username']
+// The Tests tab follows Schema → Tests like the Tests page does. The device
+// column is left out: every test here is this device's.
+const { fields: testFields, ready: testFieldsReady, loadFields: loadTestFields } = useEntityFields('tests')
+const testColumns = computed(() => listFields(testFields.value, ['device_unique_id']))
+
+// A device can collect hundreds of runs; the tab shows them a page at a time.
+const TEST_PAGE_SIZE = 50
+const testPage = ref(1)
+const testPageCount = computed(() => Math.max(1, Math.ceil((detail.value?.all_tests?.length || 0) / TEST_PAGE_SIZE)))
+const pagedTests = computed(() => (detail.value?.all_tests || [])
+  .slice((testPage.value - 1) * TEST_PAGE_SIZE, testPage.value * TEST_PAGE_SIZE))
+// Another device starts at its newest runs; a shorter list never strands the
+// tab on a page past its end.
+watch(() => route.params.id, () => { testPage.value = 1 })
+watch(testPageCount, (count) => { if (testPage.value > count) testPage.value = count })
+function showTestPage(page: number) {
+  testPage.value = Math.min(Math.max(1, page), testPageCount.value)
+  document.querySelector('.content')?.scrollTo({ top: 0 })
+}
+
+// Claim fields a vendor states as "any" when it leaves them blank: a claim
+// that names no firmware covers every firmware.
+const CLAIM_MATCH_FIELDS = ['make', 'model', 'firmware_version', 'hardware_version', 'architecture']
+const claimText = (claim: any, field: any) => fieldText(listValue(claim, field), field, formatDate)
+// Components and inventory devices read as counts that open their lists, the
+// same as in the vendor claim grids.
+const componentPanel = ref<ComponentPanelState | null>(null)
+const inventoryClaim = ref<any | null>(null)
 
 watch(() => route.query.tab, (requested) => {
   if (requested === 'tests') tab.value = 'tests'
@@ -802,6 +825,9 @@ watch(() => route.query.tab, (requested) => {
 
 watch([detail, tab, () => route.query.test], async () => {
   if (tab.value !== 'tests' || typeof route.query.test !== 'string') return
+  // A link to one run opens on the page that holds it.
+  const index = (detail.value?.all_tests || []).findIndex((t: any) => t.id === route.query.test)
+  if (index >= 0) testPage.value = Math.floor(index / TEST_PAGE_SIZE) + 1
   await nextTick()
   document.getElementById(`test-${route.query.test}`)?.scrollIntoView({ block: 'center' })
 }, { flush: 'post' })
@@ -827,7 +853,7 @@ async function loadActions() {
 }
 
 onMounted(async () => {
-  await Promise.all([load(), loadDeviceTypes()])
+  await Promise.all([load(), loadDeviceTypes(), loadTestFields()])
   // The schema depends on the device's type, so it is fetched once the device
   // is in hand rather than alongside it.
   await Promise.all([loadSchema(), loadActions(), loadRelatedCounts()])
@@ -969,11 +995,7 @@ watch(() => detail.value?.device_type_id, () => {
                 {{ fmtDay(fieldValue(detail, field)) }}
               </template>
               <template v-else-if="field.type === 'select'">
-                {{ fieldValue(detail, field) ? optionLabel(fieldValue(detail, field)) : '—' }}
-              </template>
-              <template v-else-if="field.key === 'output' && field.protected">
-                <button v-if="fieldValue(detail, field)" class="btn btn-mini" type="button" @click="openOutput">View output</button>
-                <template v-else>—</template>
+                {{ fieldValue(detail, field) ? optionLabel(fieldValue(detail, field)) : BLANK_TEXT }}
               </template>
               <!-- An address the device answers on opens its web page. The
                    address itself is the link here, unlike the grid: nothing on
@@ -988,7 +1010,7 @@ watch(() => detail.value?.device_type_id, () => {
                   :title="`Open ${addressUrl(field)}`"
                 >{{ fieldValue(detail, field) }}</a>
               </template>
-              <template v-else>{{ fieldValue(detail, field) || '—' }}</template>
+              <template v-else>{{ fieldValue(detail, field) || BLANK_TEXT }}</template>
               <span v-if="field.role === 'checkout_due' && daysOverdue !== null">
                 — {{ daysOverdue }} day{{ daysOverdue === 1 ? '' : 's' }} overdue
               </span>
@@ -1213,7 +1235,7 @@ watch(() => detail.value?.device_type_id, () => {
                       {{ item.software.name }}
                     </router-link>
                   </td>
-                  <td data-label="Version">{{ item.software.version || '—' }}</td>
+                  <td data-label="Version">{{ item.software.version || BLANK_TEXT }}</td>
                   <td data-label="Vendor says">
                     <span class="support-pill" :class="item.support_status">
                       {{ SUPPORT_LABELS[item.support_status] || item.support_status }}
@@ -1230,39 +1252,35 @@ watch(() => detail.value?.device_type_id, () => {
                     <table class="data-list compat-claims">
                       <thead>
                         <tr>
-                          <th>Make</th>
-                          <th>Model</th>
-                          <th>Firmware</th>
-                          <th>Hardware</th>
-                          <th>Architecture</th>
-                          <th>Status</th>
-                          <th>Source</th>
-                          <th>Notes</th>
+                          <th v-for="f in item.fields" :key="f.key">{{ f.label }}</th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr v-for="vd in item.vendor_devices" :key="vd.id">
-                          <td data-label="Make">{{ vd.make || 'any' }}</td>
-                          <td data-label="Model">{{ vd.model || 'any' }}</td>
-                          <td data-label="Firmware">{{ vd.firmware_version || 'any' }}</td>
-                          <td data-label="Hardware">{{ vd.hardware_version || 'any' }}</td>
-                          <td data-label="Architecture">{{ vd.architecture || 'any' }}</td>
-                          <td data-label="Status">
-                            <span class="support-pill" :class="vd.support_status">
+                          <td v-for="f in item.fields" :key="f.key" :data-label="f.label">
+                            <span v-if="f.key === 'support_status'" class="support-pill" :class="vd.support_status">
                               {{ SUPPORT_LABELS[vd.support_status] || vd.support_status }}
                             </span>
-                          </td>
-                          <td data-label="Source">{{ vd.source || '—' }}</td>
-                          <td data-label="Notes">
-                            <button
-                              v-if="vd.notes"
-                              type="button"
-                              class="cell-view-btn"
-                              @click="openDetail('Notes', vd.notes)"
-                            >
-                              View Notes
-                            </button>
-                            <span v-else>—</span>
+                            <template v-else-if="f.key === 'component_support'">
+                              <button v-if="componentSupportSummary(vd)" type="button" class="component-cell-button"
+                                :title="componentSupportTitle(vd)" @click="componentPanel = componentSupportPanel(vd, item.software)">
+                                <strong>{{ componentSupportSummary(vd) }}</strong>
+                              </button>
+                              <span v-else class="muted">{{ NO_COMPONENT_CLAIMS }}</span>
+                            </template>
+                            <template v-else-if="f.key === INVENTORY_DEVICES_FIELD">
+                              <button v-if="inventoryDevicesCount(vd)" type="button" class="cell-view-btn inventory-devices-btn"
+                                :title="inventoryDevicesText(vd)" @click="inventoryClaim = vd">{{ inventoryDevicesCount(vd) }}</button>
+                              <span v-else class="cell-blank">{{ BLANK_TEXT }}</span>
+                            </template>
+                            <template v-else-if="opensDetail(f)">
+                              <button v-if="!isBlank(listValue(vd, f))" type="button" class="cell-view-btn"
+                                @click="openDetail(f.label, listValue(vd, f))">View {{ f.label }}</button>
+                              <span v-else class="cell-blank">{{ BLANK_TEXT }}</span>
+                            </template>
+                            <template v-else>
+                              {{ claimText(vd, f) || (CLAIM_MATCH_FIELDS.includes(f.key) ? 'any' : BLANK_TEXT) }}
+                            </template>
                           </td>
                         </tr>
                       </tbody>
@@ -1285,49 +1303,41 @@ watch(() => detail.value?.device_type_id, () => {
       <table class="data-list">
         <thead>
           <tr>
-            <th v-for="c in testCols" :key="c">{{ c.split('_').join(' ') }}</th>
+            <th v-for="f in testColumns" :key="f.key">{{ f.label }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in detail.all_tests" :id="`test-${t.id}`" :key="t.id" :class="{ 'test-search-target': route.query.test === t.id }">
-            <td class="row-heading" data-label="Software">{{ t.software_name }}</td>
-            <td data-label="Version">{{ t.software_version || '—' }}</td>
-            <td data-label="Component">{{ t.component_name || '—' }}</td>
-            <td data-label="Component version">{{ t.component_version || '—' }}</td>
-            <td data-label="Outcome">
-              <span class="status-pill" style="font-size: 11px" :style="{ background: outcomeBadge(t.outcome) }">
+          <tr v-for="t in pagedTests" :id="`test-${t.id}`" :key="t.id" :class="{ 'test-search-target': route.query.test === t.id }">
+            <td v-for="f in testColumns" :key="f.key" :data-label="f.label"
+              :class="{ 'row-heading': f.key === 'software_name' }">
+              <span v-if="f.key === 'outcome'" class="status-pill" style="font-size: 11px" :style="{ background: outcomeBadge(t.outcome) }">
                 {{ t.outcome }}
               </span>
+              <template v-else-if="f.key === TEST_OUTPUT_FIELD">
+                <button v-if="t.output_filename || auth.can(PERMISSION.testsEdit)" class="btn btn-mini" :title="t.output_filename || undefined"
+                  @click="outputTest = t">{{ t.output_filename ? 'View output' : 'Add output' }}</button>
+                <span v-else class="cell-blank">{{ BLANK_TEXT }}</span>
+              </template>
+              <button v-else-if="f.key === TEST_ARTIFACTS_FIELD" class="btn btn-mini" @click="artifactTest = t">Artifacts ({{ t.artifact_count || 0 }})</button>
+              <template v-else-if="opensDetail(f)">
+                <button v-if="!isBlank(listValue(t, f))" type="button" class="cell-view-btn"
+                  @click="openDetail(f.label, listValue(t, f))">View {{ f.label }}</button>
+                <span v-else class="cell-blank">{{ BLANK_TEXT }}</span>
+              </template>
+              <template v-else>{{ fieldText(listValue(t, f), f, formatDate) || BLANK_TEXT }}</template>
             </td>
-            <td data-label="Tag">{{ t.tag }}</td>
-            <td data-label="Run at">{{ fmtDay(t.run_at) }}</td>
-            <td data-label="Notes">
-              <button
-                v-if="t.notes"
-                type="button"
-                class="cell-view-btn"
-                @click="openDetail('Notes', t.notes)"
-              >
-                View Notes
-              </button>
-              <span v-else>—</span>
-            </td>
-            <td data-label="Test data">
-              <button
-                v-if="t.misc_data && Object.keys(t.misc_data).length"
-                type="button"
-                class="cell-view-btn"
-                @click="openDetail('Misc Data', t.misc_data)"
-              >
-                View Misc Data
-              </button>
-              <span v-else>—</span>
-            </td>
-            <td data-label="By">{{ t.created_by_username || '—' }}</td>
           </tr>
         </tbody>
       </table>
       </div>
+      <nav v-if="testPageCount > 1" class="test-pager" aria-label="Test pages">
+        <button class="btn btn-mini" :disabled="testPage === 1" @click="showTestPage(testPage - 1)">Previous</button>
+        <span class="muted">
+          {{ (testPage - 1) * TEST_PAGE_SIZE + 1 }}–{{ Math.min(testPage * TEST_PAGE_SIZE, detail.all_tests.length) }}
+          of {{ detail.all_tests.length }} · page {{ testPage }} of {{ testPageCount }}
+        </span>
+        <button class="btn btn-mini" :disabled="testPage === testPageCount" @click="showTestPage(testPage + 1)">Next</button>
+      </nav>
     </div>
 
     <div v-else-if="tab === 'changelog'">
@@ -1394,17 +1404,15 @@ watch(() => detail.value?.device_type_id, () => {
       @close="detail_ = null"
     />
 
-    <div v-if="outputOpen" class="modal-backdrop" @click.self="outputOpen = false" @keydown.esc="outputOpen = false">
-      <div class="modal-card modal-wide" role="dialog" aria-modal="true" aria-label="Device output">
-        <h3 class="modal-title">Device output</h3>
-        <div class="modal-body">
-          <p v-if="outputLoading">Loading output…</p>
-          <p v-else-if="outputError" class="login-error">{{ outputError }}</p>
-          <pre v-else class="output-text">{{ outputText }}</pre>
-        </div>
-        <div class="modal-actions"><button class="btn btn-primary" type="button" @click="outputOpen = false">Close</button></div>
-      </div>
-    </div>
+    <TestArtifactsModal v-if="artifactTest" :test-id="artifactTest.id"
+      @close="artifactTest = null" @updated="(count) => { artifactTest.artifact_count = count }" />
+    <ComponentModal v-if="componentPanel" :panel="componentPanel" @close="componentPanel = null" />
+    <InventoryMatchesModal v-if="inventoryClaim" :software-id="inventoryClaim.software_id" :claim="inventoryClaim"
+      @close="inventoryClaim = null" />
+    <TestOutputModal v-if="outputTest" :test-id="outputTest.id"
+      :title="`Output — ${outputTest.software_name}${outputTest.software_version ? ` ${outputTest.software_version}` : ''}`"
+      @close="outputTest = null"
+      @updated="(output) => { outputTest.output_filename = output?.filename ?? null; outputTest.output_size_bytes = output?.size_bytes ?? null }" />
 
     <div v-if="toast" class="toast">{{ toast }}</div>
   </div>
@@ -1414,7 +1422,7 @@ watch(() => detail.value?.device_type_id, () => {
 </template>
 
 <style scoped>
-.output-text { max-height: 65vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.test-pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; }
 /* ---------- changelog ----------
  * A list of events, not a table: entries have between zero and a dozen field
  * changes each, and a table with one row per change loses which change belongs

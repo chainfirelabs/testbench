@@ -9,7 +9,9 @@ import ComponentSupportEditor from '../components/ComponentSupportEditor.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
+import TestedDeviceTestsModal, { type TestedDeviceGroup } from '../components/TestedDeviceTestsModal.vue'
 import ComponentModal from '../components/ComponentModal.vue'
+import InventoryMatchesModal from '../components/InventoryMatchesModal.vue'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import DetailValue from '../components/DetailValue.vue'
 import SuggestCellEditor from '../components/SuggestCellEditor.vue'
@@ -30,9 +32,11 @@ import { remoteTableParams } from '../remoteTable'
 import { SUPPORT_LABELS, SUPPORT_VALUES } from '../constants'
 import { groupBundleComponents } from '../bundleComponentGroups'
 import { componentSupportColumn } from '../vendorComponentSupport'
+import { INVENTORY_DEVICES_FIELD, inventoryDevicesColumn } from '../inventoryDevices'
 import { componentSummaryLabel, type ComponentPanelState } from '../componentPanel'
 import { softwareVersionDeletionUrl } from '../softwareVersionDeletion'
 import { softwareSearchUrl } from '../globalSearch'
+import { BLANK_TEXT } from '../blankCell'
 
 const route = useRoute()
 const router = useRouter()
@@ -276,7 +280,7 @@ const tabs = [
 ]
 const tab = ref('details')
 
-const fmt = (v: any) => (v ? new Date(v).toLocaleString() : '—')
+const fmt = (v: any) => (v ? new Date(v).toLocaleString() : BLANK_TEXT)
 
 function showToast(msg: string, isError = false) {
   toast.value = msg
@@ -389,6 +393,21 @@ async function saveEdit() {
  * link to a row in `devices`: we may not own any of them.
  */
 
+const inventoryClaim = ref<any | null>(null)
+const testedGroup = ref<TestedDeviceGroup | null>(null)
+
+function openTestedGroup(row: any) {
+  if (!software.value || !row?.device_id) return
+  testedGroup.value = {
+    softwareId: software.value.id,
+    deviceId: row.device_id,
+    deviceUniqueId: row.unique_id,
+    componentId: row.component_id,
+    componentLabel: row.component_id
+      ? `${row.component_name}${row.component_version ? ` ${row.component_version}` : ''}`
+      : `${software.value.name}${software.value.version ? ` ${software.value.version}` : ''} (no component)`,
+  }
+}
 const vendorRows = ref<any[]>([])
 const vendorColumnsReady = ref(false)
 const vendorFields = ref<EntityField[]>([])
@@ -478,7 +497,7 @@ const baseVendorColumns = [
       const members = p.data?._firmwareMembers || []
       if (members.length <= 1) {
         const span = document.createElement('span')
-        span.textContent = p.value || '—'
+        span.textContent = p.value || ''
         return span
       }
       const select = document.createElement('select')
@@ -548,19 +567,18 @@ const baseVendorColumns = [
   },
 ]
 
-const vendorColumns = computed(() => {
-  const columns = vendorFields.value
+const vendorColumns = computed(() => vendorFields.value
   .filter((field) => field.visible && field.list_visible)
   .map((field) => {
     const builtIn = field.key === 'component_support'
       ? componentSupportColumn((panel) => { componentPanel.value = panel })
-      : baseVendorColumns.find((column: any) => column.field === field.key)
+      : field.key === INVENTORY_DEVICES_FIELD
+        ? inventoryDevicesColumn((row) => { inventoryClaim.value = { ...row } })
+        : baseVendorColumns.find((column: any) => column.field === field.key)
     const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
     if (field.type === 'json' || field.sensitive || field.key === 'misc_data') column.filter = false
     return column
-  })
-  return columns
-})
+  }))
 const schemaVisibleVendorColumns = computed(() =>
   vendorColumns.value.some((column: any) => column.colId === 'component_name') ? ['component_name'] : [],
 )
@@ -990,7 +1008,25 @@ const testedColumns = [
       return el
     },
   },
-  { field: 'test_count', filter: false, headerName: 'Tests', maxWidth: 110 },
+  {
+    field: 'test_count',
+    filter: false,
+    headerName: 'Tests',
+    maxWidth: 110,
+    // The count is the way in to the runs it counts.
+    cellRenderer: (p: any) => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'btn btn-mini'
+      button.textContent = String(p.value ?? 0)
+      button.title = 'View these tests'
+      button.addEventListener('click', (event) => {
+        event.stopPropagation()
+        openTestedGroup(p.data)
+      })
+      return button
+    },
+  },
   {
     field: 'last_test_at',
     filter: false,
@@ -1017,6 +1053,8 @@ async function loadRemoteTestedDevices(request: RemoteTableRequest) {
       id: `${t.component?.id || softwareId}:${t.device.id}`,
       component_name: t.component?.name || '',
       component_version: t.component?.version || '',
+      device_id: t.device.id,
+      component_id: t.component?.id || null,
       unique_id: t.device.unique_id,
       make: t.device.make,
       model: t.device.model,
@@ -1397,6 +1435,9 @@ onMounted(load)
       :value="detail.value"
       @close="detail = null"
     />
+    <TestedDeviceTestsModal v-if="testedGroup" :group="testedGroup" @close="testedGroup = null" />
+    <InventoryMatchesModal v-if="inventoryClaim" :software-id="software.id" :claim="inventoryClaim"
+      @close="inventoryClaim = null" />
     <ComponentModal v-if="componentPanel" :panel="componentPanel" @close="componentPanel = null" />
     <ImportProgressModal :state="importState" @close="closeImport" />
 

@@ -22,37 +22,57 @@ export function componentSupportText(row: any): string {
     .join(', ')
 }
 
+export const NO_COMPONENT_CLAIMS = 'No explicit component claims'
+
+/** "3 components" (or the one component's name); empty when the claim names none. */
+export function componentSupportSummary(row: any): string {
+  const entries = claims(row)
+  return entries.length ? componentSummaryLabel(entries.map((entry) => entry.component_name)) : ''
+}
+
+export function componentSupportTitle(row: any): string {
+  const count = claims(row).length
+  return `View ${count} component version${count === 1 ? '' : 's'}`
+}
+
+/**
+ * The dialog listing a claim's components. `software` names the version when
+ * the row does not, as on a device page where claims are grouped under it.
+ */
+export function componentSupportPanel(row: any, software?: { name?: string; version?: string | null }): ComponentPanelState {
+  return {
+    title: 'Component support',
+    subtitle: [row?.software_name ?? software?.name, row?.software_version ?? software?.version,
+      [row?.make, row?.model].filter(Boolean).join(' ')].filter(Boolean).join(' · '),
+    matching: !!row?.matching_components?.length,
+    items: claims(row).map((entry) => ({
+      name: entry.component_name,
+      version: entry.component_version,
+      status: entry.support_status,
+      inherited: entry.inherited,
+    })),
+  }
+}
+
 function componentSupportRenderer(params: any, onOpen: (panel: ComponentPanelState) => void): HTMLElement {
-  const entries = claims(params.data)
-  if (!entries.length) {
+  const summary = componentSupportSummary(params.data)
+  if (!summary) {
     const empty = document.createElement('span')
     empty.className = 'muted'
-    empty.textContent = 'No explicit component claims'
+    empty.textContent = NO_COMPONENT_CLAIMS
     return empty
   }
 
   const trigger = document.createElement('button')
   trigger.type = 'button'
   trigger.className = 'component-cell-button'
-  const matching = !!params.data?.matching_components?.length
   const label = document.createElement('strong')
-  label.textContent = componentSummaryLabel(entries.map((entry) => entry.component_name))
+  label.textContent = summary
   trigger.append(label)
-  trigger.title = `View ${entries.length} component version${entries.length === 1 ? '' : 's'}`
+  trigger.title = componentSupportTitle(params.data)
   trigger.addEventListener('click', (event) => {
     event.stopPropagation()
-    onOpen({
-      title: 'Component support',
-      subtitle: [params.data?.software_name, params.data?.software_version,
-        [params.data?.make, params.data?.model].filter(Boolean).join(' ')].filter(Boolean).join(' · '),
-      matching,
-      items: entries.map((entry) => ({
-        name: entry.component_name,
-        version: entry.component_version,
-        status: entry.support_status,
-        inherited: entry.inherited,
-      })),
-    })
+    onOpen(componentSupportPanel(params.data))
   })
   return trigger
 }

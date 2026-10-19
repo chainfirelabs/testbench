@@ -6,6 +6,10 @@ Python client: identity, inventory, overdue devices, device actions and schemas,
 software and versions, vendor compatibility claims, and test results. All
 paginated listings fetch every page unless a limit is set.
 
+Its only writes are a test's files: uploading, downloading and deleting
+artifacts, and setting, reading and deleting the test's text output (see
+[Test artifacts and output](#test-artifacts-and-output)).
+
 ## Command-line executable
 
 Build into `bin/` from the repository root (requires Go 1.22+):
@@ -25,7 +29,8 @@ placed it directly in the repository root.
 
 If you already moved the executable into `bin/`, skip the build and run
 `./bin/testbench` from the repository root. Mint the token under
-**Profile → API keys**; a readonly key is sufficient for these queries.
+**Profile → API keys**; a readonly key is sufficient for these queries
+(uploading or deleting test files needs `tests.edit`).
 Go is only needed to build, not to run the resulting executable on a compatible
 operating system and architecture.
 
@@ -112,7 +117,46 @@ including for `--get`. CSV uses the selected columns with standard escaping.
 keep the token out of shell command arguments. `--timeout 5m` changes the entire
 command's deadline (default two minutes); Ctrl+C cancels it. Exit codes are 0
 for success/help, 1 for request/output failures, and 2 for invalid arguments or
-configuration. Commands only query data; none modify inventory or run plugins.
+configuration. Apart from the `--test` file commands below, commands only query
+data; none modify inventory or run plugins.
+
+## Test artifacts and output
+
+A recorded test can carry any number of artifacts (reports, captures,
+screenshots, archives) and one ASCII text output, which the TestBench UI shows
+in a viewer. The server stores both beside the test in its object store, under
+`tests/<test-id>/artifacts/` and `tests/<test-id>/output/`, so object storage
+must be enabled there. Each command takes the test's UUID with `--test` (from
+`--tests` listings or `--tests --get`) and exactly one action:
+
+```bash
+./bin/testbench --test TEST_UUID --artifacts                     # list (table, json or csv)
+./bin/testbench --test TEST_UUID --upload-artifact report.zip --upload-artifact capture.pcap
+./bin/testbench --test TEST_UUID --download-artifact ARTIFACT_UUID              # ./<its filename>
+./bin/testbench --test TEST_UUID --download-artifact ARTIFACT_UUID --out downloads/
+./bin/testbench --test TEST_UUID --download-artifact ARTIFACT_UUID --out - > copy.zip
+./bin/testbench --test TEST_UUID --delete-artifact ARTIFACT_UUID
+
+./bin/testbench --test TEST_UUID --output                        # prints the text
+./bin/testbench --test TEST_UUID --set-output run.log            # replaces any existing output
+make-report | ./bin/testbench --test TEST_UUID --set-output -    # from standard input
+./bin/testbench --test TEST_UUID --delete-output
+```
+
+Downloads never overwrite an existing file. Output must be ASCII text within the
+server's limit (1 MiB by default); anything else is refused before it is stored.
+Uploads and deletions need `tests.edit`, and like other writes are not retried.
+
+From Go:
+
+```go
+row, err := c.Tests.UploadArtifactFile(ctx, testID, "report.zip")
+rows, err := c.Tests.Artifacts(ctx, testID)
+n, err := c.Tests.DownloadArtifact(ctx, testID, rows[0].String("id"), file)
+_, err = c.Tests.SetOutputText(ctx, testID, "all 42 checks passed\n")   // or SetOutputFile / SetOutput(io.Reader)
+out, err := c.Tests.Output(ctx, testID)                                  // nil when the test has none
+fmt.Print(out.String("text"))
+```
 
 ## Run from this checkout
 

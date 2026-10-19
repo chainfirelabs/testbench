@@ -74,6 +74,7 @@ for component in backend frontend mcp network-scan device-info reboot replicatio
   case "$component" in
     backend|frontend) context="src/$component" ;;
     mcp) context=src/mcp-server ;;
+    replication) context=src/replication ;;
     *) context="src/plugins/$component" ;;
   esac
   set --

@@ -12,6 +12,7 @@ import {
 import { useIsCardList, useIsMobile } from '../breakpoints'
 import { captureTableState, restoreTableState, showSchemaColumns } from '../tableState'
 import { ValueChecklistFilter } from '../valueChecklistFilter'
+import { withBlankPlaceholder } from '../blankCell'
 import CardList, { type CardAction, type CardField } from './CardList.vue'
 
 // Keep all Community features available to dynamically generated column
@@ -223,6 +224,21 @@ const emit = defineEmits<{
 const quickFilter = ref('')
 const remoteError = ref('')
 let remoteRequest = 0
+/*
+ * Whether the page on screen is still on its way. The grid itself says so
+ * only with placeholder rows (see blankCell.ts), which can read as one odd row
+ * rather than a table in progress, so the grid's loading overlay goes up too,
+ * and the phone's card list says "Loading…" rather than "Nothing here yet".
+ */
+const remoteLoading = ref(false)
+const pendingRequests = new Set<number>()
+
+function trackLoading(request: number, pending: boolean) {
+  if (pending) pendingRequests.add(request)
+  else pendingRequests.delete(request)
+  remoteLoading.value = pendingRequests.size > 0
+  gridApi.value?.setGridOption('loading', remoteLoading.value)
+}
 const gridApi = ref<GridApi | null>(null)
 const selectedCount = ref(0)
 const isRemote = computed(() => !!props.remoteLoader)
@@ -247,6 +263,7 @@ const remoteDatasource = {
   async getRows(params: any) {
     if (!props.remoteLoader) return
     const request = ++remoteRequest
+    trackLoading(request, true)
     try {
       const result = await props.remoteLoader({
         startRow: params.startRow,
@@ -286,6 +303,8 @@ const remoteDatasource = {
       if (request === remoteRequest) remoteError.value = `Could not load rows: ${error?.message || 'Request failed'}`
       if (typeof params.fail === 'function') params.fail()
       else params.failCallback?.()
+    } finally {
+      trackLoading(request, false)
     }
   },
 }
@@ -541,8 +560,11 @@ const hasActions = computed(
   () => props.editable || canDelete.value || props.rowEditable || !!props.extraRowActions,
 )
 
+// Every data column, grid and card alike, says N/A rather than showing nothing.
+const displayColumns = computed(() => props.columns.map(withBlankPlaceholder))
+
 const columnDefs = computed(() => {
-  const cols: any[] = [...props.columns]
+  const cols: any[] = [...displayColumns.value]
   if (hasActions.value) cols.push(makeActionsColumn())
   return cols
 })
@@ -720,7 +742,7 @@ function syncCardFields() {
   const api = gridApi.value
   if (!api) return
   const byColumnId = new Map<string, any>()
-  for (const c of props.columns) {
+  for (const c of displayColumns.value) {
     const id = c.colId || c.field
     if (id) byColumnId.set(id, c)
   }
@@ -1471,7 +1493,7 @@ defineExpose({
         :badge-for="rowBadge"
         :class-for="rowClass"
         :row-key="(row: any) => getRowId({ data: row })"
-        :empty-text="rows.length ? 'No rows match the current filter.' : 'Nothing here yet.'"
+        :empty-text="remoteLoading ? 'Loading…' : rows.length ? 'No rows match the current filter.' : 'Nothing here yet.'"
       />
       <div v-if="cardPage.total > 1" class="card-paging">
         <button

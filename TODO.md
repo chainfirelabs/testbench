@@ -33,7 +33,7 @@ Creating software (`POST /api/v1/software`), adding a version (`POST /api/v1/sof
 
 ## Replicate TestBench instances
 
-- [x] Add an optional Helm-enabled replication plugin with push-only and push/pull modes.
+- [x] Add optional Helm-enabled replication (a controller, not a plugin) with push-only and push/pull modes.
 - [x] Sync devices, software, and tests between instances on a configurable interval or by manual trigger.
 - [x] Resolve push/pull conflicts by newest edit and propagate deletions; keep users, roles, credentials, and local plugin settings separate.
 - [x] Show replication status and provide a manual **Sync now** action.

@@ -104,6 +104,8 @@ server, and every response echoes back what it resolved to.
 | `find_vendor_devices(search?, software?, make?, model?, support_status?, ...)` | **Who claims** to support this hardware? |
 | `list_software_tested_on(device, limit?)` | What has been run **against this device**? |
 | `find_tests(device?, software?, outcome?, tag?, since?, until?, ...)` | Individual test runs |
+| `get_test_output(test_id, tail?)` | What did this run log? (its text output) |
+| `list_test_artifacts(test_id)` | Which files are attached to this run? (names and sizes only) |
 | `search_audit(user?, action?, entity?, since?, until?, ...)` | Who changed what (admin only) |
 
 ### The distinction the tool names are protecting

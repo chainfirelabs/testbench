@@ -25,7 +25,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.11.2`.
+`chainfirelabs/testbench` and tag `1.13.3`.
 
 | Image repository | Purpose |
 |---|---|
@@ -163,8 +163,8 @@ starter device catalog.
 | `frontend.service.port` / `nodePort` | `80` / unset; optional fixed node port for NodePort or LoadBalancer services. |
 | `applicationSecret.existingSecret` | Required existing Secret containing application `TB_*` secrets. |
 | `TB_CREDENTIAL_ENCRYPTION_KEY` | Application Secret value used to encrypt API keys entered under **AI Providers**. Required only for GUI-managed credentials. |
-| `backend.objectStorage.enabled` / `url` / `bucket` / `maxBytes` | External S3-compatible output reader. Disabled by default; maximum file size defaults to 1 MiB. The chart creates no bucket or S3 service. |
-| `TB_OBJECT_STORAGE_ACCESS_KEY` / `TB_OBJECT_STORAGE_SECRET_KEY` | Put these in `applicationSecret.existingSecret` when object storage is enabled. The backend uses them only to read objects. |
+| `backend.objectStorage.enabled` / `url` / `bucket` / `maxBytes` | External S3-compatible storage for test output and test artifacts. Disabled by default; test output defaults to a 1 MiB limit. The chart creates no bucket or S3 service. |
+| `TB_OBJECT_STORAGE_ACCESS_KEY` / `TB_OBJECT_STORAGE_SECRET_KEY` | Put these in `applicationSecret.existingSecret` when object storage is enabled. The backend reads, writes, and deletes test output and artifacts under `tests/`. |
 | `authentik.tls.existingConfigMap` / `key` | Optional ConfigMap and PEM key for trusting a private Authentik CA; empty by default. |
 | `config.frontendUrl` | Required public URL, such as `https://testbench.example.com`. |
 | `config.corsOrigins` | Required comma-separated browser origins. Usually the public URL. |
@@ -185,7 +185,7 @@ starter device catalog.
 | `database.credentials.usernameKey` / `passwordKey` | `username` / `password`; keys within that Secret. |
 | `database.waitTimeoutSeconds` / `waitIntervalSeconds` | `120` / `5`; how long schema setup waits for the database and how often it retries. |
 
-### Device output from external S3
+### Object storage for test output and artifacts
 
 Set `backend.objectStorage.enabled: true`, `backend.objectStorage.url` to the
 S3-compatible service endpoint (for example, `https://s3.example.com`), and
@@ -197,20 +197,99 @@ variables on the backend.
 The default `TB_OBJECT_STORAGE_MAX_BYTES` is 1048576. TestBench does not create
 or manage buckets and never receives the credentials in the browser.
 
-When enabled, **Output** appears in the device field catalog. In **Schema →
-Device Fields**, assign it to the relevant device type (or globally), then put
-an `s3://bucket/key` URL in that device's Output field. The device detail page
-offers **View output** and reads the object when clicked. The reader accepts
-ASCII text with ordinary line breaks and tabs; it rejects larger files, binary
-content, and other URLs. Keep the bucket private and give the configured S3
-identity read access only to the intended buckets.
+Keep the bucket private. TestBench writes only under the `tests/` prefix.
+
+### Test output
+
+Each recorded test can carry one text output file, such as a run log. Use
+**Output** on a Tests row, a Device → Tests row, or a test in Software → Tested
+Devices: **View output** opens the text in a dialog rather than downloading it,
+and users with `tests.edit` can upload, replace, or delete it there (**Add
+output** when a test has none). The file lives beside the test's artifacts:
+
+```text
+tests/<test-id>/output/<filename>
+```
+
+Output must be ASCII text with ordinary line breaks and tabs, up to
+`backend.objectStorage.maxBytes` (`TB_OBJECT_STORAGE_MAX_BYTES`, default 1 MiB);
+binary or oversized files are refused at upload. Uploading again replaces the
+previous output. Automation can attach output after recording a test:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $TB_TOKEN" \
+  -X PUT -F 'file=@run.log' \
+  "$TB_API_URL/tests/$TEST_ID/output"
+```
+
+`GET /tests/{test_id}/output` returns the file name, size, and text;
+`DELETE /tests/{test_id}/output` removes it. Uploads and deletions are audited.
+Migration `0018_test_outputs` adds the metadata; like artifacts, output is kept
+in S3 when a whole test is deleted and is not replicated or exported.
+
+Devices no longer have an Output field. On upgrade the system field is switched
+off; an `s3://` URL already entered on a device remains in its data and appears
+under Misc Data.
+
+### Downloadable test artifacts
+
+With object storage enabled as above, use **Artifacts** on a Tests row or on a
+Device → Tests row to upload one or more files and download associated reports,
+logs, screenshots, ZIPs, or other binary files. Uploading and deleting requires
+`tests.edit`; authenticated readers can list and download. Files remain private
+in S3 and downloads pass through the authenticated backend. Storage credentials
+and object keys are never returned to the browser.
+
+Each upload gets its own object key in the configured bucket:
+
+```text
+tests/<test-id>/artifacts/<artifact-id>/<filename>
+```
+
+The test ID is the recorded test's immutable ID, so repeated runs are separate.
+Duplicate filenames are allowed because artifact IDs prevent overwrites.
+Migration `0017_test_artifacts` adds metadata; file bytes stay in S3. Allow the
+configured storage identity `s3:GetObject`, `s3:PutObject`, and
+`s3:DeleteObject` on `<bucket>/tests/*`; test output uses the same prefix.
+No bucket listing permission or public bucket access is required by the app.
+
+`backend.objectStorage.artifactMaxBytes` (or `TB_ARTIFACT_MAX_BYTES` outside Helm)
+defaults to 104857600 bytes (100 MiB) per file, independently of the test output
+limit. Helm adjusts the frontend proxy's request limit with multipart overhead.
+Any external ingress or proxy must also permit that request size. The standalone
+frontend proxy permits 101 MiB requests; customize its Nginx config if you raise
+the backend limit beyond 100 MiB. Uploads use disk spooling and downloads stream
+from S3; browser downloads are buffered by the existing download helper.
+
+Automation can upload files after recording a test using its login or API token:
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $TB_TOKEN" \
+  -F 'file=@report.zip' \
+  "$TB_API_URL/tests/$TEST_ID/artifacts"
+```
+
+Here `TB_API_URL` includes `/api/v1`. Repeat the request for additional files.
+`GET /tests/{test_id}/artifacts` lists metadata and the upload limit;
+`GET /tests/{test_id}/artifacts/{artifact_id}/download` downloads a file;
+`DELETE /tests/{test_id}/artifacts/{artifact_id}` deletes the file and metadata.
+Uploads and explicit artifact deletions are audited against the test.
+
+Deleting an individual artifact removes its S3 object. Deleting a whole test
+(including through device/software deletion) removes its artifact metadata but
+retains the S3 objects for operator-managed retention. Configure an S3 lifecycle
+policy on `tests/` if retention must be bounded; such policies also expire files
+for retained tests. Artifact metadata and bytes are not included in replication
+or test CSV/JSON exports. Back up the database and bucket together.
 
 ### Replication between TestBench instances
 
-Enable `plugins.replication.enabled` in the Helm values on both instances.
+Replication is an optional part of the Helm chart, not a plugin: it is
+configured under the top-level `replication` key, needs no plugin shared
+secret, and does not appear under **Schema → Plugins**.
+Enable `replication.enabled` in the Helm values on both instances.
 Give both instances the same random token through
-`plugins.replication.token.existingSecret` and keep the shared plugin Secret
-configured locally. Set `plugins.replication.peerUrl` on the sending instance
+`replication.token.existingSecret`. Set `replication.peerUrl` on the sending instance
 to the receiving instance's HTTPS API base URL, such as
 `https://peer.example.com/api/v1`. Choose `mode: push` for one-way delivery or
 `mode: push_pull` to reconcile both instances using the newest record edit.
@@ -230,6 +309,10 @@ schemas on both instances before syncing; a missing device type or a duplicate
 natural identifier with a different record ID stops that batch with an error
 instead of silently overwriting data. Keep both clocks synchronized: newest
 edit resolution uses record timestamps.
+To sync only selected types, set `replication.entities` on the sender
+to a list such as `[devices, software]`; the default syncs all four types.
+Tests require their referenced devices and software to exist on the destination;
+vendor claims require their referenced software.
 
 ### Inventory fields
 

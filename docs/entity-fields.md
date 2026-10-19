@@ -15,6 +15,28 @@ Claims** tab — that one is per version rather than global, which is why it
 stays on the software page. A new software version inherits those overrides and
 can diverge afterward.
 
+The built-in **Inventory Devices** claim field is read-only and derived on
+every read: it lists the inventory devices whose make, model, firmware,
+hardware and architecture fit the claim (blank claim values match anything).
+List views show how many match ("4 devices", with the first few IDs in the
+tooltip), and clicking it opens the full list; a claim nothing matches shows
+`N/A`. Hide it, or move
+it, like any other claim field. It is never stored, imported or exported.
+
+A device's **Vendor Claims** tab lists the claims that match it grouped by
+software version, and each group uses that version's layout: the Schema →
+Vendor Claims order and list visibility with the version's own **Customize
+fields** override applied. A field hidden for one version is hidden there too.
+
+Tests have two built-in read-only file fields, **Output** and **Artifacts**.
+Their contents live in object storage rather than in the test row (the API
+reports them as `output_filename`/`output_size_bytes` and `artifact_count`), so
+they are always in the catalog, need no `optionalFields` entry, and are never
+searched, filtered, imported or exported. Hide or reorder them from
+**Schema → Tests**; the upload and viewing APIs keep working when they are
+hidden. Every list of tests follows that layout: the Tests page, a device's
+**Tests** tab, and the dialog behind Software → Tested Devices.
+
 Additional vendor-device values are stored in `misc_data`, but appear as normal
 columns in forms, CSV templates, imports, and exports. API and MCP searches scan
 the complete custom document, and MCP results expose it as `custom_fields`.

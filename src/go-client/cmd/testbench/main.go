@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -29,6 +30,17 @@ func (f *filters) Set(v string) error {
 		return fmt.Errorf("expected COLUMN=VALUE")
 	}
 	*f = append(*f, v)
+	return nil
+}
+
+type paths []string
+
+func (p *paths) String() string { return strings.Join(*p, ", ") }
+func (p *paths) Set(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("expected a file path")
+	}
+	*p = append(*p, v)
 	return nil
 }
 
@@ -71,8 +83,18 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	timeout := fs.Duration("timeout", 2*time.Minute, "Timeout for the entire command, e.g. 30s or 5m")
 	var filter filters
 	fs.Var(&filter, "filter", "Column filter COLUMN=VALUE; repeat for multiple columns")
+	testID := fs.String("test", "", "Test UUID for the artifact and output commands")
+	listArtifacts := fs.Bool("artifacts", false, "List the artifacts of --test")
+	var uploads paths
+	fs.Var(&uploads, "upload-artifact", "Attach FILE to --test; repeat for several files")
+	download := fs.String("download-artifact", "", "Download artifact ID of --test (see --out)")
+	outPath := fs.String("out", "", "Where --download-artifact saves: a file, a directory, or - for stdout (default: the artifact's own filename)")
+	deleteArtifact := fs.String("delete-artifact", "", "Delete artifact ID of --test")
+	showOutput := fs.Bool("output", false, "Print the output text of --test")
+	setOutput := fs.String("set-output", "", "Store FILE as the output of --test; - reads standard input")
+	deleteOutput := fs.Bool("delete-output", false, "Delete the output of --test")
 	fs.Usage = func() {
-		fmt.Fprint(errOut, "Usage: testbench --devices|--software|--vendor-devices|--tests|--types|--whoami [options]\n\nExamples:\n  testbench --devices --type router\n  testbench --devices --filter 'make=MikroTik' --filter 'location=Lab A'\n  testbench --software --search curl --latest\n  testbench --vendor-devices --search 'ISR 4331'\n  testbench --vendor-devices --for-software curl-smoke --support supported\n  testbench --tests --for-device dev-0042 --outcome fail --json\n  testbench --devices --type router --fields\n\nVendor devices are what a vendor CLAIMS supports their software; tests are what\nhas actually been run. Absence of a test means untested, not unsupported.\n\nAuthentication: set TB_API_URL and TB_API_KEY.\n")
+		fmt.Fprint(errOut, "Usage: testbench --devices|--software|--vendor-devices|--tests|--types|--whoami [options]\n\nExamples:\n  testbench --devices --type router\n  testbench --devices --filter 'make=MikroTik' --filter 'location=Lab A'\n  testbench --software --search curl --latest\n  testbench --vendor-devices --search 'ISR 4331'\n  testbench --vendor-devices --for-software curl-smoke --support supported\n  testbench --tests --for-device dev-0042 --outcome fail --json\n  testbench --devices --type router --fields\n  testbench --test TEST_UUID --artifacts\n  testbench --test TEST_UUID --upload-artifact report.zip --upload-artifact capture.pcap\n  testbench --test TEST_UUID --download-artifact ARTIFACT_UUID --out downloads/\n  testbench --test TEST_UUID --set-output run.log\n  testbench --test TEST_UUID --output\n\nVendor devices are what a vendor CLAIMS supports their software; tests are what\nhas actually been run. Absence of a test means untested, not unsupported.\n\nAuthentication: set TB_API_URL and TB_API_KEY.\n")
 		fs.PrintDefaults()
 	}
 	fail := func(err error) int { fmt.Fprintln(errOut, "testbench:", err); return 2 }
@@ -89,6 +111,58 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if fs.NArg() != 0 {
 		return fail(fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " ")))
 	}
+	actions := 0
+	for _, v := range []bool{*listArtifacts, len(uploads) > 0, *download != "", *deleteArtifact != "", *showOutput, *setOutput != "", *deleteOutput} {
+		if v {
+			actions++
+		}
+	}
+	if *outPath != "" && *download == "" {
+		return fail(fmt.Errorf("--out requires --download-artifact"))
+	}
+	if *testID != "" || actions > 0 {
+		// The file commands act on one test, so they stand apart from the
+		// resource listings and their filters.
+		if *testID == "" || actions != 1 {
+			return fail(fmt.Errorf("give --test with exactly one of --artifacts, --upload-artifact, --download-artifact, --delete-artifact, --output, --set-output, --delete-output"))
+		}
+		if *devices || *software || *vendor || *tests || *types || *whoami || *fields || *get != "" || *search != "" || len(filter) > 0 || *limit != 0 {
+			return fail(fmt.Errorf("--test file commands cannot be combined with resource listings or filters"))
+		}
+		if *asJSON {
+			*format = "json"
+		}
+		if *format != "table" && *format != "json" && *format != "csv" {
+			return fail(fmt.Errorf("format must be table, json, or csv"))
+		}
+		if *token == "" {
+			*token = os.Getenv("TB_API_KEY")
+		}
+		c, err := tb.New(*base, *token, tb.Options{Retries: 2})
+		if err != nil {
+			return fail(err)
+		}
+		defer c.Close()
+		ctx, cancel := context.WithTimeout(ctx, *timeout)
+		defer cancel()
+		f := fileCommand{c: c, test: *testID, out: out, errOut: errOut, format: *format, columns: *columns}
+		switch {
+		case *listArtifacts:
+			return f.listArtifacts(ctx)
+		case len(uploads) > 0:
+			return f.upload(ctx, uploads)
+		case *download != "":
+			return f.download(ctx, *download, *outPath)
+		case *deleteArtifact != "":
+			return f.report(c.Tests.DeleteArtifact(ctx, *testID, *deleteArtifact), "deleted artifact "+*deleteArtifact)
+		case *showOutput:
+			return f.showOutput(ctx)
+		case *setOutput != "":
+			return f.setOutput(ctx, *setOutput)
+		default:
+			return f.report(c.Tests.DeleteOutput(ctx, *testID), "deleted output")
+		}
+	}
 	n := 0
 	for _, v := range []bool{*devices, *software, *vendor, *tests, *types, *whoami} {
 		if v {
@@ -96,7 +170,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		}
 	}
 	if n != 1 {
-		return fail(fmt.Errorf("select exactly one of --devices, --software, --vendor-devices, --tests, --types, --whoami"))
+		return fail(fmt.Errorf("select exactly one of --devices, --software, --vendor-devices, --tests, --types, --whoami, or a --test file command"))
 	}
 	if *limit < 0 || *pageSize < 1 || *pageSize > 1000 || *timeout <= 0 {
 		return fail(fmt.Errorf("limit must be nonnegative, page-size 1-1000, and timeout positive"))
@@ -392,4 +466,139 @@ func render(out io.Writer, rows []tb.Record, columns []string, format string) er
 		}
 	}
 	return w.Flush()
+}
+
+// fileCommand runs one artifact or output command against a single test.
+type fileCommand struct {
+	c               *tb.Client
+	test            string
+	out, errOut     io.Writer
+	format, columns string
+}
+
+func (f fileCommand) failed(err error) int {
+	fmt.Fprintln(f.errOut, "testbench:", err)
+	return 1
+}
+
+func (f fileCommand) render(rows []tb.Record, defaults string) int {
+	cols := defaults
+	if f.columns != "" {
+		cols = f.columns
+	}
+	if err := render(f.out, rows, strings.Split(cols, ","), f.format); err != nil {
+		return f.failed(err)
+	}
+	return 0
+}
+
+func (f fileCommand) report(err error, done string) int {
+	if err != nil {
+		return f.failed(err)
+	}
+	fmt.Fprintln(f.out, done)
+	return 0
+}
+
+const artifactColumns = "id,filename,content_type,size_bytes,created_at"
+
+func (f fileCommand) listArtifacts(ctx context.Context) int {
+	rows, err := f.c.Tests.Artifacts(ctx, f.test)
+	if err != nil {
+		return f.failed(err)
+	}
+	return f.render(rows, artifactColumns)
+}
+
+func (f fileCommand) upload(ctx context.Context, files []string) int {
+	rows := []tb.Record{}
+	for _, path := range files {
+		row, err := f.c.Tests.UploadArtifactFile(ctx, f.test, path)
+		if err != nil {
+			// The earlier files are attached; say which, so a rerun can skip them.
+			if len(rows) > 0 {
+				f.render(rows, artifactColumns)
+			}
+			return f.failed(fmt.Errorf("%s: %w", path, err))
+		}
+		rows = append(rows, row)
+	}
+	return f.render(rows, artifactColumns)
+}
+
+func (f fileCommand) download(ctx context.Context, artifactID, dest string) int {
+	if dest == "-" {
+		if _, err := f.c.Tests.DownloadArtifact(ctx, f.test, artifactID, f.out); err != nil {
+			return f.failed(err)
+		}
+		return 0
+	}
+	if dest == "" || isDir(dest) {
+		// Named after the artifact, which takes its metadata to know.
+		rows, err := f.c.Tests.Artifacts(ctx, f.test)
+		if err != nil {
+			return f.failed(err)
+		}
+		name := ""
+		for _, row := range rows {
+			if row.String("id") == artifactID {
+				name = filepath.Base(row.String("filename"))
+			}
+		}
+		if name == "" || name == "." || name == ".." || name == string(filepath.Separator) {
+			return f.failed(fmt.Errorf("artifact %s not found on test %s", artifactID, f.test))
+		}
+		dest = filepath.Join(dest, name)
+	}
+	file, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return f.failed(err)
+	}
+	n, err := f.c.Tests.DownloadArtifact(ctx, f.test, artifactID, file)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(dest)
+		return f.failed(err)
+	}
+	fmt.Fprintf(f.out, "saved %s (%d bytes)\n", dest, n)
+	return 0
+}
+
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func (f fileCommand) showOutput(ctx context.Context) int {
+	record, err := f.c.Tests.Output(ctx, f.test)
+	if err != nil {
+		return f.failed(err)
+	}
+	if record == nil {
+		return f.failed(fmt.Errorf("test %s has no output", f.test))
+	}
+	if f.format != "table" {
+		return f.render([]tb.Record{record}, "output.filename,output.size_bytes,text,error")
+	}
+	if message := record.String("error"); message != "" {
+		return f.failed(fmt.Errorf("output could not be read: %s", message))
+	}
+	fmt.Fprint(f.out, record.String("text"))
+	return 0
+}
+
+func (f fileCommand) setOutput(ctx context.Context, source string) int {
+	var row tb.Record
+	var err error
+	if source == "-" {
+		row, err = f.c.Tests.SetOutput(ctx, f.test, "output.txt", os.Stdin)
+	} else {
+		row, err = f.c.Tests.SetOutputFile(ctx, f.test, source)
+	}
+	if err != nil {
+		return f.failed(err)
+	}
+	return f.render([]tb.Record{row}, "filename,size_bytes")
 }

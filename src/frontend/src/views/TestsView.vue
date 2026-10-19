@@ -6,6 +6,9 @@ import FormModal, { type FormField } from '../components/FormModal.vue'
 import OverflowMenu from '../components/OverflowMenu.vue'
 import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
+import TestArtifactsModal from '../components/TestArtifactsModal.vue'
+import TestOutputModal, { type TestOutputMeta } from '../components/TestOutputModal.vue'
+import { TEST_ARTIFACTS_FIELD, TEST_OUTPUT_FIELD, testArtifactsColumn, testOutputColumn } from '../testArtifacts'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
 import { dateColumn } from '../dates'
@@ -21,6 +24,19 @@ import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
 
+const artifactTest = ref<any | null>(null)
+function updateArtifactCount(count: number) {
+  if (!artifactTest.value) return
+  artifactTest.value.artifact_count = count
+  table.value?.gridApi?.refreshCells({ columns: ['artifact_count'], force: true })
+}
+const outputTest = ref<any | null>(null)
+function updateOutput(output: TestOutputMeta | null) {
+  if (!outputTest.value) return
+  outputTest.value.output_filename = output?.filename ?? null
+  outputTest.value.output_size_bytes = output?.size_bytes ?? null
+  table.value?.gridApi?.refreshCells({ columns: ['output_filename'], force: true })
+}
 const auth = useAuthStore()
 const rows = ref<any[]>([])
 const devices = ref<any[]>([])
@@ -379,7 +395,11 @@ const baseColumns = [
 ]
 
 const columns = computed(() => testFields.value.filter((field) => field.list_visible).map((field) => {
-  const builtIn = baseColumns.find((column: any) => column.field === field.key)
+  const builtIn: any = field.key === TEST_OUTPUT_FIELD
+    ? testOutputColumn((row) => { outputTest.value = row }, () => auth.can(PERMISSION.testsEdit))
+    : field.key === TEST_ARTIFACTS_FIELD
+      ? testArtifactsColumn((row) => { artifactTest.value = row })
+      : baseColumns.find((column: any) => column.field === field.key)
   const column = builtIn ? { ...builtIn, headerName: field.label } : customColumn(field, 'misc_data')
     if (field.type === 'json' || field.sensitive || ['misc_data', 'created_at', 'updated_at'].includes(field.key)) column.filter = false
     return column
@@ -824,9 +844,15 @@ onMounted(loadFields)
       <router-link to="/vendor-devices">Vendor Claims</router-link>, and nothing
       there has been verified here.
     </p>
+    <TestArtifactsModal v-if="artifactTest" :test-id="artifactTest.id"
+      @close="artifactTest = null" @updated="updateArtifactCount" />
+    <TestOutputModal v-if="outputTest" :test-id="outputTest.id"
+      :title="`Output — ${outputTest.device_unique_id} / ${outputTest.software_name}`"
+      @close="outputTest = null" @updated="updateOutput" />
     <DataTable
       ref="table"
       :columns="columns"
+      :schema-visible-columns="['output_filename', 'artifact_count']"
       :columns-ready="columnsReady"
       :rows="rows"
       :remote-loader="loadRemoteTests"

@@ -10,11 +10,15 @@ data:
   TB_CHECKOUT_SWEEP_MINUTES: {{ .Values.config.checkoutSweepMinutes | quote }}
   TB_CHECKOUT_WARN_DAYS: {{ .Values.config.checkoutWarnDays | quote }}
   TB_SCAN_INTERVAL_MINUTES: "0"
-  TB_REPLICATION_ENABLED: {{ .Values.plugins.replication.enabled | quote }}
-  TB_REPLICATION_MODE: {{ .Values.plugins.replication.mode | quote }}
+  TB_REPLICATION_ENABLED: {{ .Values.replication.enabled | quote }}
+  TB_REPLICATION_MODE: {{ .Values.replication.mode | quote }}
+  {{- if and .Values.replication.enabled (ne .Values.replication.mode "receive") }}
+  TB_REPLICATION_CONTROLLER_URL: {{ printf "http://%s-replication:8080" (include "testbench.fullname" .) | quote }}
+  {{- end }}
   TB_OBJECT_STORAGE_ENABLED: {{ .Values.backend.objectStorage.enabled | quote }}
   TB_OBJECT_STORAGE_URL: {{ .Values.backend.objectStorage.url | quote }}
   TB_OBJECT_STORAGE_BUCKET: {{ .Values.backend.objectStorage.bucket | quote }}
+  TB_ARTIFACT_MAX_BYTES: {{ .Values.backend.objectStorage.artifactMaxBytes | int64 | quote }}
   TB_OBJECT_STORAGE_MAX_BYTES: {{ .Values.backend.objectStorage.maxBytes | int64 | quote }}
   {{- $softwareAdditional := list }}
   {{- range .Values.schema.software.additionalFields }}
@@ -34,7 +38,6 @@ data:
   TB_ENTITY_FIELDS_JSON: {{ $entityFields | toJson | quote }}
   {{- $plugins := list }}
   {{- if .Values.plugins.networkScan.enabled }}{{ $plugins = append $plugins (printf "network-scan=http://%s-network-scan:8080" (include "testbench.fullname" .)) }}{{ end }}
-  {{- if and .Values.plugins.replication.enabled (ne .Values.plugins.replication.mode "receive") }}{{ $plugins = append $plugins (printf "replication=http://%s-replication:8080" (include "testbench.fullname" .)) }}{{ end }}
   {{- if .Values.plugins.deviceInfo.enabled }}{{ $plugins = append $plugins (printf "device-info-agent=http://%s-device-info:8080" (include "testbench.fullname" .)) }}{{ end }}
   {{- if .Values.plugins.reboot.enabled }}{{ $plugins = append $plugins (printf "device-reboot=http://%s-reboot:8080" (include "testbench.fullname" .)) }}{{ end }}
   TB_PLUGINS: {{ join "," $plugins | quote }}

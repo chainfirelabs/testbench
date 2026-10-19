@@ -1,5 +1,141 @@
 # Release notes
 
+## 1.13.3
+
+- Test **Output** and **Artifacts** are built-in, read-only test fields. Hide
+  or reorder them under **Schema → Tests** like any other column; the APIs and
+  clients are unaffected. Existing installations get both shown, in the same
+  place as before.
+- A device's **Tests** tab follows Schema → Tests: its columns, their order,
+  hidden fields and custom test fields now match the Tests page.
+- A device's **Vendor Claims** tab draws each software version's claims with
+  that version's layout: Schema → Vendor Claims plus the version's own
+  **Customize fields** override, including custom claim fields and
+  Inventory Devices.
+- Software → Tested Devices: the tests dialog leaves out details hidden under
+  Schema → Tests.
+- `GET /devices/{id}/compatible-software` returns each version's claim
+  `fields`, and its claims include `inventory_devices`.
+- Fixed: a built-in field that the application always shows, if added by an
+  upgrade, was created hidden until the next restart.
+- A device's **Vendor Claims** tab summarises Components as "3 components" and
+  Inventory Devices as "14 devices", each opening its list, like the vendor
+  claim grids.
+- **Inventory Devices** reads as a count ("14 devices") everywhere, with the
+  first few device IDs in its tooltip and the full list a click away.
+- A device's **Tests** tab shows 50 tests a page with Previous/Next; a link to
+  one test opens the page that holds it.
+- Fixed: the page did not scroll while the pointer was over a tall plain table,
+  such as a device's Tests or Vendor Claims tab.
+- Every list shows that it is loading: a **Loading…** overlay and grey
+  placeholder bars while a page of rows is fetched, on first load and after
+  paging, sorting, filtering or searching. On a phone the card list says
+  "Loading…". Before, the grid showed one row of `N/A`s (or "Uncategorized",
+  "(unversioned)") until the rows arrived, and the card list said "Nothing
+  here yet".
+
+## 1.13.2
+
+- Replication is no longer a plugin. It is an optional part of the Helm chart,
+  configured under a top-level `replication` key instead of
+  `plugins.replication`, and is gone from the `plugins` section of
+  `values.schema.json`. It no longer needs `plugins.sharedSecret` and no longer
+  appears under **Schema → Plugins**.
+- **Upgrade:** move `plugins.replication` to `replication`. The chart refuses
+  to render with the old key rather than silently turning replication off.
+- The backend calls the replication controller directly at
+  `TB_REPLICATION_CONTROLLER_URL`, and the controller and backend authenticate
+  to each other with the replication token. The controller's routes moved from
+  `/plugin/v1/*` to `/v1/*`, and its source moved from `src/plugins/replication`
+  to `src/replication`. The image name is unchanged.
+- Migration `0019` removes any Schema → Plugins allowlist rows for
+  replication. They never granted anything.
+
+## 1.13.1
+
+- Vendor claims have a built-in, read-only **Inventory Devices** field listing
+  the inventory devices that match each claim: the first three unique IDs and
+  how many more, with the full list a click away, or `N/A` when nothing
+  matches. It appears on the Vendor Claims page and Software → Vendor Claims,
+  replacing the latter's fixed Inventory column, and is shown, hidden and
+  ordered from **Schema → Vendor Claims** or a version's **Customize fields**.
+  Upgrades add it as visible. It is derived on read and never imported or
+  exported.
+- Claim listings return `inventory_devices` and `inventory_match_count`.
+- Python client: `tb.tests` uploads, lists, downloads and deletes artifacts and
+  sets, reads and deletes test output; `create()`/`record()` accept
+  `artifacts=`, `output=` and `output_file=`. `Test` exposes
+  `artifact_count`, `output_filename`, `output_size_bytes` and component fields.
+- Go client and CLI: `Tests` artifact and output methods, and
+  `testbench --test TEST_UUID` with `--artifacts`, `--upload-artifact`,
+  `--download-artifact`, `--delete-artifact`, `--output`, `--set-output` and
+  `--delete-output`. These are the Go client's only writes.
+- MCP server (still read-only): `get_test_output` and `list_test_artifacts`;
+  test rows now include their `id`, artifact count and output filename.
+
+## 1.13.0
+
+- Each recorded test can carry one ASCII text output file, stored beside its
+  artifacts at `tests/<test-id>/output/<filename>`. **Output** on the Tests
+  page, Device → Tests, and Software → Tested Devices opens the text in a
+  dialog instead of downloading it. Users with `tests.edit` can upload,
+  replace, or delete it there, or through `PUT`/`DELETE /tests/{id}/output`.
+- Output is checked at upload: binary content and files over
+  `backend.objectStorage.maxBytes` (1 MiB by default) are refused. Uploads and
+  deletions are audited. Output is not replicated or exported, and like
+  artifacts it is kept in S3 when a whole test is deleted.
+- Migration `0018_test_outputs` adds the output metadata.
+- Breaking: the device **Output** field and `GET /devices/{id}/output` are
+  removed. On upgrade the system field is switched off; an `s3://` URL already
+  entered on a device stays in its data and appears under Misc Data.
+
+## 1.12.2
+
+- Software → Tested Devices: the Tests count opens a dialog listing the tests
+  behind that row, newest run first, with outcome, run date, tag, author,
+  artifact count, notes, and test data. Each test links to its entry on the
+  device's Tests tab, where it can be edited and its artifacts downloaded.
+- The tests list API accepts `component_id` to narrow to one software
+  component; `component_id=none` returns tests not tied to a component.
+- The device Tests tab shows `N/A` for empty notes and test data.
+
+## 1.12.1
+
+- Empty fields in every list and table — devices, software, vendor claims,
+  tests, users, and the audit log, on desktop and mobile — read a muted `N/A`
+  instead of showing nothing. Columns with their own wording for an empty value
+  (such as "Uncategorized" or "(unversioned)") keep it, and status dots are
+  unchanged. Detail pages and hand-built tables use the same `N/A` in place of
+  "—".
+- Mobile card lists show schema fields stored under device `data` instead of
+  treating them as empty.
+
+## 1.12.0
+
+- Recorded tests support multiple downloadable artifacts. The Tests page and
+  Device → Tests tab offer artifact uploads, downloads, and deletion.
+- Binary files use the configured private S3-compatible bucket under
+  `tests/<test-id>/artifacts/<artifact-id>/<filename>`, keeping each run separate
+  and allowing duplicate filenames without overwrites.
+- Authenticated readers can download artifacts; uploads and deletions require
+  `tests.edit` and are audited. Downloads stream through the backend.
+- `backend.objectStorage.artifactMaxBytes` sets the per-file upload limit
+  (100 MiB by default); Helm adjusts the frontend proxy limit accordingly.
+  Storage credentials need read, write, and delete permissions on `tests/*`.
+- Migration `0017_test_artifacts` adds artifact metadata. Individual artifact
+  deletion removes its stored file; whole-test deletion retains objects for
+  operator-managed retention. Artifact files are excluded from replication and
+  test exports.
+
+## 1.11.3
+
+- Software → Vendor Claims shows matching inventory device counts for each
+  selected firmware record, with a paginated list linking to those devices.
+  Matches use the existing vendor compatibility rules and refresh after edits.
+- Replication can sync selected entity types through `plugins.replication.entities`.
+  Settings, run status, and audit records show the selected types.
+- No database migration is required for this release.
+
 ## 1.11.2
 
 - A single `global.tls` ConfigMap can supply a PEM CA bundle to the backend,

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { BLANK_TEXT } from '../blankCell'
+
 export interface ImportFailure {
   row: number | null
   error: string
@@ -50,7 +52,7 @@ const emit = defineEmits<{ (e: 'close'): void }>()
             <thead><tr><th>Row</th><th>Error</th></tr></thead>
             <tbody>
               <tr v-for="(failure, index) in state.errors" :key="`${failure.row}-${index}`">
-                <td>{{ failure.row == null ? '—' : failure.row + 1 }}</td>
+                <td>{{ failure.row == null ? BLANK_TEXT : failure.row + 1 }}</td>
                 <td>{{ failure.error }}</td>
               </tr>
             </tbody>

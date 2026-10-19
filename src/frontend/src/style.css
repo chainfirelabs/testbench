@@ -1152,6 +1152,15 @@ label {
   transition: border-color var(--dur) var(--ease);
 }
 
+/* A claim's matching inventory devices: one line, cut off rather than wrapped. */
+.inventory-devices-btn {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
 @media (hover: hover) {
   .cell-view-btn:hover {
     border-bottom-color: var(--accent-a45);
@@ -1621,6 +1630,28 @@ label {
 
 .muted {
   color: var(--text-muted);
+}
+
+/* The N/A a list shows for an empty field (see blankCell.ts): an absence, not a value. */
+.cell-blank {
+  color: var(--text-muted);
+}
+
+/* A row still loading (see blankCell.ts): a bar, so it never reads as data. */
+.cell-loading {
+  display: inline-block;
+  width: min(70%, 120px);
+  height: 0.7em;
+  border-radius: 4px;
+  vertical-align: middle;
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--border) 50%, var(--surface-3) 75%) 0 0 / 200% 100%;
+  animation: cell-loading 1.2s ease-in-out infinite;
+}
+
+@keyframes cell-loading {
+  to {
+    background-position: -200% 0;
+  }
 }
 
 /* ---------- Modal ---------- */
@@ -2192,7 +2223,14 @@ td {
    list does not start scrolling the page behind it — or, at the top of one,
    trigger the browser's pull-to-refresh. */
 .detail-panel,
-.col-picker-panel,
-.table-scroll {
+.col-picker-panel {
   overscroll-behavior: contain;
+}
+
+/* A wide table only scrolls sideways. `overflow-x: auto` still makes it a
+   vertical scroll container too, so containing vertical overscroll here
+   swallowed the wheel over any table taller than the screen: the page behind
+   it stopped scrolling. */
+.table-scroll {
+  overscroll-behavior-y: auto;
 }

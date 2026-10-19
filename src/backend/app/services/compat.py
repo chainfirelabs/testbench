@@ -118,3 +118,70 @@ def compatible_software(db: Session, device: Device) -> list[dict]:
         )
     )
     return items
+
+
+def inventory_match_condition():
+    """Join claims to inventory with the same wildcard and alias rules as above."""
+    conditions = []
+    for field in MATCH_FIELDS:
+        claim = getattr(VendorDevice, field)
+        device = getattr(Device, field)
+        claim_value = func.lower(func.trim(claim))
+        device_value = func.lower(func.trim(device))
+        alternatives = [claim_value == device_value]
+        for alias, spellings in ARCH_ALIASES.items():
+            alternatives.append(and_(device_value == alias, claim_value.in_(spellings)))
+        conditions.append(or_(_is_blank(claim), and_(~_is_blank(device), or_(*alternatives))))
+    # An entirely unspecified claim never describes an inventory device.
+    conditions.append(or_(*(~_is_blank(getattr(VendorDevice, f)) for f in MATCH_FIELDS)))
+    return and_(*conditions)
+
+
+def inventory_match_counts(db: Session, claim_ids: list[str]) -> dict[str, int]:
+    if not claim_ids:
+        return {}
+    return dict(db.execute(
+        select(VendorDevice.id, func.count(Device.id))
+        .join(Device, inventory_match_condition())
+        .where(VendorDevice.id.in_(claim_ids))
+        .group_by(VendorDevice.id)
+    ).all())
+
+
+# How many matching unique IDs a claim row carries; the rest are a click away.
+INVENTORY_PREVIEW = 3
+
+
+def inventory_match_summary(
+    db: Session, claim_ids: list[str], preview: int = INVENTORY_PREVIEW,
+) -> dict[str, tuple[int, list[str]]]:
+    """Per claim: how many inventory devices match, and the first few unique IDs.
+
+    One windowed query for the whole page rather than one per claim. Claims
+    with no match are absent, as in `inventory_match_counts`.
+    """
+    if not claim_ids:
+        return {}
+    ranked = (
+        select(
+            VendorDevice.id.label("claim_id"),
+            Device.unique_id.label("unique_id"),
+            func.count().over(partition_by=VendorDevice.id).label("total"),
+            func.row_number().over(
+                partition_by=VendorDevice.id, order_by=(Device.unique_id, Device.id),
+            ).label("rank"),
+        )
+        .join(Device, inventory_match_condition())
+        .where(VendorDevice.id.in_(claim_ids))
+        .subquery()
+    )
+    summary: dict[str, tuple[int, list[str]]] = {}
+    for row in db.execute(
+        select(ranked.c.claim_id, ranked.c.unique_id, ranked.c.total)
+        .where(ranked.c.rank <= preview)
+        .order_by(ranked.c.claim_id, ranked.c.rank)
+    ):
+        total, ids = summary.get(row.claim_id, (row.total, []))
+        ids.append(row.unique_id)
+        summary[row.claim_id] = (total, ids)
+    return summary

@@ -21,7 +21,7 @@ from ..services.audit import field_diff, log_action
 from ..services.io import ExportRequest, database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
 from ..services.list_filters import checklist_query, exclude_clause, excluded_values, include_clause
 from ..services.query import row_error, row_scope
-from ..services.entity_fields import coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
+from ..services.entity_fields import TEST_FILE_FIELDS, coerce_query_value, entity_field_expression, entity_order_by, get_entity_fields, merge_extra_columns, project_fields, validate_custom_values
 from .deps import get_current_user, require_tests_edit
 
 router = APIRouter(prefix="/tests", tags=["tests"])
@@ -42,7 +42,10 @@ TEMPLATE_COLUMNS = [
 ]
 
 # Server-owned or display-only columns; an export re-imported as-is carries them.
-IMPORT_IGNORED = {"created_at", "updated_at", "created_by_username", "device_make", "device_model"}
+IMPORT_IGNORED = {
+    "created_at", "updated_at", "created_by_username", "device_make", "device_model",
+    "artifact_count", "output_filename", "output_size_bytes", *TEST_FILE_FIELDS,
+}
 
 # CSV columns outside the import schema and the display-only export columns are
 # test-specific measurements. They travel in Test.misc_data so a sheet can append
@@ -139,6 +142,9 @@ def _resolve_import_row(db: Session, row: TestImportRow) -> dict:
     }
 
 
+NO_COMPONENT = "none"
+
+
 def _query_tests(
     db: Session,
     search: str | None,
@@ -147,12 +153,19 @@ def _query_tests(
     outcome: str | None,
     tag: str | None,
     filters: dict | None = None,
+    component_id: str | None = None,
 ) -> select:
     q = select(Test)
     if device_id:
         q = q.where(Test.device_id == device_id)
     if software_id:
         q = q.where(Test.software_id == software_id)
+    # `none` asks for the tests run against the software as a whole, which is
+    # how Software → Tested Devices groups them alongside each component.
+    if component_id == NO_COMPONENT:
+        q = q.where(Test.component_id.is_(None))
+    elif component_id:
+        q = q.where(Test.component_id == component_id)
     if outcome:
         q = q.where(Test.outcome == outcome)
     if tag:
@@ -171,7 +184,7 @@ def _query_tests(
         field = catalog.get(key)
         # `created_at` is a timestamp, which no checklist offers and no text
         # comparison fits; it has no filter shape here yet.
-        if not field or field.key == "created_at":
+        if not field or field.key == "created_at" or field.key in TEST_FILE_FIELDS:
             continue
         if key == "device_unique_id":
             if not joined_device:
@@ -213,7 +226,7 @@ def _query_tests(
             if field.field_type in {"text", "textarea", "select"}
             and field.key not in {
                 "device_unique_id", "software_name", "component_name",
-                "component_version", "created_by_username",
+                "component_version", "created_by_username", *TEST_FILE_FIELDS,
             }
         ]
         # Only the joins a filter above has not already made: joining the same
@@ -244,6 +257,7 @@ def list_tests(
     search: str | None = None,
     device_id: str | None = None,
     software_id: str | None = None,
+    component_id: str | None = None,
     outcome: str | None = None,
     tag: str | None = None,
     sort: str = "created_at",
@@ -256,9 +270,12 @@ def list_tests(
 ):
     filters = {
         key: value for key, value in checklist_query(request, filters_body).items()
-        if key not in {"search", "device_id", "software_id", "outcome", "tag", "sort", "order", "page", "page_size"}
+        if key not in {
+            "search", "device_id", "software_id", "component_id", "outcome", "tag",
+            "sort", "order", "page", "page_size",
+        }
     }
-    q = _query_tests(db, search, device_id, software_id, outcome, tag, filters)
+    q = _query_tests(db, search, device_id, software_id, outcome, tag, filters, component_id)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     q = q.order_by(entity_order_by(db, "tests", Test, sort, order))
     items = db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all()
@@ -289,7 +306,7 @@ def export_tests(
         return _query_tests(session, search, device_id, software_id, outcome, tag, filters)
     q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
-    fields = get_entity_fields(db, "tests")
+    fields = [field for field in get_entity_fields(db, "tests") if field.key not in TEST_FILE_FIELDS]
     log_action(db, user, "export.tests", "test", None, {"format": format, "count": count}, request)
     db.commit()
     def rows(export_db: Session):

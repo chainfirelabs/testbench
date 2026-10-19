@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 import { useNotificationsStore, type Notification } from '../stores/notifications'
+import { BLANK_TEXT } from '../blankCell'
 
 interface ApiKey {
   id: string
@@ -64,7 +65,7 @@ const EXPIRY_CHOICES = [
 ]
 
 function fmt(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : '—'
+  return value ? new Date(value).toLocaleString() : BLANK_TEXT
 }
 
 function notify(message: string, isError = false) {
@@ -194,7 +195,7 @@ onMounted(() => {
       <dt>Role</dt>
       <dd style="text-transform: capitalize">{{ auth.user?.role }}</dd>
       <dt>Email</dt>
-      <dd>{{ auth.user?.email || '—' }}</dd>
+      <dd>{{ auth.user?.email || BLANK_TEXT }}</dd>
       <dt>Sign-in method</dt>
       <dd>{{ auth.user?.auth_provider === 'local' ? 'Local account' : 'SSO (Authentik)' }}</dd>
     </dl>

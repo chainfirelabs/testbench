@@ -11,7 +11,7 @@ import random
 import re
 import threading
 import time
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 from urllib.parse import quote
 
 import httpx
@@ -254,6 +254,43 @@ class TestBench:
             raise error
 
         raise last if last else TestBenchError(f"{method} {path} failed")
+
+    def download(self, path: str, out: BinaryIO) -> int:
+        """GET a file and copy it into `out`, returning the bytes written.
+
+        `request()` parses JSON; this is for the endpoints that answer with a
+        file. Streamed, so a large artifact never has to fit in memory. Retried
+        like any GET, but only until the first byte is written: a retry after
+        that would append a second copy to a half-written file.
+        """
+        attempts = self._retries + 1
+        last: Exception | None = None
+        for attempt in range(attempts):
+            if attempt:
+                self._backoff(attempt)
+            written = 0
+            try:
+                with self._http.stream("GET", path, headers={"Accept": "*/*"}) as response:
+                    if not response.is_success:
+                        response.read()
+                        error = _to_error(response, path)
+                        if isinstance(error, ServerError) and attempt < attempts - 1:
+                            last = error
+                            continue
+                        raise error
+                    for chunk in response.iter_bytes():
+                        out.write(chunk)
+                        written += len(chunk)
+                return written
+            except httpx.HTTPError as exc:
+                last = TransportError(
+                    f"Could not reach the TestBench API at {self.base_url}: {exc}",
+                    url=path,
+                )
+                if written:
+                    raise last from exc
+                logger.debug("GET %s failed (attempt %d/%d): %s", path, attempt + 1, attempts, exc)
+        raise last if last else TestBenchError(f"GET {path} failed")
 
     def _backoff(self, attempt: int) -> None:
         # Jittered, because a framework running devices in parallel would

@@ -9,6 +9,8 @@ from .vendor_device import VendorDevice
 from .vendor_device_component_support import VendorDeviceComponentSupport
 from .vendor_device_field_override import VendorDeviceFieldOverride
 from .test import Test
+from .test_artifact import TestArtifact
+from .test_output import TestOutput
 from .saved_filter import SavedFilter
 from .audit import AuditLog
 from .audit_retention import AuditRetention
@@ -40,6 +42,8 @@ __all__ = [
     "VendorDeviceComponentSupport",
     "VendorDeviceFieldOverride",
     "Test",
+    "TestArtifact",
+    "TestOutput",
     "SavedFilter",
     "AuditLog",
     "AuditRetention",

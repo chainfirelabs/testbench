@@ -39,7 +39,7 @@ frontend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/frontend
-    tag: "1.11.2"
+    tag: "1.13.3"
     digest: "" # Example: sha256:...
     pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
   service:
@@ -60,7 +60,10 @@ backend:
     # URL of an externally managed S3-compatible service, e.g. https://s3.example.com.
     url: ""
     bucket: ""
+    # Per-test ASCII output viewed in the browser (1 MiB).
     maxBytes: 1048576
+    # Binary test uploads have a separate limit (100 MiB per file).
+    artifactMaxBytes: 104857600
     # Set TB_OBJECT_STORAGE_ACCESS_KEY and TB_OBJECT_STORAGE_SECRET_KEY in
     # applicationSecret.existingSecret when enabled.
   auditCleanup:
@@ -73,7 +76,7 @@ backend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/backend
-    tag: "1.11.2"
+    tag: "1.13.3"
     digest: ""
     pullPolicy: ""
   # Scheduler requests and container limits for each backend Pod.
@@ -90,7 +93,7 @@ mcp:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/mcp
-    tag: "1.11.2"
+    tag: "1.13.3"
     digest: ""
     pullPolicy: ""
   service:
@@ -180,7 +183,8 @@ schema:
     #     role: null # Optional semantic role; usually omitted for software/tests.
     additionalFields: []
   tests:
-    # Device, Software, and Outcome are protected and automatic.
+    # Device, Software, and Outcome are protected and automatic, as are the
+    # read-only Output and Artifacts file columns (hide them under Schema → Tests).
     # All optional built-ins: software_version, component_name,
     # component_version, tag, run_at, notes, misc_data, created_at,
     # created_by_username.
@@ -256,6 +260,31 @@ ingress:
   #     hosts: [testbench.example.com]
   tls: []
 
+replication:
+  # Copy records to another TestBench instance. This is an installation
+  # feature, not a plugin: it needs no plugins.sharedSecret and does not appear
+  # under Device Schema → Plugins. Enable it on both instances.
+  enabled: false
+  # push copies this instance to its peer; push_pull reconciles both ways;
+  # receive accepts writes from a peer without scheduling a reverse push.
+  mode: push
+  # Full peer API base URL, e.g. https://peer.example.com/api/v1.
+  peerUrl: ""
+  intervalMinutes: 60 # 0 permits manual runs only.
+  # Entity types sent or reconciled by this instance. Order is dependency-safe
+  # regardless of the order listed here. Tests need matching devices/software
+  # on the peer when those types are omitted; vendor claims need software.
+  entities: [devices, software, vendor_claims, tests]
+  token:
+    # The same token must be configured on both TestBench instances.
+    existingSecret: ""
+    key: token
+  image:
+    repository: chainfirelabs/testbench/replication
+    tag: "1.13.3"
+    digest: ""
+    pullPolicy: ""
+
 plugins:
   sharedSecret:
     # Existing release-namespace Secret authenticating backend/plugin traffic.
@@ -263,24 +292,6 @@ plugins:
     existingSecret: "" # REQUIRED when plugins are enabled: e.g. testbench-plugins
     # Key containing the shared value.
     key: shared-secret
-
-  replication:
-    enabled: false
-    # push copies this instance to its peer; push_pull reconciles both ways;
-    # receive accepts writes from a peer without scheduling a reverse push.
-    mode: push
-    # Full peer API base URL, e.g. https://peer.example.com/api/v1.
-    peerUrl: ""
-    intervalMinutes: 60 # 0 permits manual runs only.
-    token:
-      # The same token must be configured on both TestBench instances.
-      existingSecret: ""
-      key: token
-    image:
-      repository: chainfirelabs/testbench/replication
-      tag: "1.11.2"
-      digest: ""
-      pullPolicy: ""
 
   networkScan:
     # Add row-level Scan and collection-level Scan all actions.
@@ -294,7 +305,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/network-scan
-      tag: "1.11.2"
+      tag: "1.13.3"
       digest: "" # Optional immutable digest; overrides tag.
       pullPolicy: ""
     # Per-port TCP connection timeout.
@@ -338,7 +349,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/device-info
-      tag: "1.11.2"
+      tag: "1.13.3"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -417,7 +428,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/reboot
-      tag: "1.11.2"
+      tag: "1.13.3"
       digest: ""
       pullPolicy: ""
     researchImage:

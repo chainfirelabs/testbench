@@ -57,8 +57,8 @@ creates the database or application login.
 ### Custom CA for outbound HTTPS
 
 Create a ConfigMap containing a PEM CA bundle in the release namespace and set
-`global.tls`. The chart mounts it in the backend, MCP, and enabled plugin
-controllers, including replication. Device Info and Reboot research Jobs also
+`global.tls`. The chart mounts it in the backend, MCP, the replication
+controller, and enabled plugin controllers. Device Info and Reboot research Jobs also
 receive it when they are created. The bundle is used for outbound HTTPS to the
 Authentik issuer, replication peer, AI providers, and other configured services.
 
@@ -117,7 +117,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.11.2`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.13.3`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -269,14 +269,30 @@ add an `auth-token` key to a Secret and set
 `mcp.authToken.existingSecret`; expose the Service through your own Ingress or
 gateway if clients outside the cluster need access.
 
-The replication controller is also disabled by default. Enable it on both
-instances with `plugins.replication.enabled=true`, set `peerUrl` to the other
+Replication is also disabled by default. It is an optional part of the
+installation, configured under the top-level `replication` key, and not a
+plugin: it needs no `plugins.sharedSecret` and never appears under
+**Schema → Plugins**. Enable it on both instances with
+`replication.enabled=true`, set `peerUrl` to the other
 instance's HTTPS `/api/v1` URL, and configure the same token Secret on both.
 Choose `mode: push` or `mode: push_pull` on the sender, and `mode: receive` on
 the receiver when it should not initiate a reverse sync. `intervalMinutes: 0` leaves only the
-manual **Replication → Sync now** action. This controller is installation-wide
-and does not need a per-device plugin assignment. See the main README for its
+manual **Replication → Sync now** action. The backend reaches its controller
+directly, and both authenticate with the replication token. See the main README for its
 record scope and conflict rules.
+
+Set `replication.entities` on the sender to a list of the types to
+sync, for example `[devices, software, tests]`. Choices are `devices`,
+`software`, `vendor_claims`, and `tests`; the default includes all four.
+The controller processes chosen types in dependency order regardless of list
+order. If `tests` is selected without `devices` or `software`, those referenced
+records must already exist on the destination with matching UUIDs. Selecting
+`vendor_claims` without `software` likewise requires matching software records.
+A receive-only instance does not initiate syncs, so its list is unused.
+
+Before 1.13.2 these values lived under `plugins.replication`. Move them to the
+top-level `replication` key when upgrading; the chart refuses to render with the
+old key so replication is never switched off silently.
 
 Device action plugins are disabled by default, in two independent senses. A plugin is not
 deployed unless its `plugins.*.enabled` value turns it on — and a deployed
@@ -443,3 +459,18 @@ downloaded ConfigMap or its raw `DeviceSchema` document. A preview lists the
 proposed additions. Applying it creates only missing fields, device types,
 layouts, and plugin assignments; existing configuration is never changed or
 deleted.
+
+### Test artifact storage
+
+Enable `backend.objectStorage` with the existing S3 endpoint and bucket. Test
+artifacts use `tests/<test-id>/artifacts/<artifact-id>/<filename>` in that bucket,
+and each test's text output uses `tests/<test-id>/output/<filename>`.
+The application Secret's S3 credentials need GetObject, PutObject, and DeleteObject
+on `tests/*`. Set `backend.objectStorage.artifactMaxBytes` for the per-file limit
+(default 104857600); the frontend proxy allows that limit plus 1 MiB of multipart
+overhead. Configure any external ingress limits accordingly. This setting is
+separate from `backend.objectStorage.maxBytes`, which limits ASCII test output.
+
+Schema migrations `0017_test_artifacts` and `0018_test_outputs` are required. Whole-test deletion retains
+objects for an operator-managed retention policy; individual artifact deletion
+removes its object. See [artifact usage and API](../../README.md#downloadable-test-artifacts).

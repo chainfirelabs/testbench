@@ -11,7 +11,7 @@ from ..schemas import (
     TestOut, TestedComponentSummary,
 )
 from ..services.device_schema import device_field_expression, union_field_map
-from ..services.entity_fields import entity_field_expression, get_entity_fields
+from ..services.entity_fields import TEST_FILE_FIELDS, entity_field_expression, get_entity_fields
 from .devices import device_out
 from .deps import get_current_user
 from .software import _annotate
@@ -54,7 +54,7 @@ def global_search(
         entity_field_expression(Test, field).ilike(like)
         for field in get_entity_fields(db, "tests")
         if field.field_type in {"text", "textarea", "select"}
-        and field.key not in {"device_unique_id", "software_name", "created_by_username"}
+        and field.key not in {"device_unique_id", "software_name", "created_by_username", *TEST_FILE_FIELDS}
     ]
     # The JSON text prefilter uses a trigram index. The field predicates remain
     # authoritative, so a match inside a sensitive field cannot produce a hit.

@@ -391,6 +391,9 @@ class Test:
     software_id: str = ""
     software_name: str | None = None
     software_version: str | None = None
+    component_id: str | None = None
+    component_name: str | None = None
+    component_version: str | None = None
     device_id: str = ""
     device_unique_id: str | None = None
     device_make: str | None = None
@@ -403,6 +406,11 @@ class Test:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     created_by_username: str | None = None
+    # What is attached to the run: how many artifacts, and the output file's
+    # name and size when there is one. Read the files with `tb.tests`.
+    artifact_count: int = 0
+    output_filename: str | None = None
+    output_size_bytes: int | None = None
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -412,6 +420,9 @@ class Test:
             software_id=data.get("software_id", ""),
             software_name=data.get("software_name"),
             software_version=data.get("software_version"),
+            component_id=data.get("component_id"),
+            component_name=data.get("component_name"),
+            component_version=data.get("component_version"),
             device_id=data.get("device_id", ""),
             device_unique_id=data.get("device_unique_id"),
             device_make=data.get("device_make"),
@@ -424,6 +435,9 @@ class Test:
             created_at=parse_datetime(data.get("created_at")),
             updated_at=parse_datetime(data.get("updated_at")),
             created_by_username=data.get("created_by_username"),
+            artifact_count=data.get("artifact_count") or 0,
+            output_filename=data.get("output_filename"),
+            output_size_bytes=data.get("output_size_bytes"),
             raw=data,
         )
 
@@ -431,8 +445,83 @@ class Test:
     def passed(self) -> bool:
         return self.outcome == PASS
 
+    @property
+    def has_output(self) -> bool:
+        return self.output_filename is not None
+
     def __str__(self) -> str:
         return f"{self.software_name} on {self.device_unique_id}: {self.outcome}"
+
+
+@dataclass
+class TestArtifact:
+    """A file attached to a recorded run: a report, a capture, a screenshot.
+
+    Stored privately in the server's object store under
+    `tests/<test-id>/artifacts/<artifact-id>/<filename>`; download it with
+    `tb.tests.download_artifact()`.
+    """
+
+    __test__ = False  # not a pytest test class, despite the name
+
+    id: str = ""
+    test_id: str = ""
+    filename: str = ""
+    content_type: str = ""
+    size_bytes: int = 0
+    created_at: datetime | None = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TestArtifact":
+        return cls(
+            id=data.get("id", ""),
+            test_id=data.get("test_id", ""),
+            filename=data.get("filename", ""),
+            content_type=data.get("content_type", ""),
+            size_bytes=data.get("size_bytes") or 0,
+            created_at=parse_datetime(data.get("created_at")),
+            raw=data,
+        )
+
+    def __str__(self) -> str:
+        return self.filename
+
+
+@dataclass
+class TestOutput:
+    """A run's one text output file, as read back from the server.
+
+    `text` is None when the server could not read the stored file; `error` then
+    says why (most often that the object has gone from the bucket). The output
+    can still be replaced or deleted.
+    """
+
+    __test__ = False  # not a pytest test class, despite the name
+
+    filename: str = ""
+    size_bytes: int = 0
+    text: str | None = None
+    error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TestOutput":
+        meta = data.get("output") or {}
+        return cls(
+            filename=meta.get("filename", ""),
+            size_bytes=meta.get("size_bytes") or 0,
+            text=data.get("text"),
+            error=data.get("error"),
+            created_at=parse_datetime(meta.get("created_at")),
+            updated_at=parse_datetime(meta.get("updated_at")),
+            raw=data,
+        )
+
+    def __str__(self) -> str:
+        return self.text or ""
 
 
 @dataclass

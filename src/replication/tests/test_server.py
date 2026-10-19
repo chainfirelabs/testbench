@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from replication_plugin import server
+from replication_controller import server
 
 
 def item(identity: str, time: str, value: str, entity: str = "devices") -> dict:
@@ -12,17 +12,36 @@ def item(identity: str, time: str, value: str, entity: str = "devices") -> dict:
 
 
 class ReplicationTests(unittest.TestCase):
+    def test_entity_selection_defaults_to_all_and_orders_dependencies(self):
+        self.assertEqual(server.parse_entities('["tests", "devices"]'), ("devices", "tests"))
+        self.assertEqual(server.parse_entities('["devices", "software", "vendor_claims", "tests"]'), server.ENTITIES)
+        for invalid in ('[]', '["unknown"]', '["devices", "devices"]', '"devices"', 'bad json'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                server.parse_entities(invalid)
+
+    @patch.object(server, "_apply", return_value={"applied": 0, "skipped": 0})
+    @patch.object(server, "_get_all", return_value=[])
+    @patch.object(server.httpx, "Client")
+    def test_only_selected_entities_are_requested(self, client, get_all, _apply):
+        with patch.object(server, "SELECTED_ENTITIES", ("devices", "tests")), \
+             patch.object(server, "MODE", "push"), patch.object(server, "LOCAL_URL", "local"), \
+             patch.object(server, "PEER_URL", "peer"), patch.object(server, "TOKEN", "token"):
+            result = server.sync_once()
+        self.assertEqual(result["selected_entities"], ["devices", "tests"])
+        self.assertEqual(list(result["entities"]), ["devices", "tests"])
+        self.assertEqual({call.args[2] for call in get_all.call_args_list}, {"devices", "tests"})
+
     @patch.object(server, "sync_once", side_effect=RuntimeError("peer returned 401"))
     @patch.object(server.httpx, "Client")
     def test_failed_scheduled_sync_reports_audit_result_and_destination(self, client, _sync):
         response = client.return_value.__enter__.return_value.post.return_value
         with patch.object(server, "LOCAL_URL", "http://local/api/v1"), \
              patch.object(server, "PEER_URL", "https://peer.example/api/v1"), \
-             patch.object(server, "PLUGIN_SECRET", "local-secret"):
+             patch.object(server, "TOKEN", "shared-token"):
             server._run("run-1", "scheduled")
         args, kwargs = client.return_value.__enter__.return_value.post.call_args
         self.assertEqual(args[0], "http://local/api/v1/replication/run-result")
-        self.assertEqual(kwargs["headers"]["X-TestBench-Plugin-Secret"], "local-secret")
+        self.assertEqual(kwargs["headers"], {"X-TestBench-Replication-Token": "shared-token"})
         self.assertEqual(kwargs["json"]["peer_url"], "https://peer.example/api/v1")
         self.assertEqual(kwargs["json"]["state"], "failed")
         self.assertEqual(server.LAST_RUN["state"], "failed")
@@ -42,13 +61,14 @@ class ReplicationTests(unittest.TestCase):
         self.assertIn("backend unavailable", server.LAST_RUN["audit_error"])
         logged.assert_called_once()
 
-    def test_plugin_control_requires_shared_secret(self):
-        with patch.object(server, "PLUGIN_SECRET", "local-secret"):
-            with self.assertRaises(HTTPException):
-                server._auth("replication", "wrong")
-            with self.assertRaises(HTTPException):
-                server._auth("network-scan", "local-secret")
-            self.assertIsNone(server._auth("replication", "local-secret"))
+    def test_control_requires_replication_token(self):
+        with patch.object(server, "TOKEN", "shared-token"):
+            for wrong in (None, "", "wrong"):
+                with self.subTest(token=wrong), self.assertRaises(HTTPException):
+                    server._auth(wrong)
+            self.assertIsNone(server._auth("shared-token"))
+        with patch.object(server, "TOKEN", ""), self.assertRaises(HTTPException):
+            server._auth("")
 
     def test_newest_edit_wins_in_both_directions(self):
         old = item("a", "2026-01-01T00:00:00+00:00", "old")
