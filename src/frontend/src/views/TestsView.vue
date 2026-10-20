@@ -8,7 +8,7 @@ import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
 import TestArtifactsModal from '../components/TestArtifactsModal.vue'
 import TestOutputModal, { type TestOutputMeta } from '../components/TestOutputModal.vue'
-import { TEST_ARTIFACTS_FIELD, TEST_OUTPUT_FIELD, testArtifactsColumn, testOutputColumn } from '../testArtifacts'
+import { TEST_ARTIFACTS_FIELD, TEST_OUTPUT_FIELD, newTestFileFields, testArtifactsColumn, testOutputColumn, type TestFileStorage } from '../testArtifacts'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
 import { dateColumn } from '../dates'
@@ -258,6 +258,12 @@ const NEW_TEST_FIELDS = computed<FormField[]>(() => {
   return fields
 })
 
+/** The schema's fields, then the test's files. */
+const NEW_TEST_FORM = computed<FormField[]>(() => [
+  ...NEW_TEST_FIELDS.value,
+  ...newTestFileFields(fileStorage.value, testFields.value),
+])
+
 /*
  * Opening the dialog has to fetch the fleet first, which is not instant and
  * used to happen with nothing on screen to say so — the button simply sat
@@ -265,13 +271,21 @@ const NEW_TEST_FIELDS = computed<FormField[]>(() => {
  * nowhere. It now says it is working and reports a failure to the toast.
  */
 const openingNew = ref(false)
+// Whether new tests can carry output and artifacts. Read once, with the fleet.
+const fileStorage = ref<TestFileStorage | null>(null)
 
 async function openNew() {
   if (openingNew.value) return
   if (!referencesLoaded.value) {
     openingNew.value = true
     try {
-      await loadReferences()
+      const [, storage] = await Promise.all([
+        loadReferences(),
+        // Not worth failing the dialog over: without it the file fields say
+        // storage is unavailable, and the test itself can still be recorded.
+        api<TestFileStorage>('/tests/file-storage').catch(() => null),
+      ])
+      fileStorage.value = storage
     } catch (e: any) {
       showToast(e?.message || 'Devices and software could not be loaded.', true)
       return
@@ -289,6 +303,8 @@ async function openNew() {
     tag: 'adhoc',
     notes: '',
     misc_data: '{}',
+    [TEST_OUTPUT_FIELD]: [],
+    [TEST_ARTIFACTS_FIELD]: [],
   }
   showNew.value = true
 }
@@ -440,14 +456,16 @@ const referencesLoaded = ref(false)
  * Only the fields the dialog reads.
  *
  * It resolves a typed unique_id to a device and shows the make, model and
- * status in the hint; nothing below touches anything else. Asking for the
+ * status in the hint, and `id` is what the new test binds to. A projection
+ * returns only what it names: without `id` the device was found, the hint
+ * looked right, and the test went to the API with no device at all. Asking for the
  * whole row meant a fleet of two thousand arrived as 2.3MB of documents —
  * every custom field and misc_data blob — to be thrown away after four values
  * were taken from each. `?fields=` is answered from the document by name, so
  * an installation that renames or adds a field keeps working; a field that
  * does not exist comes back null rather than failing the request.
  */
-const DEVICE_REFERENCE_FIELDS = ['unique_id', 'make', 'model', 'status'].join(',')
+const DEVICE_REFERENCE_FIELDS = ['id', 'unique_id', 'make', 'model', 'status'].join(',')
 /*
  * `created_at` orders the versions and `id` is what a test binds to.
  *
@@ -744,6 +762,8 @@ async function saveNewTest(values: Record<string, any>) {
     showToast(`No software matches "${values.software_name}"`, true)
     return
   }
+  const outputFile: File | undefined = (values[TEST_OUTPUT_FIELD] || [])[0]
+  const artifactFiles: File[] = values[TEST_ARTIFACTS_FIELD] || []
   const merged = mergeCustomValues(values, testFields.value, 'misc_data')
   const payload = {
     device_id: device.id,
@@ -760,16 +780,38 @@ async function saveNewTest(values: Record<string, any>) {
   creating.value = true
   try {
     const created = await api<any>('/tests', { method: 'POST', body: JSON.stringify(payload) })
+    const failed = await uploadNewTestFiles(created.id, outputFile, artifactFiles)
     // A row that did not exist a moment ago: re-read the list rather than
     // refresh the window the grid is already holding.
     await reloadRows()
     showNew.value = false
-    showToast('Test recorded')
+    // The test exists either way; a file that did not make it can be added
+    // from the row's Output or Artifacts button.
+    if (failed.length) showToast(`Test recorded, but ${failed.join('; ')}`, true)
+    else showToast('Test recorded')
   } catch (e: any) {
     showToast(e.message, true)
   } finally {
     creating.value = false
   }
+}
+
+/** Upload a just-created test's files, returning what failed, in words. */
+async function uploadNewTestFiles(testId: string, output: File | undefined, artifacts: File[]): Promise<string[]> {
+  const base = `/tests/${encodeURIComponent(testId)}`
+  const failed: string[] = []
+  const send = async (file: File, path: string, method: string) => {
+    const body = new FormData()
+    body.append('file', file)
+    try {
+      await api(path, { method, body })
+    } catch (e: any) {
+      failed.push(`${file.name} was not uploaded: ${e?.message || 'request failed'}`)
+    }
+  }
+  if (output) await send(output, `${base}/output`, 'PUT')
+  for (const file of artifacts) await send(file, `${base}/artifacts`, 'POST')
+  return failed
 }
 
 function exportAs(format: string) {
@@ -922,7 +964,7 @@ onMounted(loadFields)
     <FormModal
       v-if="showNew"
       title="New Test"
-      :fields="NEW_TEST_FIELDS"
+      :fields="NEW_TEST_FORM"
       :values="newTest"
       :busy="creating"
       submit-label="Record test"

@@ -75,6 +75,16 @@ class TestOutputsApiTests(SchemaCase):
             self.assertEqual(self.client.get(base).status_code, 401)
 
 
+class TestFileStorageTests(SchemaCase):
+    def test_a_new_test_can_ask_whether_it_can_hold_files(self):
+        self.assertEqual(self.get('/api/v1/tests/file-storage').json()['storage_enabled'], settings.object_storage_enabled)
+        with patch.multiple(settings, object_storage_enabled=True, object_storage_max_bytes=64, artifact_max_bytes=128):
+            response = self.get('/api/v1/tests/file-storage')
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {'storage_enabled': True, 'output_max_bytes': 64, 'artifact_max_bytes': 128})
+        self.assertEqual(self.client.get('/api/v1/tests/file-storage').status_code, 401)
+
+
 class RetiredDeviceOutputFieldTests(SchemaCase):
     def test_an_existing_system_output_field_is_switched_off(self):
         """Output moved from devices to tests; an installation that already had

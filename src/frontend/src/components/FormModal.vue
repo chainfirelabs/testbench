@@ -13,6 +13,7 @@
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useIsMobile, useIsStacked } from '../breakpoints'
+import { fileSizeLabel } from '../testArtifacts'
 import OptionPicker from './OptionPicker.vue'
 import SuggestInput from './SuggestInput.vue'
 
@@ -30,7 +31,15 @@ export interface FormField {
    * a phone. What the name means to a caller — free text, with suggestions —
    * is unchanged.
    */
-  type?: 'text' | 'password' | 'select' | 'textarea' | 'json' | 'datalist' | 'date' | 'number' | 'boolean'
+  type?: 'text' | 'password' | 'select' | 'textarea' | 'json' | 'datalist' | 'date' | 'number' | 'boolean' | 'file'
+  /**
+   * For `file`: what the picker offers, whether it takes several, and the
+   * largest file accepted. The value is always an array of `File`s, empty when
+   * nothing is chosen; uploading them is the caller's job.
+   */
+  accept?: string
+  multiple?: boolean
+  maxBytes?: number
   /** JSON fields normally accept objects; opt into an array for list-valued APIs. */
   jsonShape?: 'object' | 'array'
   /**
@@ -144,6 +153,7 @@ const shownKeys = ref(new Set<string>())
 
 function hasValue(key: string): boolean {
   const v = props.values[key]
+  if (Array.isArray(v)) return v.length > 0
   return v != null && String(v).trim() !== '' && String(v).trim() !== '{}'
 }
 
@@ -174,7 +184,9 @@ const visibleFields = computed(() =>
 
 const missing = computed(() =>
   props.fields.filter(
-    (f) => fieldSelected(f) && isRequired(f) && !isDisabled(f) && !String(props.values[f.key] ?? '').trim(),
+    (f) => fieldSelected(f) && isRequired(f) && !isDisabled(f) && (f.type === 'file'
+      ? !(props.values[f.key] || []).length
+      : !String(props.values[f.key] ?? '').trim()),
   ),
 )
 
@@ -191,6 +203,14 @@ function submit() {
   if (missing.value.length) {
     error.value = `${missing.value.map((f) => f.label).join(', ')} ${missing.value.length > 1 ? 'are' : 'is'} required`
     return
+  }
+  for (const f of props.fields) {
+    const files: File[] = f.type === 'file' && !isDisabled(f) && Array.isArray(props.values[f.key]) ? props.values[f.key] : []
+    const tooBig = f.maxBytes ? files.find((file) => file.size > f.maxBytes!) : undefined
+    if (tooBig) {
+      error.value = `${tooBig.name} is larger than the ${fileSizeLabel(f.maxBytes!)} ${f.label} limit`
+      return
+    }
   }
   const overMaximum = props.fields.find(
     (f) => !isDisabled(f) && f.max && props.values[f.key] && props.values[f.key] > f.max,
@@ -297,6 +317,15 @@ onMounted(() =>
               :value="values[f.key]"
               @input="onInput(f, ($event.target as HTMLTextAreaElement).value)"
             ></textarea>
+            <input
+              v-else-if="f.type === 'file'"
+              :id="`ff-${f.key}`"
+              type="file"
+              :accept="f.accept"
+              :multiple="f.multiple"
+              :disabled="isDisabled(f)"
+              @change="onInput(f, Array.from(($event.target as HTMLInputElement).files || []))"
+            />
             <input
               v-else-if="f.type === 'boolean'"
               :id="`ff-${f.key}`"

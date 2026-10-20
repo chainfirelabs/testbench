@@ -24,10 +24,20 @@ export class ApiError extends Error {
  * read once, so a caller that has already parsed the JSON passes it in rather
  * than asking for it again.
  */
+/*
+ * A request validation error names the field it is about, or it says only
+ * "Field required" — which, when the dialog shows every field it has filled,
+ * leaves nobody able to tell what is missing. `loc` is ["body", "device_id"].
+ */
+export function validationMessage(item: { msg: string; loc?: unknown[] }): string {
+  const loc = (item.loc || []).filter((part) => part !== 'body' && part !== 'query')
+  return loc.length ? `${loc.join('.')}: ${item.msg}` : item.msg
+}
+
 function errorMessage(status: number, data: any): string {
   const detail = data?.detail
   if (typeof detail === 'string') return detail
-  if (Array.isArray(detail) && detail[0]?.msg) return detail[0].msg
+  if (Array.isArray(detail) && detail[0]?.msg) return validationMessage(detail[0])
   if (detail) return JSON.stringify(detail)
   return `HTTP ${status}`
 }

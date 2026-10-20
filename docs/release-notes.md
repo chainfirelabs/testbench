@@ -1,5 +1,19 @@
 # Release notes
 
+## 1.13.4
+
+- Fixed: recording a test from **Tests → New test** failed with "Field
+  required" even with every field filled in. The dialog found the device but
+  sent the test without it. Broken since 1.9.4.
+- **New test** takes the test's **Output** (one plain-text file) and
+  **Artifacts** (any number of files), both optional, uploaded once the test
+  is recorded. Without object storage they are shown disabled, saying why. A
+  file that fails to upload is reported and can be added from the test's row.
+- Request errors name the field they are about ("device_id: Field required")
+  instead of only "Field required".
+- `GET /tests/file-storage` reports whether tests can hold output and
+  artifacts, and the size limit for each.
+
 ## 1.13.3
 
 - Test **Output** and **Artifacts** are built-in, read-only test fields. Hide

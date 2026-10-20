@@ -4,6 +4,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Upl
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..db import get_db, utcnow
 from ..models import Device, Test, Software, SoftwareComponent, User
 from ..models.test import TEST_OUTCOMES, TEST_TAGS
@@ -328,6 +329,20 @@ def test_template(db: Session = Depends(get_db), user: User = Depends(get_curren
     # the entity-field catalog initially added them as hidden.
     columns = [*TEMPLATE_COLUMNS, *(key for key in configured if key not in TEMPLATE_COLUMNS)]
     return download_response(template_csv(columns), "tests-template.csv", "text/csv")
+
+
+@router.get("/file-storage")
+def test_file_storage(user: User = Depends(get_current_user)):
+    """Whether tests can hold output and artifacts here, and their size limits.
+
+    The per-test output and artifact routes report the same, but a test that is
+    still being created has no id to ask them with.
+    """
+    return {
+        "storage_enabled": settings.object_storage_enabled,
+        "output_max_bytes": settings.object_storage_max_bytes,
+        "artifact_max_bytes": settings.artifact_max_bytes,
+    }
 
 
 @router.get("/{test_id}", response_model=TestOut)
