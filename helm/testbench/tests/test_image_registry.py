@@ -103,6 +103,14 @@ class ImageRegistryTests(unittest.TestCase):
         values['backend']['objectStorage']['artifactMaxBytes'] = 0
         self.assertNotEqual(render(values).returncode, 0)
 
+    def test_artifact_requests_are_proxied_to_the_backend(self):
+        # A nested nginx location inherits no proxy_pass: without its own,
+        # artifact requests 404 at the proxy and the UI reports storage off.
+        result = render(copy.deepcopy(BASE))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        block = result.stdout.split('/artifacts(/|$) {', 1)[1].split('}', 1)[0]
+        self.assertIn('proxy_pass http://testbench-testbench-backend:8000;', block)
+
     def test_default_database_source_does_not_require_configmap(self):
         values = copy.deepcopy(BASE)
         values.pop('schema')

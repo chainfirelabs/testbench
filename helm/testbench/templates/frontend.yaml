@@ -17,7 +17,13 @@ data:
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         client_max_body_size 16m;
+        # A nested location inherits none of the proxy settings above, so
+        # without its own proxy_pass nginx serves artifact requests as files.
         location ~ ^/api/v1/tests/[^/]+/artifacts(/|$) {
+          proxy_pass http://{{ include "testbench.fullname" . }}-backend:8000;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
           client_max_body_size {{ add (int64 .Values.backend.objectStorage.artifactMaxBytes) 1048576 }};
           proxy_request_buffering off;
           proxy_read_timeout 300s;

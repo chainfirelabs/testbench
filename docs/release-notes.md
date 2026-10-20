@@ -1,5 +1,21 @@
 # Release notes
 
+## 1.13.5
+
+- Fixed: **Artifacts** said object storage wasn't enabled, and artifact
+  uploads and downloads failed, even with `backend.objectStorage` enabled and
+  Output working. The frontend's nginx sent artifact requests nowhere: the
+  block raising their upload limit lacked its own `proxy_pass`, so nginx
+  answered them with a 404 page instead of passing them to the API. Broken
+  since 1.12.0, in both the Helm chart and Docker Compose.
+- The Artifacts dialog no longer claims storage is disabled when it simply
+  couldn't load the list; it shows the error instead.
+- Fixed: a device list showing **Checkout Due** (most visibly a device type
+  with no devices yet) could fail with "Could not load rows: can't access
+  property "data", row is undefined". The overdue colouring was worked out for
+  the placeholder row drawn while the page loads, which has no device. Every
+  table now skips a column's own cell colouring rules for placeholder rows.
+
 ## 1.13.4
 
 - Fixed: recording a test from **Tests → New test** failed with "Field

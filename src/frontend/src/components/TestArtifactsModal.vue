@@ -87,7 +87,7 @@ onMounted(() => { dialog.value?.showModal(); load() })
       <p v-if="error" role="alert" class="login-error">{{ error }} <button class="btn btn-mini" :disabled="busy" @click="error = ''; load()">Retry list</button></p>
       <p v-if="loading" role="status">Loading artifacts…</p>
       <template v-else>
-        <p v-if="!storageEnabled" class="muted">Artifact uploads and downloads require object storage to be enabled by an administrator.</p>
+        <p v-if="!storageEnabled && !error" class="muted">Artifact uploads and downloads require object storage to be enabled by an administrator.</p>
         <label v-if="auth.can(PERMISSION.testsEdit) && storageEnabled" class="upload-label">
           Upload files (up to {{ sizeLabel(maxBytes) }} each)
           <input type="file" multiple :disabled="busy || downloading" @change="upload" />

@@ -164,7 +164,7 @@ function rowBadge(row: any): { text: string; cssClass?: string; spinner?: boolea
  * and the red goes away on the same repaint that saved it.
  */
 function daysOverdue(row: any): number | null {
-  if (row.data?.status !== 'checked_out' || !row.data?.checkout_due) return null
+  if (row?.data?.status !== 'checked_out' || !row.data?.checkout_due) return null
   const days = daysUntil(row.data.checkout_due)
   return days !== null && days < 0 ? -days : null
 }

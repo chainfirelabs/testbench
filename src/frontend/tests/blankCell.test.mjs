@@ -30,10 +30,26 @@ test('a formatter that returns nothing is filled in', () => {
 })
 
 test('existing cell class rules are kept', () => {
-  const overdue = () => true
-  const col = withBlankPlaceholder({ field: 'due', cellClassRules: { 'cell-overdue': overdue } })
-  assert.equal(col.cellClassRules['cell-overdue'], overdue)
+  const overdue = (p) => p.data.late
+  const col = withBlankPlaceholder({ field: 'due', cellClassRules: { 'cell-overdue': overdue, 'cell-x': 'x > 1' } })
+  assert.equal(col.cellClassRules['cell-overdue']({ node: {}, data: { late: true } }), true)
+  assert.equal(col.cellClassRules['cell-x'], 'x > 1')
   assert.ok(col.cellClassRules[BLANK_CLASS])
+})
+
+test('a column\'s class rules are not run for a row still loading', () => {
+  // A rule reading a field off p.data threw on the placeholder row, which
+  // failed the load of an empty device type page.
+  const rules = { 'cell-overdue': (p) => p.data.status === 'late' }
+  const loadingRow = { node: {}, data: undefined }
+  for (const col of [
+    withBlankPlaceholder({ field: 'due', cellClassRules: rules }),
+    withBlankPlaceholder({ field: 'due', cellRenderer: () => 'x', cellClassRules: rules }),
+    withBlankPlaceholder({ field: 'due', blankPlaceholder: false, cellClassRules: rules }),
+  ]) {
+    assert.equal(col.cellClassRules['cell-overdue'](loadingRow), false)
+    assert.equal(col.cellClassRules['cell-overdue']({ node: {}, data: { status: 'late' } }), true)
+  }
 })
 
 test('opting out removes our key and changes nothing else', () => {

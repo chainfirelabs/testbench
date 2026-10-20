@@ -70,6 +70,12 @@ function blankNode() {
   return el
 }
 
+/** Class rules that hold for no placeholder row. A string rule is AG Grid's expression form, left alone. */
+function rowsOnly(rules: Record<string, any>): Record<string, any> {
+  return Object.fromEntries(Object.entries(rules).map(([name, rule]) => [name,
+    typeof rule === 'function' ? (p: any) => !isLoadingRow(p) && rule(p) : rule]))
+}
+
 /**
  * The column as a list should show it: blanks read `N/A`.
  *
@@ -82,12 +88,17 @@ function blankNode() {
  * wins: the placeholder only fills what the column left empty.
  *
  * A row still on its way from the server is drawn as a loading bar in every
- * column, opted out or not (see `isLoadingRow`).
+ * column, opted out or not (see `isLoadingRow`). The column's own class rules
+ * are not asked about it: they are written for rows, and one reading a field
+ * off `p.data` threw on the placeholder and failed the whole page's load.
  */
 export function withBlankPlaceholder<T extends Record<string, any>>(col: T): T {
   const { blankPlaceholder, ...rest } = col as any
-  // Takes precedence over the column's renderer, and defers to it for real rows.
-  const loading = { cellRendererSelector: (p: any) => (isLoadingRow(p) ? { component: loadingNode } : undefined) }
+  const loading: Record<string, any> = {
+    // Takes precedence over the column's renderer, and defers to it for real rows.
+    cellRendererSelector: (p: any) => (isLoadingRow(p) ? { component: loadingNode } : undefined),
+  }
+  if (rest.cellClassRules) loading.cellClassRules = rowsOnly(rest.cellClassRules)
   if (blankPlaceholder === false) return { ...rest, ...loading }
 
   if (typeof rest.cellRenderer === 'function') {
@@ -118,7 +129,7 @@ export function withBlankPlaceholder<T extends Record<string, any>>(col: T): T {
       return typeof text === 'object' ? JSON.stringify(text) : String(text)
     },
     cellClassRules: {
-      ...rest.cellClassRules,
+      ...loading.cellClassRules,
       [BLANK_CLASS]: (p: any) => !isLoadingRow(p) && isBlankValue(formatted(p)),
     },
   }
