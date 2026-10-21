@@ -1,5 +1,23 @@
 # Release notes
 
+## 1.13.6
+
+- The Python client (`src/python-client`) is versioned with TestBench, starting
+  at 1.13.6 (it was 0.1.0), and covers what the API gained since it was last
+  updated:
+  - Recording, filtering and amending runs against a suite's components
+    (`tests.create(component=...)`), and `Software.components`.
+  - Required custom test fields: they go in `misc_data`, and
+    `tb.entity_fields("tests")` lists them.
+  - `tb.tests.file_storage()`. A run with files is no longer recorded when the
+    server cannot store them.
+  - `tb.devices.compatible_software()`, `tb.software.tested_devices()`,
+    `tb.vendor_devices.inventory_matches()` and the claims'
+    `inventory_devices`, and `tb.search()`.
+- The backend, frontend, MCP server and replication controller packages now
+  carry the TestBench version as well (they all said 0.1.0). The version shown
+  in the UI and on the images still comes from the release tag.
+
 ## 1.13.5
 
 - Fixed: **Artifacts** said object storage wasn't enabled, and artifact

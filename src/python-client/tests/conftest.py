@@ -33,6 +33,18 @@ class FakeAPI:
         self.artifacts: dict[str, list[dict]] = {}
         self.outputs: dict[str, dict] = {}
         self.vendor_devices: list[dict] = []
+        # What GET /tests/file-storage reports; None for a pre-1.13.4 server
+        # without the endpoint.
+        self.file_storage: dict | None = {
+            "storage_enabled": True, "output_max_bytes": 64, "artifact_max_bytes": 1024,
+        }
+        self.search_result: dict = {"devices": [], "software": [], "tests": [], "vendor_devices": []}
+        self.entity_fields = {
+            "tests": [{"key": "outcome", "label": "Outcome", "type": "select",
+                       "visible": True, "required": True, "storage": "column"},
+                      {"key": "lab", "label": "Lab", "type": "select", "options": ["East", "West"],
+                       "visible": True, "required": False, "storage": "data"}],
+        }
         self.me = {
             "id": "u1", "username": "tester1", "role": "tester", "email": None,
             "permissions": ["devices.edit", "software.edit", "tests.edit", "views.save"],
@@ -163,6 +175,9 @@ class FakeAPI:
                 else {})
         method = request.method
 
+        if path == "/search" and method == "GET":
+            return httpx.Response(200, json=self.search_result)
+
         if path == "/auth/me":
             return httpx.Response(200, json=self.me)
 
@@ -202,6 +217,23 @@ class FakeAPI:
 
         # Above the /devices/{key} branch: otherwise "dev-1/actions" is looked
         # up as a device unique_id and 404s.
+        if path.startswith("/devices/") and path.endswith("/compatible-software") and method == "GET":
+            key = path.split("/")[2]
+            row = self.devices.get(key) or next((d for d in self.devices.values() if d["id"] == key), None)
+            if row is None:
+                return httpx.Response(404, json={"detail": "Device not found"})
+            items = []
+            for software in self.software.values():
+                claims = [{k: v for k, v in vd.items()} for vd in self.vendor_devices
+                          if vd["software_id"] == software["id"]
+                          and vd["make"] == row["make"] and vd["model"] in (None, row["model"])]
+                if claims:
+                    items.append({"software": software, "support_status": claims[0]["support_status"],
+                                  "matched_on": ["make", "model"] if claims[0]["model"] else ["make"],
+                                  "vendor_devices": claims,
+                                  "fields": [{"key": "make", "label": "Make"}]})
+            return httpx.Response(200, json={"device_id": row["id"], "items": items})
+
         if path.startswith("/devices/") and path.endswith("/actions") and method == "GET":
             key = path.split("/")[2]
             row = self.devices.get(key) or next((d for d in self.devices.values() if d["id"] == key), None)
@@ -267,6 +299,42 @@ class FakeAPI:
                 rows = [r for r in rows if params["search"].lower() in r["name"].lower()]
             return httpx.Response(200, json=self._page(rows, params))
 
+        if path.startswith("/entity-fields/") and method == "GET":
+            entity = path.split("/")[2]
+            if entity not in self.entity_fields:
+                return httpx.Response(404, json={"detail": "Unknown entity"})
+            return httpx.Response(200, json=self.entity_fields[entity])
+
+        if path.endswith("/inventory-matches") and method == "GET":
+            _, _, software_id, _, vd_id, _ = path.split("/")
+            claim = next((v for v in self.vendor_devices
+                          if v["id"] == vd_id and v["software_id"] == software_id), None)
+            if claim is None:
+                return httpx.Response(404, json={"detail": "Vendor device not found"})
+            if int(params.get("page_size", 50)) > 100:
+                return httpx.Response(422, json={"detail": "page_size must be at most 100"})
+            rows = [{"id": d["id"], "unique_id": d["unique_id"]}
+                    for d in sorted(self.devices.values(), key=lambda d: d["unique_id"])
+                    if d["make"] == claim["make"] and claim["model"] in (None, d["model"])]
+            return httpx.Response(200, json=self._page(rows, params))
+
+        if path.endswith("/tested-devices") and method == "GET":
+            key = path.split("/")[2]
+            counts: dict[str, dict] = {}
+            for test in self.tests:
+                if test["software_id"] != key:
+                    continue
+                entry = counts.setdefault(test["device_id"], {"test_count": 0, "outcomes": {}})
+                entry["test_count"] += 1
+                entry["outcomes"][test["outcome"]] = entry["outcomes"].get(test["outcome"], 0) + 1
+            rows = [{"device": next(d for d in self.devices.values() if d["id"] == device_id),
+                     "last_test_at": None, "component": None, **entry}
+                    for device_id, entry in sorted(counts.items())]
+            page = self._page(rows, params)
+            return httpx.Response(200, json={"software_id": key, "devices": page["items"],
+                                             "total": page["total"], "page": page["page"],
+                                             "page_size": page["page_size"]})
+
         if path.endswith("/versions") and method == "GET":
             key = path.split("/")[2]
             name = self._software_name(key)
@@ -297,8 +365,25 @@ class FakeAPI:
                 return httpx.Response(400, json={"detail": "Unknown software_id"})
             if device is None:
                 return httpx.Response(400, json={"detail": "Unknown device_id"})
+            component = None
+            if body.get("component_id"):
+                component = next((c for c in software.get("bundle_components", [])
+                                  if c["id"] == body["component_id"]), None)
+                if component is None:
+                    return httpx.Response(400, json={"detail": "unknown component_id"})
+            elif body.get("component_name"):
+                component = {"id": f"comp-{body['component_name']}", "name": body["component_name"],
+                             "version": body.get("component_version") or ""}
+            missing = [f["label"] for f in self.entity_fields["tests"]
+                       if f["storage"] == "data" and f["visible"] and f["required"]
+                       and not (body.get("misc_data") or {}).get(f["key"])]
+            if missing:
+                return httpx.Response(422, json={"detail": f"{missing[0]} is required"})
             row = {
                 "id": f"test-{len(self.tests) + 1}",
+                "component_id": component["id"] if component else None,
+                "component_name": component["name"] if component else None,
+                "component_version": component["version"] if component else None,
                 "software_id": software["id"], "software_name": software["name"],
                 "software_version": body.get("software_version") or software["version"],
                 "device_id": device["id"], "device_unique_id": device["unique_id"],
@@ -317,7 +402,16 @@ class FakeAPI:
                 rows = [r for r in rows if r["device_id"] == params["device_id"]]
             if params.get("outcome"):
                 rows = [r for r in rows if r["outcome"] == params["outcome"]]
+            for key in ("component_name", "component_version"):
+                if params.get(key) is not None:
+                    rows = [r for r in rows if (r.get(key) or "") == params[key]]
             return httpx.Response(200, json=self._page(rows, params))
+
+        if path == "/tests/file-storage" and method == "GET":
+            if self.file_storage is None:
+                # An older server reads "file-storage" as a test id.
+                return httpx.Response(404, json={"detail": "Test not found"})
+            return httpx.Response(200, json=self.file_storage)
 
         if path.startswith("/tests/"):
             return self._test_files(request, method, path)

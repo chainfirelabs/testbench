@@ -252,6 +252,12 @@ class Device:
     # field this library has never heard of is reachable here without waiting
     # for a release.
     data: dict = field(default_factory=dict)
+    # Per-device replacements for the links a field renders as (a WAN address
+    # opening a web UI, say), by field key.
+    link_overrides: dict = field(default_factory=dict)
+    # From `tb.search()`: suite components tested on this device that matched,
+    # each with the run's test_id, name, version, software and outcome.
+    tested_components: list[dict] = field(default_factory=list, repr=False)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     # Populated only by `devices.get()`, which returns the detail record.
@@ -290,6 +296,8 @@ class Device:
             checkout_purpose=data.get("checkout_purpose"),
             checkout_due=parse_date(data.get("checkout_due")),
             data=data.get("data") or {},
+            link_overrides=data.get("link_overrides") or {},
+            tested_components=list(data.get("tested_components") or []),
             created_at=parse_datetime(data.get("created_at")),
             updated_at=parse_datetime(data.get("updated_at")),
             tests=[Test.from_dict(t) for t in data.get("all_tests") or []],
@@ -341,6 +349,38 @@ class Device:
 
 
 @dataclass
+class SoftwareComponent:
+    """One component of a software suite at one version: "Outlook 16.2" in
+    "Microsoft 365 2026.1".
+
+    A suite version lists its components; a test can be recorded against one of
+    them, and a vendor claim can say something different about one of them than
+    about the suite as a whole.
+    """
+
+    id: str = ""
+    name: str = ""
+    version: str = ""
+    required: bool = True
+    position: int = 0
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SoftwareComponent":
+        return cls(
+            id=data.get("id", ""),
+            name=data.get("name", ""),
+            version=data.get("version") or "",
+            required=bool(data.get("required", True)),
+            position=int(data.get("position") or 0),
+            raw=data,
+        )
+
+    def __str__(self) -> str:
+        return f"{self.name} {self.version}".strip()
+
+
+@dataclass
 class Software:
     """A piece of software at one version.
 
@@ -355,6 +395,12 @@ class Software:
     is_latest: bool = True
     vendor_device_count: int = 0
     misc_data: dict = field(default_factory=dict)
+    # The components this version is a suite of; empty for plain software.
+    components: list[SoftwareComponent] = field(default_factory=list)
+    # How many suites list this software as one of their components.
+    bundle_parent_count: int = 0
+    # From `tb.search()`: the components whose name or version matched.
+    matching_components: list[SoftwareComponent] = field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     raw: dict = field(default_factory=dict, repr=False)
@@ -369,10 +415,26 @@ class Software:
             is_latest=bool(data.get("is_latest", True)),
             vendor_device_count=data.get("vendor_device_count", 0),
             misc_data=data.get("misc_data") or {},
+            components=[SoftwareComponent.from_dict(c) for c in data.get("bundle_components") or []],
+            bundle_parent_count=int(data.get("bundle_parent_count") or 0),
+            matching_components=[SoftwareComponent.from_dict(c)
+                                 for c in data.get("matching_components") or []],
             created_at=parse_datetime(data.get("created_at")),
             updated_at=parse_datetime(data.get("updated_at")),
             raw=data,
         )
+
+    @property
+    def is_suite(self) -> bool:
+        """Whether this version is made of components."""
+        return bool(self.components)
+
+    def component(self, name: str, version: str | None = None) -> SoftwareComponent | None:
+        """One of this version's components by name (any case), or None."""
+        for item in self.components:
+            if item.name.lower() == name.lower() and (version is None or item.version == version):
+                return item
+        return None
 
     def __str__(self) -> str:
         return f"{self.name} {self.version}".strip()
@@ -552,6 +614,11 @@ class VendorDevice:
     support_status: str = ""
     component_support: list[dict] = field(default_factory=list)
     matching_components: list[dict] = field(default_factory=list)
+    # Devices in the fleet this claim describes: how many, and the first few
+    # unique IDs. `tb.vendor_devices.inventory_matches()` pages through all of
+    # them. None when the server did not work the count out.
+    inventory_match_count: int | None = None
+    inventory_devices: list[str] = field(default_factory=list)
     source: str | None = None
     notes: str | None = None
     misc_data: dict = field(default_factory=dict)
@@ -575,6 +642,8 @@ class VendorDevice:
             support_status=data.get("support_status", ""),
             component_support=data.get("component_support") or [],
             matching_components=data.get("matching_components") or [],
+            inventory_match_count=data.get("inventory_match_count"),
+            inventory_devices=list(data.get("inventory_devices") or []),
             source=data.get("source"),
             notes=data.get("notes"),
             misc_data=data.get("misc_data") or {},
@@ -596,3 +665,141 @@ class VendorDevice:
     def __str__(self) -> str:
         software = f"{self.software_name} {self.software_version}".strip()
         return f"{self.hardware}: {self.support_status} ({software})"
+
+
+@dataclass
+class CompatibleSoftware:
+    """A software version whose vendor claims describe one device.
+
+    Answers "who claims to support this box?", matched the way the device page
+    matches it. Still a claim, not evidence: see `VendorDevice`.
+    """
+
+    software: Software = field(default_factory=Software)
+    # The best status among the matching claims: "supported" outranks "partial".
+    support_status: str = ""
+    # The device fields the claims pinned down, e.g. ["make", "model"]. A short
+    # list means a broad claim ("any MikroTik"), not a weak one.
+    matched_on: list[str] = field(default_factory=list)
+    claims: list[VendorDevice] = field(default_factory=list)
+    # The claim fields this software version lists, in its order.
+    fields: list[dict] = field(default_factory=list)
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CompatibleSoftware":
+        software = data.get("software") or {}
+        claims = []
+        for row in data.get("vendor_devices") or []:
+            # The rows come without the software they belong to; it is this one.
+            row = {"software_name": software.get("name", ""),
+                   "software_version": software.get("version") or "",
+                   "software_is_latest": software.get("is_latest", True), **row}
+            claims.append(VendorDevice.from_dict(row))
+        return cls(
+            software=Software.from_dict(software),
+            support_status=data.get("support_status", ""),
+            matched_on=list(data.get("matched_on") or []),
+            claims=claims,
+            fields=list(data.get("fields") or []),
+            raw=data,
+        )
+
+    @property
+    def is_supported(self) -> bool:
+        return self.support_status == "supported"
+
+    def __str__(self) -> str:
+        return f"{self.software}: {self.support_status}"
+
+
+@dataclass
+class TestedDevice:
+    """A device a software version has actually been run against, from its tests.
+
+    Evidence, unlike a vendor claim. With a suite, each component tested on a
+    device is its own entry, naming the `component`.
+    """
+
+    __test__ = False  # not a pytest test class, despite the name
+
+    device: Device = field(default_factory=Device)
+    test_count: int = 0
+    last_test_at: datetime | None = None
+    # Count per outcome, e.g. {"pass": 3, "fail": 1}.
+    outcomes: dict = field(default_factory=dict)
+    component: SoftwareComponent | None = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TestedDevice":
+        component = data.get("component")
+        return cls(
+            device=Device.from_dict(data.get("device") or {}),
+            test_count=int(data.get("test_count") or 0),
+            last_test_at=parse_datetime(data.get("last_test_at")),
+            outcomes=dict(data.get("outcomes") or {}),
+            component=SoftwareComponent.from_dict(component) if component else None,
+            raw=data,
+        )
+
+    def __str__(self) -> str:
+        on = f" ({self.component})" if self.component else ""
+        return f"{self.device.unique_id}{on}: {self.test_count} tests"
+
+
+@dataclass
+class TestFileStorage:
+    """Whether recorded runs can carry files here, and how big.
+
+    Output and artifacts both live in the server's object storage. With it
+    switched off, uploads are refused and reads find nothing.
+    """
+
+    __test__ = False  # not a pytest test class, despite the name
+
+    enabled: bool = False
+    output_max_bytes: int = 0
+    artifact_max_bytes: int = 0
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TestFileStorage":
+        return cls(
+            enabled=bool(data.get("storage_enabled", False)),
+            output_max_bytes=int(data.get("output_max_bytes") or 0),
+            artifact_max_bytes=int(data.get("artifact_max_bytes") or 0),
+            raw=data,
+        )
+
+
+@dataclass
+class SearchResults:
+    """What the web app's search box finds for one query, grouped by kind.
+
+    Each list holds at most the limit asked for; the totals count every match.
+    """
+
+    devices: list[Device] = field(default_factory=list)
+    software: list[Software] = field(default_factory=list)
+    tests: list[Test] = field(default_factory=list)
+    vendor_devices: list[VendorDevice] = field(default_factory=list)
+    devices_total: int = 0
+    software_total: int = 0
+    tests_total: int = 0
+    vendor_devices_total: int = 0
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SearchResults":
+        return cls(
+            devices=[Device.from_dict(row) for row in data.get("devices") or []],
+            software=[Software.from_dict(row) for row in data.get("software") or []],
+            tests=[Test.from_dict(row) for row in data.get("tests") or []],
+            vendor_devices=[VendorDevice.from_dict(row) for row in data.get("vendor_devices") or []],
+            devices_total=int(data.get("devices_total") or 0),
+            software_total=int(data.get("software_total") or 0),
+            tests_total=int(data.get("tests_total") or 0),
+            vendor_devices_total=int(data.get("vendor_devices_total") or 0),
+            raw=data,
+        )

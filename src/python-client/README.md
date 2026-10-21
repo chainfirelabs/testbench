@@ -25,6 +25,10 @@ pip install testbench-client   # once it is published
 
 One dependency: `httpx`. Python 3.10+.
 
+The client is versioned with TestBench: client 1.13.6 covers everything a
+1.13.6 server offers, and still works against older servers for whatever they
+have.
+
 ## Authenticating
 
 Mint an API key in the web app under **Profile → API keys** and export it. The
@@ -141,6 +145,39 @@ tb.tests.record(device, "curl-smoke", passed=True, misc_data=metrics)   # boolea
 `misc_data` is free-form JSON and is the field that makes results worth querying
 later — put the numbers there, not in `notes`.
 
+Custom test fields an administrator added under **Schema → Tests** live in
+`misc_data` too, by their field key. One marked required has to be there, or
+the run is refused with a `ValidationError` naming it (`Lab is required`). To
+see what this installation expects:
+
+```python
+for field in tb.entity_fields("tests"):
+    print(field["key"], field["label"], field["required"])
+
+tb.tests.create(device="dev-0042", software="curl-smoke", outcome="pass",
+                misc_data={"lab": "East", "duration_s": 12.4})
+tb.tests.list(fields={"lab": "East"})          # filter on any field by key
+```
+
+### Suites and components
+
+Software can be a suite of components ("Microsoft 365" with Outlook and
+Teams). A run can be recorded against one of them:
+
+```python
+suite = tb.software.get("Microsoft 365")
+suite.components                                  # [Outlook 16.2, Teams 2.1]
+outlook = suite.component("Outlook")
+
+tb.tests.create(device="dev-0042", software=suite, outcome="pass", component=outlook)
+# Or by name; a component the suite does not list yet is added to it:
+tb.tests.create(device="dev-0042", software="Microsoft 365", outcome="fail",
+                component="Word", component_version="16.0")
+
+tb.tests.list(component=outlook)
+tb.tests.update(result, component=suite.component("Teams"))   # move a run
+```
+
 You pass names; the UUIDs the API wants are resolved and cached for you, so a
 suite recording a result per test case makes one request per result rather than
 three.
@@ -180,9 +217,20 @@ tb.tests.create(
 )
 ```
 
-The run is saved first and the files after it. If an upload fails, the run is
-still recorded and the exception carries it as `.test`, so the upload can be
-retried without recording the run twice.
+Before recording a run with files, the client asks the server whether it can
+store any. If object storage is off, it raises `TestBenchError` and records
+nothing, rather than leaving a run behind without the files you meant it to
+have. `tb.tests.file_storage()` asks the same question directly, with the size
+limits:
+
+```python
+storage = tb.tests.file_storage()
+storage.enabled, storage.output_max_bytes, storage.artifact_max_bytes
+```
+
+Past that check the run is saved first and the files after it. If an upload
+fails, the run is still recorded and the exception carries it as `.test`, so
+the upload can be retried without recording the run twice.
 
 Or work with a recorded run directly:
 
@@ -222,6 +270,23 @@ tb.software.list(latest_only=True)
 tb.software.get("curl-smoke")                  # current version
 tb.software.get("curl-smoke", "3.8.5")         # a specific one
 tb.software.versions("curl-smoke")             # all of them, newest first
+tb.software.components("Microsoft 365")        # a suite's components
+
+# Devices this version has actually been run against, from its results:
+for entry in tb.software.tested_devices("curl-smoke"):
+    print(entry.device.unique_id, entry.test_count, entry.outcomes, entry.component)
+```
+
+## Search
+
+The web app's search box, across devices, software, tests and vendor claims at
+once. It matches suite components too:
+
+```python
+found = tb.search("Outlook", limit=20)
+for software in found.software:
+    print(software, [c.name for c in software.matching_components])
+found.devices_total, found.software_total, found.tests_total, found.vendor_devices_total
 ```
 
 ## Vendor devices
@@ -255,6 +320,16 @@ tb.vendor_devices.for_software("curl-smoke", "3.8.5")
 # Who claims to support a device in the fleet, found by its make and model.
 for claim in tb.vendor_devices.for_device("dev-0042", supported_only=True):
     print(claim)        # Cisco ISR 4331: supported (Backup-Restore 2.0)
+
+# The same question answered the way the device page answers it, one entry
+# per software version. Broader: a claim naming only a make matches.
+for match in tb.devices.compatible_software("dev-0042"):
+    print(match.software, match.support_status, match.matched_on, match.claims)
+
+# And the other way round: which devices in the fleet a claim describes.
+claim = tb.vendor_devices.list(make="Cisco")[0]
+claim.inventory_match_count, claim.inventory_devices   # count, first few
+tb.vendor_devices.inventory_matches(claim)             # every unique ID
 ```
 
 Every row names the software and version making the claim. `software_is_latest`

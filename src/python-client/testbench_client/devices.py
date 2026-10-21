@@ -9,7 +9,7 @@ from typing import Iterator
 from urllib.parse import quote
 
 from .errors import DeviceUnavailable, NotFound, UnknownDevice
-from .models import DEVICE_STATUSES, Device, to_api_date
+from .models import DEVICE_STATUSES, CompatibleSoftware, Device, to_api_date
 
 logger = logging.getLogger("testbench_client")
 
@@ -127,6 +127,26 @@ class Devices:
             return self._dm.request("GET", f"/devices/{quote(key, safe='')}/actions").get("actions", [])
         except NotFound as exc:
             raise self._unknown(key, exc) from exc
+
+    def compatible_software(self, identifier: str | Device) -> list[CompatibleSoftware]:
+        """Software whose vendor claims describe this device, as its page shows.
+
+        The server's own matching, which is broader than `vendor_devices.for_device()`:
+        a claim pinning only the make matches every device of that make, and
+        firmware, hardware version and architecture are compared too when the
+        claim names them. Each entry is one software version with its matching
+        claims and how well they fit (`matched_on`).
+
+        Claims, not evidence: what has actually run here is `tests.for_device()`.
+        """
+        key = _key(identifier)
+        try:
+            if "/" in key or key in {".", ".."}:
+                key = self.get(key).id
+            body = self._dm.request("GET", f"/devices/{quote(key, safe='')}/compatible-software")
+        except NotFound as exc:
+            raise self._unknown(key, exc) from exc
+        return [CompatibleSoftware.from_dict(item) for item in body.get("items", [])]
 
     def schema(self, identifier: str | Device) -> dict:
         """The published schema for this device's type."""

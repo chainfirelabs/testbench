@@ -27,7 +27,7 @@ from .errors import (
     TransportError,
     ValidationError,
 )
-from .models import DeviceType, Identity
+from .models import DeviceType, Identity, SearchResults
 
 logger = logging.getLogger("testbench_client")
 
@@ -130,14 +130,35 @@ class TestBench:
         self.software = SoftwareResource(self)
         self.vendor_devices = VendorDevices(self)
 
-    def entity_fields(self) -> dict[str, list[dict]]:
+    def entity_fields(self, entity: str | None = None) -> Any:
         """Logical device/software/test fields this installation exposes.
+
+        With no argument, every entity's fields by entity name. With one —
+        "software", "tests" or "vendor_devices" — that entity's list alone,
+        each field with its key, label, type, and whether it is `visible` and
+        `required`. A custom field marked required has to be in a record's
+        `misc_data` for the server to accept it.
 
         The device entry is the *global* device schema — the fields every
         device type inherits. For one type's own fields, use
         `device_schema(type_key)`.
         """
-        return self.request("GET", "/entity-fields")
+        if entity is None:
+            return self.request("GET", "/entity-fields")
+        return self.request("GET", f"/entity-fields/{quote(entity, safe='')}")
+
+    def search(self, text: str, *, limit: int = 5) -> SearchResults:
+        """Search devices, software, tests and vendor claims at once, as the
+        web app's search box does.
+
+        Matches suite components too: software comes back with the
+        `matching_components` that matched, and devices with the
+        `tested_components` that did. `limit` caps each group (at most 200).
+        """
+        if not text or not text.strip():
+            raise ValueError("search text must not be empty")
+        return SearchResults.from_dict(self.request(
+            "GET", "/search", params={"q": text, "limit": max(1, min(limit, 200))}))
 
     def device_types(self, *, include_disabled: bool = False) -> list[DeviceType]:
         """The inventory categories this installation defines."""

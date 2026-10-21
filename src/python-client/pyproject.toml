@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "testbench-client"
-version = "0.1.0"
+version = "1.13.6"
 description = "Python client for the TestBench API — fleet inventory, device checkout, and test results."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Iterable, Iterator
+from urllib.parse import quote
 
 from .models import VENDOR_SUPPORT_STATUSES, Device, Software, VendorDevice
 
@@ -219,6 +220,33 @@ class VendorDevices:
                 match.get("support_status") == "supported" for match in row.matching_components
             )]
         return [row for row in rows if row.is_supported]
+
+
+    def inventory_matches(self, claim: VendorDevice, *, limit: int | None = None) -> list[str]:
+        """Unique IDs of the devices in the fleet this claim describes.
+
+        `claim.inventory_devices` holds only the first few; this pages through
+        all of them. Matched the same way the claims list counts them.
+        """
+        path = (f"/software/{quote(claim.software_id, safe='')}/vendor-devices/"
+                f"{quote(claim.id, safe='')}/inventory-matches")
+        size = 100  # the endpoint's own cap
+        if limit is not None:
+            if limit <= 0:
+                return []
+            size = min(size, limit)
+        out: list[str] = []
+        page = 1
+        while True:
+            body = self._dm.request("GET", path, params={"page": page, "page_size": size})
+            rows = body.get("items", [])
+            for row in rows:
+                out.append(row.get("unique_id", ""))
+                if limit is not None and len(out) >= limit:
+                    return out
+            if len(rows) < size or len(out) >= body.get("total", 0):
+                return out
+            page += 1
 
 
 def _check_support_status(status: str) -> None:

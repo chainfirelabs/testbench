@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import IO, BinaryIO, Iterable, Iterator, Union
 from urllib.parse import quote
 
-from .errors import TestBenchError
+from .errors import NotFound, TestBenchError
 from .models import (
-    TEST_OUTCOMES, TEST_TAGS, Device, Software, Test, TestArtifact, TestOutput, to_api_date,
+    TEST_OUTCOMES, TEST_TAGS, Device, Software, SoftwareComponent, Test, TestArtifact,
+    TestFileStorage, TestOutput, to_api_date,
 )
 
 # A file to upload: a path on disk, the bytes themselves, or an open binary file.
@@ -40,6 +41,8 @@ class Tests:
         outcome: str,
         tag: str = "adhoc",
         software_version: str | None = None,
+        component: str | SoftwareComponent | None = None,
+        component_version: str | None = None,
         misc_data: dict | None = None,
         notes: str | None = None,
         run_at: date | str | None = None,
@@ -62,20 +65,35 @@ class Tests:
         current. Set it when the run exercised a build the catalogue has moved
         past.
 
+        `component` records the run against one component of a software suite
+        ("Outlook" in "Microsoft 365"): a `SoftwareComponent` from
+        `software.components`, or its name with `component_version`. A name the
+        suite does not list yet is added to it, as the web app does.
+
         `misc_data` is free-form JSON: durations, throughput, log URLs, exit codes.
         It is the field that makes these results worth querying later, so put
-        the numbers in it rather than in `notes`.
+        the numbers in it rather than in `notes`. Custom test fields an
+        administrator defined under Schema -> Tests live in it too, by their
+        field key; one marked required has to be there or the run is refused
+        with a ValidationError naming it. `tb.entity_fields("tests")` lists them.
 
         `artifacts` attaches files (paths, bytes or open binary files) and
         `output` the run's text output — or `output_file` to read it from disk.
-        The run is recorded first and the files uploaded after it, so an upload
-        that fails leaves the run recorded: the exception carries it as
-        `.test`, for a retry with `upload_artifact()` or `set_output()`.
+        When there are files, the server is asked first whether it can store
+        any (`file_storage()`), so a run is never recorded with files that were
+        always going to be refused. Past that, the run is recorded first and the
+        files uploaded after it, so an upload that fails leaves the run
+        recorded: the exception carries it as `.test`, for a retry with
+        `upload_artifact()` or `set_output()`.
         """
         if output is not None and output_file is not None:
             raise ValueError("pass output (text) or output_file, not both")
         _check_enum("outcome", outcome, TEST_OUTCOMES)
         _check_enum("tag", tag, TEST_TAGS)
+        files = list(artifacts or ())
+        has_files = bool(files) or output is not None or output_file is not None
+        if has_files:
+            self._require_storage()
         body = {
             "device_id": self._dm.devices.resolve(device),
             "software_id": self._dm.software.resolve(software, software_version),
@@ -85,10 +103,10 @@ class Tests:
             "notes": notes,
             "run_at": to_api_date(run_at),
             "software_version": software_version,
+            **_component_fields(component, component_version),
         }
         result = Test.from_dict(self._dm.request("POST", "/tests", json=body))
-        files = list(artifacts or ())
-        if not files and output is None and output_file is None:
+        if not has_files:
             return result
         try:
             for source in files:
@@ -113,10 +131,19 @@ class Tests:
                            outcome="pass" if passed else "fail", **kwargs)
 
     def update(self, test: str | Test, **fields) -> Test:
-        """Amend a recorded result (outcome, tag, misc_data, notes, run_at)."""
+        """Amend a recorded result (outcome, tag, misc_data, notes, run_at,
+        software_version).
+
+        `component=` moves the run onto another component of its suite; it
+        takes a `SoftwareComponent` or a component id, since the API amends by
+        id only.
+        """
         key = test.id if isinstance(test, Test) else str(test)
         if "run_at" in fields:
             fields["run_at"] = to_api_date(fields["run_at"])
+        if "component" in fields:
+            component = fields.pop("component")
+            fields["component_id"] = component.id if isinstance(component, SoftwareComponent) else component
         return Test.from_dict(self._dm.request("PATCH", f"/tests/{quote(key, safe='')}", json=fields))
 
     def delete(self, test: str | Test) -> None:
@@ -133,16 +160,24 @@ class Tests:
         software_version: str | None = None,
         outcome: str | None = None,
         tag: str | None = None,
+        component: str | SoftwareComponent | None = None,
+        component_version: str | None = None,
         search: str | None = None,
         fields: dict[str, str | int | float | bool] | None = None,
         sort: str = "created_at",
         order: str = "desc",
         limit: int | None = None,
     ) -> list[Test]:
-        """Recorded runs, newest first, across as many pages as it takes."""
+        """Recorded runs, newest first, across as many pages as it takes.
+
+        `component` and `component_version` narrow to runs recorded against a
+        suite component. `fields` filters on any test field by its key,
+        including custom ones: `fields={"lab": "East"}`.
+        """
         return list(self.iter(device=device, software=software,
                               software_version=software_version, outcome=outcome,
-                              tag=tag, search=search, fields=fields, sort=sort, order=order, limit=limit))
+                              tag=tag, component=component, component_version=component_version,
+                              search=search, fields=fields, sort=sort, order=order, limit=limit))
 
     def iter(
         self,
@@ -152,6 +187,8 @@ class Tests:
         software_version: str | None = None,
         outcome: str | None = None,
         tag: str | None = None,
+        component: str | SoftwareComponent | None = None,
+        component_version: str | None = None,
         search: str | None = None,
         fields: dict[str, str | int | float | bool] | None = None,
         sort: str = "created_at",
@@ -170,6 +207,11 @@ class Tests:
             ),
             "outcome": outcome,
             "tag": tag,
+            "component_name": component.name if isinstance(component, SoftwareComponent) else component,
+            "component_version": (
+                component.version if isinstance(component, SoftwareComponent) and component_version is None
+                else component_version
+            ),
             "search": search,
             "sort": sort,
             "order": order,
@@ -184,6 +226,29 @@ class Tests:
         """Every recorded run against one device, newest first."""
         return self.list(device=device, limit=limit)
 
+
+    # -- files --------------------------------------------------------------
+
+    def file_storage(self) -> TestFileStorage:
+        """Whether this server can store output and artifacts, and the limits.
+
+        Both live in object storage an administrator configures; without it,
+        uploads are refused. A server older than 1.13.4 cannot say, and is
+        reported as enabled with no known limits — the upload itself is then
+        what finds out.
+        """
+        try:
+            return TestFileStorage.from_dict(self._dm.request("GET", "/tests/file-storage"))
+        except NotFound:
+            return TestFileStorage(enabled=True)
+
+    def _require_storage(self) -> None:
+        if not self.file_storage().enabled:
+            raise TestBenchError(
+                "This TestBench has no object storage configured, so a run cannot carry "
+                "output or artifacts. Record it without them, or ask an administrator "
+                "to enable backend.objectStorage."
+            )
 
     # -- artifacts ----------------------------------------------------------
 
@@ -282,6 +347,22 @@ def _check_enum(field: str, value: str, allowed: tuple[str, ...]) -> None:
     # which reads as "no such results exist".
     if value not in allowed:
         raise ValueError(f"{field} must be one of {', '.join(allowed)}, got '{value}'")
+
+
+def _component_fields(component: str | SoftwareComponent | None, version: str | None) -> dict:
+    """The component part of a create body: an id when we have one, else a name."""
+    if component is None:
+        if version is not None:
+            raise ValueError("component_version needs a component")
+        return {}
+    if isinstance(component, SoftwareComponent):
+        if component.id:
+            return {"component_id": component.id}
+        return {"component_name": component.name, "component_version": component.version}
+    name = str(component).strip()
+    if not name:
+        raise ValueError("component must not be blank")
+    return {"component_name": name, "component_version": version or ""}
 
 
 def _path(test: str | Test) -> str:

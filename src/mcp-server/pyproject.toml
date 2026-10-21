@@ -1,6 +1,6 @@
 [project]
 name = "testbench-mcp"
-version = "0.1.0"
+version = "1.13.6"
 description = "MCP server exposing the TestBench fleet over the REST API (read-only)"
 license = { text = "MIT" }
 requires-python = ">=3.12"

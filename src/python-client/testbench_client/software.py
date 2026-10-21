@@ -11,8 +11,9 @@ from __future__ import annotations
 from typing import Iterator
 from urllib.parse import quote
 
+from .client import MAX_PAGE_SIZE
 from .errors import NotFound, UnknownSoftware
-from .models import Software
+from .models import Software, SoftwareComponent, TestedDevice
 
 
 class SoftwareResource:
@@ -85,6 +86,45 @@ class SoftwareResource:
             key = self.get(key).id
         rows = self._dm.request("GET", f"/software/{quote(key, safe='')}/versions")
         return [Software.from_dict(r) for r in rows]
+
+    def components(self, name: str | Software, version: str | None = None) -> list[SoftwareComponent]:
+        """The components of a software suite at one version (current by default).
+
+        Empty for software that is not a suite. Pass one to
+        `tests.create(component=...)` to record a run against it.
+        """
+        return self.get(name, version).components
+
+    def tested_devices(
+        self,
+        name: str | Software,
+        version: str | None = None,
+        *,
+        search: str | None = None,
+        limit: int | None = None,
+    ) -> list[TestedDevice]:
+        """Devices this software version has actually been tested on, from its runs.
+
+        One entry per device (per component, for a suite), with how many runs
+        there were, the outcome counts and the latest run date. Evidence, unlike
+        `vendor_devices.for_software()`, which is what the vendor claims.
+        """
+        key = self.resolve(name, version)
+        path = f"/software/{quote(key, safe='')}/tested-devices"
+        size = max(1, min(self._dm.page_size, MAX_PAGE_SIZE))
+        out: list[TestedDevice] = []
+        page = 1
+        while True:
+            body = self._dm.request("GET", path, params={
+                "search": search, "page": page, "page_size": size})
+            rows = body.get("devices", [])
+            for row in rows:
+                out.append(TestedDevice.from_dict(row))
+                if limit is not None and len(out) >= limit:
+                    return out
+            if len(rows) < size or len(out) >= body.get("total", 0):
+                return out
+            page += 1
 
     def resolve(self, name: str | Software, version: str | None = None) -> str:
         """The software's UUID, which `POST /tests` needs.
