@@ -43,6 +43,11 @@ class Test(TimestampMixin, Base):
         ForeignKey("software_components.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     device_id: Mapped[str] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), nullable=False, index=True)
+    # The pipeline execution that recorded this test, if any. Deleting the run
+    # keeps its tests; they just stop belonging to one.
+    test_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("test_runs.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     _data: Mapped[dict] = mapped_column("data", MutableDict.as_mutable(JSONB), default=dict)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
 
@@ -92,6 +97,7 @@ class Test(TimestampMixin, Base):
     component: Mapped["SoftwareComponent | None"] = relationship("SoftwareComponent", lazy="selectin")
     device: Mapped["Device"] = relationship("Device", back_populates="tests", lazy="selectin")
     creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by], lazy="selectin")
+    test_run: Mapped["TestRun | None"] = relationship("TestRun", lazy="selectin")
 
     @property
     def software_name(self): return self.software.name if self.software else None
@@ -107,12 +113,15 @@ class Test(TimestampMixin, Base):
     def device_model(self): return self.device.model if self.device else None
     @property
     def created_by_username(self): return self.creator.username if self.creator else None
+    @property
+    def test_run_name(self): return self.test_run.name if self.test_run else None
 
 
 from .device import Device  # noqa: E402
 from .software import Software  # noqa: E402
 from .software_component import SoftwareComponent  # noqa: E402
 from .user import User  # noqa: E402
+from .test_run import TestRun, TestRunArtifact  # noqa: E402
 
 
 # Count without loading every artifact's metadata or adding a query per test.
@@ -131,4 +140,25 @@ Test.output_filename = column_property(
 Test.output_size_bytes = column_property(
     select(TestOutput.size_bytes).where(TestOutput.test_id == Test.id)
     .correlate_except(TestOutput).scalar_subquery()
+)
+
+# The files a test shares with the rest of its run, counted the same way.
+Test.test_run_artifact_count = column_property(
+    select(func.count(TestRunArtifact.id)).where(TestRunArtifact.test_run_id == Test.test_run_id)
+    .correlate_except(TestRunArtifact).scalar_subquery()
+)
+
+# A run's tally, so the Test Runs list needs no query per run.
+TestRun.test_count = column_property(
+    select(func.count(Test.id)).where(Test.test_run_id == TestRun.id)
+    .correlate_except(Test).scalar_subquery()
+)
+for _outcome in TEST_OUTCOMES:
+    setattr(TestRun, f"{_outcome}_count", column_property(
+        select(func.count(Test.id)).where(Test.test_run_id == TestRun.id, Test.outcome == _outcome)
+        .correlate_except(Test).scalar_subquery()
+    ))
+TestRun.artifact_count = column_property(
+    select(func.count(TestRunArtifact.id)).where(TestRunArtifact.test_run_id == TestRun.id)
+    .correlate_except(TestRunArtifact).scalar_subquery()
 )

@@ -23,7 +23,7 @@ export interface TestFileStorage {
   artifact_max_bytes: number
 }
 
-const NO_STORAGE = 'File storage is not configured on this installation (backend.objectStorage).'
+export const NO_STORAGE = 'File storage is not configured on this installation (backend.objectStorage).'
 
 /**
  * Output and Artifacts on the New Test dialog. Both are optional.
@@ -62,16 +62,29 @@ export function newTestFileFields(
   return out
 }
 
+/**
+ * The Artifacts button's label: the test's own files, then the files its test
+ * run shares with all of its tests, so a test whose only file is the run's
+ * report does not look as though it has none.
+ */
+export function artifactsLabel(row: { artifact_count?: number; test_run_artifact_count?: number } | null | undefined): string {
+  const own = row?.artifact_count || 0
+  const shared = row?.test_run_artifact_count || 0
+  return shared ? `Artifacts (${own} + ${shared} shared)` : `Artifacts (${own})`
+}
+
 /** Shared read-only action column opening a test's artifacts. */
 export function testArtifactsColumn(open: (row: any) => void) {
   return {
     field: 'artifact_count', headerName: 'Artifacts', editable: false,
-    sortable: false, filter: false, minWidth: 135,
+    // Wide enough for "Artifacts (1 + 1 shared)" on a test in a run.
+    sortable: false, filter: false, minWidth: 200,
     cellRenderer: (p: any) => {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'btn btn-mini'
-      button.textContent = `Artifacts (${p.data?.artifact_count || 0})`
+      button.textContent = artifactsLabel(p.data)
+      if (p.data?.test_run_artifact_count) button.title = `Includes files shared by test run ${p.data.test_run_name}`
       button.addEventListener('click', (event) => {
         event.stopPropagation()
         if (p.data?.id) open(p.data)

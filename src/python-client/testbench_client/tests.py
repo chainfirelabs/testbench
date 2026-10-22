@@ -18,7 +18,7 @@ from urllib.parse import quote
 from .errors import NotFound, TestBenchError
 from .models import (
     TEST_OUTCOMES, TEST_TAGS, Device, Software, SoftwareComponent, Test, TestArtifact,
-    TestFileStorage, TestOutput, to_api_date,
+    TestFileStorage, TestOutput, TestRun, TestRunArtifact, to_api_date,
 )
 
 # A file to upload: a path on disk, the bytes themselves, or an open binary file.
@@ -46,6 +46,8 @@ class Tests:
         misc_data: dict | None = None,
         notes: str | None = None,
         run_at: date | str | None = None,
+        test_run: str | TestRun | None = None,
+        test_run_artifacts: Iterable[FileSource] | None = None,
         artifacts: Iterable[FileSource] | None = None,
         output: str | None = None,
         output_file: FileSource | None = None,
@@ -77,6 +79,15 @@ class Tests:
         field key; one marked required has to be there or the run is refused
         with a ValidationError naming it. `tb.entity_fields("tests")` lists them.
 
+        `test_run` puts the run in a test run (a `TestRun` from
+        `tb.test_runs.start()`, or its id), whose shared files, such as a
+        pytest report, then show with this run's own. Its own files are
+        stored in the test run's folder in the bucket.
+
+        `test_run_artifacts` shares files with every test in that run, such as
+        a report or a test outline, as `tb.test_runs.attach()` does; it needs
+        `test_run`. Attach a file once per run, not with every test.
+
         `artifacts` attaches files (paths, bytes or open binary files) and
         `output` the run's text output — or `output_file` to read it from disk.
         When there are files, the server is asked first whether it can store
@@ -91,7 +102,10 @@ class Tests:
         _check_enum("outcome", outcome, TEST_OUTCOMES)
         _check_enum("tag", tag, TEST_TAGS)
         files = list(artifacts or ())
-        has_files = bool(files) or output is not None or output_file is not None
+        run_files = list(test_run_artifacts or ())
+        if run_files and test_run is None:
+            raise ValueError("test_run_artifacts are shared with a test run; pass test_run too")
+        has_files = bool(files) or bool(run_files) or output is not None or output_file is not None
         if has_files:
             self._require_storage()
         body = {
@@ -103,6 +117,7 @@ class Tests:
             "notes": notes,
             "run_at": to_api_date(run_at),
             "software_version": software_version,
+            "test_run_id": _run_id(test_run),
             **_component_fields(component, component_version),
         }
         result = Test.from_dict(self._dm.request("POST", "/tests", json=body))
@@ -115,6 +130,8 @@ class Tests:
                 self.set_output(result, output)
             elif output_file is not None:
                 self.upload_output(result, output_file)
+            for source in run_files:
+                self._dm.test_runs.attach(test_run, source)
         except TestBenchError as exc:
             exc.test = result
             raise
@@ -137,6 +154,10 @@ class Tests:
         `component=` moves the run onto another component of its suite; it
         takes a `SoftwareComponent` or a component id, since the API amends by
         id only.
+
+        `test_run=` moves the run into a test run (a `TestRun` or its id), and
+        `test_run=None` takes it out of one. Files already uploaded stay where
+        they were stored.
         """
         key = test.id if isinstance(test, Test) else str(test)
         if "run_at" in fields:
@@ -144,6 +165,8 @@ class Tests:
         if "component" in fields:
             component = fields.pop("component")
             fields["component_id"] = component.id if isinstance(component, SoftwareComponent) else component
+        if "test_run" in fields:
+            fields["test_run_id"] = _run_id(fields.pop("test_run"))
         return Test.from_dict(self._dm.request("PATCH", f"/tests/{quote(key, safe='')}", json=fields))
 
     def delete(self, test: str | Test) -> None:
@@ -162,6 +185,7 @@ class Tests:
         tag: str | None = None,
         component: str | SoftwareComponent | None = None,
         component_version: str | None = None,
+        test_run: str | TestRun | None = None,
         search: str | None = None,
         fields: dict[str, str | int | float | bool] | None = None,
         sort: str = "created_at",
@@ -171,13 +195,14 @@ class Tests:
         """Recorded runs, newest first, across as many pages as it takes.
 
         `component` and `component_version` narrow to runs recorded against a
-        suite component. `fields` filters on any test field by its key,
+        suite component. `test_run` narrows to one test run's (a `TestRun` or
+        its id); `test_run="none"` to runs recorded outside any. `fields` filters on any test field by its key,
         including custom ones: `fields={"lab": "East"}`.
         """
         return list(self.iter(device=device, software=software,
                               software_version=software_version, outcome=outcome,
                               tag=tag, component=component, component_version=component_version,
-                              search=search, fields=fields, sort=sort, order=order, limit=limit))
+                              test_run=test_run, search=search, fields=fields, sort=sort, order=order, limit=limit))
 
     def iter(
         self,
@@ -189,6 +214,7 @@ class Tests:
         tag: str | None = None,
         component: str | SoftwareComponent | None = None,
         component_version: str | None = None,
+        test_run: str | TestRun | None = None,
         search: str | None = None,
         fields: dict[str, str | int | float | bool] | None = None,
         sort: str = "created_at",
@@ -212,6 +238,7 @@ class Tests:
                 component.version if isinstance(component, SoftwareComponent) and component_version is None
                 else component_version
             ),
+            "test_run_id": _run_id(test_run),
             "search": search,
             "sort": sort,
             "order": order,
@@ -253,9 +280,20 @@ class Tests:
     # -- artifacts ----------------------------------------------------------
 
     def artifacts(self, test: str | Test) -> list[TestArtifact]:
-        """The files attached to a run, oldest first."""
+        """The files attached to a run, oldest first.
+
+        Files its test run shares with all of its tests are not among them;
+        `shared_artifacts()` lists those.
+        """
         result = self._dm.request("GET", f"{_path(test)}/artifacts")
         return [TestArtifact.from_dict(row) for row in result["items"]]
+
+    def shared_artifacts(self, test: str | Test) -> list[TestRunArtifact]:
+        """The files the run's test run shares with all of its tests, such as a
+        pytest report. Empty for a run outside any test run. Download them with
+        `tb.test_runs.download_artifact()`."""
+        result = self._dm.request("GET", f"{_path(test)}/artifacts")
+        return [TestRunArtifact.from_dict(row) for row in result.get("test_run_items") or []]
 
     def upload_artifact(self, test: str | Test, file: FileSource, *,
                         filename: str | None = None,
@@ -287,21 +325,8 @@ class Tests:
         """
         artifact_id = artifact.id if isinstance(artifact, TestArtifact) else str(artifact)
         path = f"{_path(test)}/artifacts/{quote(artifact_id, safe='')}/download"
-        if dest is None:
-            buffer = io.BytesIO()
-            self._dm.download(path, buffer)
-            return buffer.getvalue()
-        if not isinstance(dest, (str, os.PathLike)):
-            self._dm.download(path, dest)
-            return None
-        target = Path(dest)
-        if target.is_dir():
-            if not isinstance(artifact, TestArtifact):
-                raise ValueError("saving into a directory needs the TestArtifact, for its filename")
-            target = target / Path(artifact.filename).name
-        with open(target, "wb") as handle:
-            self._dm.download(path, handle)
-        return target
+        return _save(self._dm, path, artifact.filename if isinstance(artifact, TestArtifact) else None,
+                     dest, "TestArtifact")
 
     def delete_artifact(self, test: str | Test, artifact: str | TestArtifact) -> None:
         artifact_id = artifact.id if isinstance(artifact, TestArtifact) else str(artifact)
@@ -363,6 +388,30 @@ def _component_fields(component: str | SoftwareComponent | None, version: str | 
     if not name:
         raise ValueError("component must not be blank")
     return {"component_name": name, "component_version": version or ""}
+
+
+def _run_id(run: str | TestRun | None) -> str | None:
+    return run.id if isinstance(run, TestRun) else run
+
+
+def _save(dm, path: str, filename: str | None,
+          dest: str | os.PathLike[str] | BinaryIO | None, kind: str) -> bytes | Path | None:
+    """Download `path` to bytes, a directory, a file path or an open file."""
+    if dest is None:
+        buffer = io.BytesIO()
+        dm.download(path, buffer)
+        return buffer.getvalue()
+    if not isinstance(dest, (str, os.PathLike)):
+        dm.download(path, dest)
+        return None
+    target = Path(dest)
+    if target.is_dir():
+        if filename is None:
+            raise ValueError(f"saving into a directory needs the {kind}, for its filename")
+        target = target / Path(filename).name
+    with open(target, "wb") as handle:
+        dm.download(path, handle)
+    return target
 
 
 def _path(test: str | Test) -> str:

@@ -2,6 +2,20 @@
 
 Everything a test stores lives under `tests/<test-id>/`: artifacts beside each
 other under `artifacts/`, and the test's one output file under `output/`.
+
+A test that belongs to a test run stores its files inside the run's folder
+instead, beside the files the run shares with all of its tests:
+
+    test-runs/<run-name>_<run-id>/artifacts/<artifact-id>/<file>    shared
+    test-runs/<run-name>_<run-id>/tests/<test-id>/artifacts/…       the test's own
+    test-runs/<run-name>_<run-id>/tests/<test-id>/output/<file>
+
+The run's folder is named when the run is created (`TestRun.storage_folder`),
+so renaming the run later does not split its files across two folders.
+
+The folder is chosen when a file is uploaded. The database records each
+file's full key, so a test that later moves to another run keeps reading its
+earlier files from where they are; nothing is ever moved.
 """
 import re
 from typing import BinaryIO
@@ -18,14 +32,34 @@ def artifact_filename(value: str | None) -> str:
     return name if name and name not in {'.', '..'} else 'artifact'
 
 
-def artifact_key(test_id: str, artifact_id: str, filename: str) -> str:
-    basename = re.sub(r'[^A-Za-z0-9._-]', '_', filename)[:200]
-    return f'tests/{test_id}/artifacts/{artifact_id}/{basename}'
+def _basename(filename: str) -> str:
+    return re.sub(r'[^A-Za-z0-9._-]', '_', filename)[:200]
 
 
-def output_key(test_id: str, filename: str) -> str:
-    basename = re.sub(r'[^A-Za-z0-9._-]', '_', filename)[:200]
-    return f'tests/{test_id}/output/{basename}'
+def run_folder(run_id: str, run_name: str) -> str:
+    """A new run's folder, named so a person browsing the bucket can find it.
+
+    The id keeps it unique; the name is only there to be read.
+    """
+    label = re.sub(r'[^A-Za-z0-9._-]+', '-', run_name or '').strip('-._')[:60] or 'run'
+    return f'test-runs/{label}_{run_id}'
+
+
+def _test_folder(test_id: str, run_folder: str | None) -> str:
+    return f'{run_folder}/tests/{test_id}' if run_folder else f'tests/{test_id}'
+
+
+def artifact_key(test_id: str, artifact_id: str, filename: str, run_folder: str | None = None) -> str:
+    """`run_folder` is the storage folder of the test's run, when it has one."""
+    return f'{_test_folder(test_id, run_folder)}/artifacts/{artifact_id}/{_basename(filename)}'
+
+
+def output_key(test_id: str, filename: str, run_folder: str | None = None) -> str:
+    return f'{_test_folder(test_id, run_folder)}/output/{_basename(filename)}'
+
+
+def run_artifact_key(run_folder: str, artifact_id: str, filename: str) -> str:
+    return f'{run_folder}/artifacts/{artifact_id}/{_basename(filename)}'
 
 
 def storage_client(bucket: str):

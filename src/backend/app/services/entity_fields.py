@@ -98,6 +98,8 @@ DEFAULT_FIELDS: dict[str, list[dict]] = {
         _field("software_version", "Software Version"),
         _field("component_name", "Component"),
         _field("component_version", "Component Version"),
+        _field("test_run_name", "Test Run", writable=False,
+               description="The test run (pipeline execution) the test belongs to."),
         _field("outcome", "Outcome", "select", required=True, role="outcome", indexed=True, options=["pass", "fail", "warn"]),
         _field("tag", "Tag", "select", options=["adhoc", "acceptance", "end-to-end", "automated"]),
         _field("run_at", "Run At", "date", role="run_date", indexed=True),
@@ -153,7 +155,7 @@ REQUIRED_FIELDS = {
 # list columns can follow the schema layout.
 CORE_VISIBLE_FIELDS = {
     "software": {"bundle_components"},
-    "tests": {"component_name", "component_version", "output", "artifacts"},
+    "tests": {"component_name", "component_version", "test_run_name", "output", "artifacts"},
     "vendor_devices": {"component_support"},
 }
 # A test's output and artifacts are files in object storage, not values in its
@@ -469,7 +471,7 @@ def field_database_storage(field: EntityField) -> str:
     elif field.key in {
         "device_unique_id", "software_name", "component_name", "component_version",
         "component_support", "bundle_components", "created_by_username",
-        "checked_out_by_username",
+        "checked_out_by_username", "test_run_name",
     }:
         return "relationship"
     elif field.key in {"vendor_device_count", "version_count", "inventory_devices"} or (

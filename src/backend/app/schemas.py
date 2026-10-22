@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -490,6 +490,8 @@ class TestCreate(BaseModel):
     misc_data: dict = Field(default_factory=dict)
     notes: str | None = None
     run_at: date | None = None
+    # The test run (pipeline execution) this test belongs to, if any.
+    test_run_id: str | None = None
 
 
 class TestImportRow(BaseModel):
@@ -529,6 +531,8 @@ class TestImportRow(BaseModel):
 
 class TestUpdate(BaseModel):
     component_id: str | None = None
+    # Sent as null, takes the test out of its run.
+    test_run_id: str | None = None
     software_version: str | None = None
     outcome: str | None = None
     tag: str | None = None
@@ -559,6 +563,75 @@ class TestOut(BaseModel):
     misc_data: dict
     notes: str | None = None
     run_at: date | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+    created_by_username: str | None = None
+    test_run_id: str | None = None
+    test_run_name: str | None = None
+    test_run_artifact_count: int = 0
+
+
+# ---------- Test runs ----------
+
+def _web_url(value: str | None) -> str | None:
+    """A run's link is shown as a link, so only web addresses are accepted."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if not value.lower().startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    return value
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    """Stored without a zone, so a time given with one is converted to UTC first
+    rather than having its offset silently dropped."""
+    if value is not None and value.tzinfo is not None:
+        return value.astimezone(timezone.utc)
+    return value
+
+
+class TestRunCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    external_id: str | None = Field(default=None, max_length=255)
+    url: str | None = Field(default=None, max_length=2048)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    notes: str | None = None
+
+    _url = field_validator("url")(classmethod(lambda cls, value: _web_url(value)))
+    _times = field_validator("started_at", "finished_at")(classmethod(lambda cls, value: _utc(value)))
+
+
+class TestRunUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    external_id: str | None = Field(default=None, max_length=255)
+    url: str | None = Field(default=None, max_length=2048)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    notes: str | None = None
+
+    _url = field_validator("url")(classmethod(lambda cls, value: _web_url(value)))
+    _times = field_validator("started_at", "finished_at")(classmethod(lambda cls, value: _utc(value)))
+
+
+class TestRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    external_id: str | None = None
+    url: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    notes: str | None = None
+    test_count: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    warn_count: int = 0
+    artifact_count: int = 0
     created_at: datetime
     updated_at: datetime | None = None
     created_by_username: str | None = None
@@ -944,6 +1017,17 @@ class TestArtifactOut(BaseModel):
 
     id: str
     test_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    created_at: datetime
+
+
+class TestRunArtifactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    test_run_id: str
     filename: str
     content_type: str
     size_bytes: int

@@ -473,6 +473,11 @@ class Test:
     artifact_count: int = 0
     output_filename: str | None = None
     output_size_bytes: int | None = None
+    # The test run (pipeline execution) the test belongs to, if any, and how
+    # many files that run shares with all of its tests.
+    test_run_id: str | None = None
+    test_run_name: str | None = None
+    test_run_artifact_count: int = 0
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -500,6 +505,9 @@ class Test:
             artifact_count=data.get("artifact_count") or 0,
             output_filename=data.get("output_filename"),
             output_size_bytes=data.get("output_size_bytes"),
+            test_run_id=data.get("test_run_id"),
+            test_run_name=data.get("test_run_name"),
+            test_run_artifact_count=data.get("test_run_artifact_count") or 0,
             raw=data,
         )
 
@@ -520,7 +528,8 @@ class TestArtifact:
     """A file attached to a recorded run: a report, a capture, a screenshot.
 
     Stored privately in the server's object store under
-    `tests/<test-id>/artifacts/<artifact-id>/<filename>`; download it with
+    `tests/<test-id>/artifacts/<artifact-id>/<filename>`, or inside its test
+    run's folder when the test belongs to one; download it with
     `tb.tests.download_artifact()`.
     """
 
@@ -539,6 +548,97 @@ class TestArtifact:
         return cls(
             id=data.get("id", ""),
             test_id=data.get("test_id", ""),
+            filename=data.get("filename", ""),
+            content_type=data.get("content_type", ""),
+            size_bytes=data.get("size_bytes") or 0,
+            created_at=parse_datetime(data.get("created_at")),
+            raw=data,
+        )
+
+    def __str__(self) -> str:
+        return self.filename
+
+
+@dataclass
+class TestRun:
+    """One execution of a pipeline or suite: the tests it recorded, and the
+    files it shares with all of them, such as a pytest report, stored once.
+
+    `external_id` is the caller's own identity for the run, such as a CI
+    pipeline ID; starting a run with one already in use joins that run.
+    """
+
+    __test__ = False  # not a pytest test class, despite the name
+
+    id: str = ""
+    name: str = ""
+    external_id: str | None = None
+    url: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    notes: str | None = None
+    test_count: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    warn_count: int = 0
+    artifact_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    created_by_username: str | None = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TestRun":
+        return cls(
+            id=data.get("id", ""),
+            name=data.get("name", ""),
+            external_id=data.get("external_id"),
+            url=data.get("url"),
+            started_at=parse_datetime(data.get("started_at")),
+            finished_at=parse_datetime(data.get("finished_at")),
+            notes=data.get("notes"),
+            test_count=data.get("test_count") or 0,
+            pass_count=data.get("pass_count") or 0,
+            fail_count=data.get("fail_count") or 0,
+            warn_count=data.get("warn_count") or 0,
+            artifact_count=data.get("artifact_count") or 0,
+            created_at=parse_datetime(data.get("created_at")),
+            updated_at=parse_datetime(data.get("updated_at")),
+            created_by_username=data.get("created_by_username"),
+            raw=data,
+        )
+
+    @property
+    def finished(self) -> bool:
+        return self.finished_at is not None
+
+    def __str__(self) -> str:
+        return self.name
+
+
+@dataclass
+class TestRunArtifact:
+    """A file a test run shares with every test in it.
+
+    Stored once, under `test-runs/<run-name>_<run-id>/artifacts/` in the
+    server's object store, and listed with each of the run's tests.
+    """
+
+    __test__ = False  # not a pytest test class, despite the name
+
+    id: str = ""
+    test_run_id: str = ""
+    filename: str = ""
+    content_type: str = ""
+    size_bytes: int = 0
+    created_at: datetime | None = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TestRunArtifact":
+        return cls(
+            id=data.get("id", ""),
+            test_run_id=data.get("test_run_id", ""),
             filename=data.get("filename", ""),
             content_type=data.get("content_type", ""),
             size_bytes=data.get("size_bytes") or 0,

@@ -11,8 +11,8 @@ from starlette.background import BackgroundTask
 
 from ..config import settings
 from ..db import get_db, new_uuid
-from ..models import Test, TestArtifact, User
-from ..schemas import TestArtifactOut
+from ..models import Test, TestArtifact, TestRunArtifact, User
+from ..schemas import TestArtifactOut, TestRunArtifactOut
 from ..services.audit import log_action
 from ..services.object_storage import OutputError
 from ..services import test_artifact_storage as storage
@@ -32,6 +32,11 @@ def get_test(db: Session, test_id: str, *, lock: bool = False) -> Test:
     return test
 
 
+def run_folder(test: Test) -> str | None:
+    """A test in a run keeps its files inside the run's folder."""
+    return test.test_run.storage_folder if test.test_run else None
+
+
 def get_artifact(db: Session, test_id: str, artifact_id: str) -> TestArtifact:
     artifact = db.scalar(select(TestArtifact).where(
         TestArtifact.id == artifact_id, TestArtifact.test_id == test_id))
@@ -42,10 +47,16 @@ def get_artifact(db: Session, test_id: str, artifact_id: str) -> TestArtifact:
 
 @router.get('')
 def list_artifacts(test_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    get_test(db, test_id)
+    test = get_test(db, test_id)
     items = db.scalars(select(TestArtifact).where(TestArtifact.test_id == test_id)
                        .order_by(TestArtifact.created_at, TestArtifact.id)).all()
+    # The files the test's run shares with all of its tests. They are listed
+    # here so the test shows them, but they are managed on the run.
+    shared = db.scalars(select(TestRunArtifact).where(TestRunArtifact.test_run_id == test.test_run_id)
+                        .order_by(TestRunArtifact.created_at, TestRunArtifact.id)).all() if test.test_run_id else []
     return {'items': [TestArtifactOut.model_validate(item) for item in items],
+            'test_run': {'id': test.test_run.id, 'name': test.test_run.name} if test.test_run else None,
+            'test_run_items': [TestRunArtifactOut.model_validate(item) for item in shared],
             'storage_enabled': settings.object_storage_enabled,
             'max_bytes': settings.artifact_max_bytes}
 
@@ -53,10 +64,10 @@ def list_artifacts(test_id: str, db: Session = Depends(get_db), user: User = Dep
 @router.post('', response_model=TestArtifactOut, status_code=201)
 def upload_artifact(test_id: str, file: UploadFile, request: Request,
                     db: Session = Depends(get_db), user: User = Depends(require_tests_edit)):
-    get_test(db, test_id, lock=True)
+    test = get_test(db, test_id, lock=True)
     artifact_id = new_uuid()
     filename = storage.artifact_filename(file.filename)
-    key = storage.artifact_key(test_id, artifact_id, filename)
+    key = storage.artifact_key(test_id, artifact_id, filename, run_folder(test))
     content_type = file.content_type or 'application/octet-stream'
     if len(content_type) > 255 or not re.fullmatch(r'[\w.+-]+/[\w.+-]+', content_type, flags=re.ASCII):
         content_type = 'application/octet-stream'

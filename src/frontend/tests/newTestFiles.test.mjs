@@ -44,3 +44,10 @@ test('sizes read in binary units', () => {
   assert.equal(fileSizeLabel(1536), '1.5 KiB')
   assert.equal(fileSizeLabel(104857600), '100.0 MiB')
 })
+
+test('the artifacts button counts the files a test run shares', async () => {
+  const { artifactsLabel } = await import('../src/testArtifacts.ts')
+  assert.equal(artifactsLabel({ artifact_count: 2 }), 'Artifacts (2)')
+  assert.equal(artifactsLabel({ artifact_count: 0, test_run_artifact_count: 1 }), 'Artifacts (0 + 1 shared)')
+  assert.equal(artifactsLabel(null), 'Artifacts (0)')
+})

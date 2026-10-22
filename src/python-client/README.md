@@ -25,8 +25,8 @@ pip install testbench-client   # once it is published
 
 One dependency: `httpx`. Python 3.10+.
 
-The client is versioned with TestBench: client 1.13.6 covers everything a
-1.13.6 server offers, and still works against older servers for whatever they
+The client is versioned with TestBench: client 1.14.0 covers everything a
+1.14.0 server offers, and still works against older servers for whatever they
 have.
 
 ## Authenticating
@@ -205,7 +205,8 @@ A run can carry files: any number of **artifacts** (reports, captures,
 screenshots, archives) and one **output** — the run's ASCII text log, which the
 TestBench UI shows in a viewer rather than as a download. Both are stored in the
 server's object store beside the run, at `tests/<test-id>/artifacts/…` and
-`tests/<test-id>/output/…`, so the server needs object storage enabled.
+`tests/<test-id>/output/…` (inside its test run's folder when it is in one), so
+the server needs object storage enabled.
 
 Attach them when recording:
 
@@ -251,6 +252,71 @@ Output must be ASCII and within the server's limit (1 MiB by default); anything
 else is refused with a `ValidationError` before it is stored. Uploading output
 again replaces it. A `Test` reports what is attached through `artifact_count`,
 `output_filename` and `has_output`. Uploads and deletions need `tests.edit`.
+
+### Test runs
+
+A test run groups the results one pipeline execution recorded, and holds files
+that describe the whole execution — a pytest report, say — once, instead of a
+copy on every result. Each result in the run lists them beside its own files.
+
+```python
+run = tb.test_runs.start(
+    f"Nightly #{os.environ['CI_PIPELINE_ID']}",
+    external_id=os.environ["CI_PIPELINE_ID"],   # every job of the pipeline joins one run
+    url=os.environ["CI_PIPELINE_URL"],
+)
+tb.test_runs.attach(run, "report.html")          # stored once, shared by every test in the run
+for target in targets:
+    tb.tests.create(device=target, software="RouterOS", outcome="pass", test_run=run)
+tb.test_runs.finish(run)
+```
+
+`start()` with an `external_id` already in use returns that run rather than a
+new one, so parallel jobs can each call it. Without one, each call starts a new
+run.
+
+A test can also share files with its run as it is recorded, which suits a test
+recorded by hand, with its outline or report:
+
+```python
+run = tb.test_runs.start("Acceptance 2026-10")
+tb.tests.create(device="dev-0042", software="RouterOS", outcome="pass", test_run=run,
+                artifacts=["capture.pcap"],                # this test's own files
+                test_run_artifacts=["test-outline.pdf"])   # shared with every test in the run
+```
+
+In GitLab CI or GitHub Actions, `start_from_ci()` fills all of that in from the
+pipeline's own environment variables:
+
+```python
+run = tb.test_runs.start_from_ci()      # every job of the pipeline gets the same run
+```
+
+| | GitLab CI | GitHub Actions |
+|---|---|---|
+| One run per | pipeline (`CI_PIPELINE_ID`) | workflow run (`GITHUB_RUN_ID`) |
+| Name | `group/project #812 (main)` | `owner/repo CI #57 (main)` |
+| `external_id` | `gitlab:<host>:<pipeline id>` | `github:<host>:<run id>` |
+| Link | `CI_PIPELINE_URL` | the workflow run's page |
+
+Retried GitLab jobs and re-run GitHub jobs keep their pipeline's ID, so their
+results join the same run. Pass a name to use your own (`start_from_ci("Nightly
+smoke")`); only the job that creates the run sets it. Outside either CI system
+it raises `ValueError` — use `start()` there.
+
+```python
+tb.test_runs.list(search="nightly")           # newest first
+tb.test_runs.get(run_id).fail_count           # test_count, pass_count, fail_count, warn_count
+tb.test_runs.tests(run, outcome="fail")       # the run's results; takes tb.tests.list() filters
+tb.tests.list(test_run="none")                # results recorded outside any run
+tb.tests.shared_artifacts(result)             # the run's files, from one of its results
+tb.test_runs.download_artifact(run, artifact, "downloads/")
+tb.tests.update(result, test_run=other_run)   # or test_run=None to take it out
+tb.test_runs.delete(run)                      # its results are kept, in no run
+```
+
+A `Test` names its run in `test_run_id` and `test_run_name`, and counts the
+run's shared files in `test_run_artifact_count`.
 
 ### One run, one build
 

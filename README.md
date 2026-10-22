@@ -25,7 +25,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.13.6`.
+`chainfirelabs/testbench` and tag `1.14.0`.
 
 | Image repository | Purpose |
 |---|---|
@@ -197,7 +197,8 @@ variables on the backend.
 The default `TB_OBJECT_STORAGE_MAX_BYTES` is 1048576. TestBench does not create
 or manage buckets and never receives the credentials in the browser.
 
-Keep the bucket private. TestBench writes only under the `tests/` prefix.
+Keep the bucket private. TestBench writes only under the `tests/` and
+`test-runs/` prefixes.
 
 ### Test output
 
@@ -250,7 +251,9 @@ The test ID is the recorded test's immutable ID, so repeated runs are separate.
 Duplicate filenames are allowed because artifact IDs prevent overwrites.
 Migration `0017_test_artifacts` adds metadata; file bytes stay in S3. Allow the
 configured storage identity `s3:GetObject`, `s3:PutObject`, and
-`s3:DeleteObject` on `<bucket>/tests/*`; test output uses the same prefix.
+`s3:DeleteObject` on `<bucket>/tests/*` and `<bucket>/test-runs/*`; test output
+uses the same prefixes. A test in a [test run](#test-runs) stores its files in
+the run's folder under `test-runs/`.
 No bucket listing permission or public bucket access is required by the app.
 
 `backend.objectStorage.artifactMaxBytes` (or `TB_ARTIFACT_MAX_BYTES` outside Helm)
@@ -281,6 +284,60 @@ retains the S3 objects for operator-managed retention. Configure an S3 lifecycle
 policy on `tests/` if retention must be bounded; such policies also expire files
 for retained tests. Artifact metadata and bytes are not included in replication
 or test CSV/JSON exports. Back up the database and bucket together.
+
+### Test runs
+
+A test run is one execution of a pipeline or test suite: the tests it recorded,
+and files it shares with all of them, such as a pytest report, stored once
+instead of uploaded to every test. The Tests list has a **Test Run** column,
+which filters by run; clicking a run opens its page, with its pass, fail and
+warn counts, its shared files (upload, download and delete them there), and the
+usual tests table, limited to the run's tests. **+ New test** on that page
+records a test in the run. The **+ New test**
+dialog on Tests has a **Test Run** field too: pick an existing run, or type a new
+name to start one; its **Test Run Files** field uploads files such as a report or
+test outline to the run, shared with every test in it. Each test's
+**Artifacts** dialog lists the run's shared
+files under its own, with the button counting both (`Artifacts (1 + 1 shared)`).
+
+A pipeline starts a run, attaches its report, and records its tests in it:
+
+```sh
+RUN_ID=$(curl --fail-with-body -s -H "Authorization: Bearer $TB_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\": \"Nightly #$CI_PIPELINE_ID\", \"external_id\": \"$CI_PIPELINE_ID\", \"url\": \"$CI_PIPELINE_URL\"}" \
+  "$TB_API_URL/test-runs" | jq -r .id)
+curl --fail-with-body -H "Authorization: Bearer $TB_TOKEN" \
+  -F 'file=@report.html' "$TB_API_URL/test-runs/$RUN_ID/artifacts"
+# then "test_run_id": "$RUN_ID" in each POST /tests body
+```
+
+`external_id` is optional and unique. Starting a run with an `external_id` that
+is already in use returns that run (200 instead of 201), so every job of one
+pipeline can start "its" run and they all join the same one. `PATCH
+/test-runs/{id}` renames a run or sets `finished_at`; `PATCH /tests/{id}` with
+`test_run_id` moves a test into a run, and `null` takes it out. `GET
+/tests?test_run_id={id}` lists a run's tests (`none` lists tests outside any
+run). Links must be `http://` or `https://` addresses.
+
+The bucket keeps a run's files together, named so they can be found by eye:
+
+```text
+test-runs/<run-name>_<run-id>/artifacts/<artifact-id>/<filename>         shared by the run
+test-runs/<run-name>_<run-id>/tests/<test-id>/artifacts/<artifact-id>/…  a test's own
+test-runs/<run-name>_<run-id>/tests/<test-id>/output/<filename>
+```
+
+The folder is named when the run is created, so renaming the run does not split
+its files. A test's files go in its run's folder when they are uploaded while
+the test is in the run; files uploaded before, or while it was in another run,
+stay where they were. Nothing is moved.
+
+Deleting a run keeps its tests, which are then in no run. Like deleting a test,
+it removes the record of the run's shared files but leaves the files in the
+bucket for your retention policy; deleting a shared file on its own removes it
+from the bucket. Runs travel with their tests in replication; their files, like
+test artifacts, do not. Migration `0020_test_runs` adds runs.
 
 ### Replication between TestBench instances
 

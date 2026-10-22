@@ -8,7 +8,8 @@ import JsonCellEditor from '../components/JsonCellEditor.vue'
 import DetailModal from '../components/DetailModal.vue'
 import TestArtifactsModal from '../components/TestArtifactsModal.vue'
 import TestOutputModal, { type TestOutputMeta } from '../components/TestOutputModal.vue'
-import { TEST_ARTIFACTS_FIELD, TEST_OUTPUT_FIELD, newTestFileFields, testArtifactsColumn, testOutputColumn, type TestFileStorage } from '../testArtifacts'
+import { NO_STORAGE, TEST_ARTIFACTS_FIELD, TEST_OUTPUT_FIELD, newTestFileFields, testArtifactsColumn, testOutputColumn, type TestFileStorage } from '../testArtifacts'
+import { TEST_RUN_FIELD, TEST_RUN_FILES_FIELD, matchRun, newTestRunFields } from '../testRuns'
 import ImportProgressModal from '../components/ImportProgressModal.vue'
 import { detailCellRenderer } from '../detail'
 import { dateColumn } from '../dates'
@@ -23,6 +24,14 @@ import { loadAllPages } from '../pagination'
 import { remoteTableApi } from '../remoteTableApi'
 import { remoteTableParams } from '../remoteTable'
 import { makeFilterValues } from '../suggestions'
+
+/*
+ * Set when this list is the one on a test run's page: it shows only that run's
+ * tests, and a test recorded from it joins the run.
+ */
+const props = defineProps<{ testRunId?: string }>()
+const emit = defineEmits<{ (e: 'changed'): void }>()
+const runScope = () => (props.testRunId ? { test_run_id: props.testRunId } : {})
 
 const artifactTest = ref<any | null>(null)
 function updateArtifactCount(count: number) {
@@ -258,11 +267,38 @@ const NEW_TEST_FIELDS = computed<FormField[]>(() => {
   return fields
 })
 
-/** The schema's fields, then the test's files. */
+/*
+ * The test runs a new test can join, newest first, read each time the dialog
+ * opens; and on a run's page, that run, which the test always joins.
+ */
+const runChoices = ref<any[]>([])
+const fixedRun = ref<any | null>(null)
+
+/** The schema's fields, then the test run and its files, then the test's files. */
 const NEW_TEST_FORM = computed<FormField[]>(() => [
   ...NEW_TEST_FIELDS.value,
+  ...newTestRunFields(runChoices.value, newTest.value, {
+    fixedRun: fixedRun.value,
+    storageEnabled: !!fileStorage.value?.storage_enabled,
+    maxBytes: fileStorage.value?.artifact_max_bytes,
+    noStorage: NO_STORAGE,
+  }),
   ...newTestFileFields(fileStorage.value, testFields.value),
 ])
+
+/** Read the runs on offer; a failure leaves the field free text, still able to start a run. */
+async function loadRunChoices() {
+  try {
+    if (props.testRunId) {
+      fixedRun.value = await api<any>(`/test-runs/${encodeURIComponent(props.testRunId)}`)
+      runChoices.value = [fixedRun.value]
+    } else {
+      runChoices.value = (await api<{ items: any[] }>('/test-runs?page_size=1000&sort=created_at&order=desc')).items
+    }
+  } catch {
+    runChoices.value = []
+  }
+}
 
 /*
  * Opening the dialog has to fetch the fleet first, which is not instant and
@@ -276,6 +312,7 @@ const fileStorage = ref<TestFileStorage | null>(null)
 
 async function openNew() {
   if (openingNew.value) return
+  await loadRunChoices()
   if (!referencesLoaded.value) {
     openingNew.value = true
     try {
@@ -305,6 +342,8 @@ async function openNew() {
     misc_data: '{}',
     [TEST_OUTPUT_FIELD]: [],
     [TEST_ARTIFACTS_FIELD]: [],
+    [TEST_RUN_FIELD]: fixedRun.value?.name || '',
+    [TEST_RUN_FILES_FIELD]: [],
   }
   showNew.value = true
 }
@@ -370,6 +409,7 @@ const baseColumns = [
   },
   { field: 'component_name', headerName: 'Component', editable: false },
   { field: 'component_version', headerName: 'Component Version', editable: false },
+  { ...linkCell('test_run_name', (row: any) => `/test-runs/${encodeURIComponent(row.test_run_id)}`), headerName: 'Test Run', minWidth: 150 },
   {
     field: 'outcome',
     headerName: 'Outcome',
@@ -522,12 +562,13 @@ const filterValues = makeFilterValues({
     return undefined
   },
   skip: ['misc_data', 'created_at', 'updated_at'],
+  base: runScope,
 })
 
 let latestTestsRequest = 0
 async function loadRemoteTests(request: RemoteTableRequest) {
   const requestId = ++latestTestsRequest
-  const params = remoteTableParams(request)
+  const params = remoteTableParams(request, runScope())
   const page = await remoteTableApi(`/tests`, params)
   if (requestId === latestTestsRequest) rows.value = page.items
   return { rows: page.items, total: page.total }
@@ -671,6 +712,7 @@ async function deleteRow(row: any) {
     // until told otherwise.
     table.value?.clearSelection()
     await reloadRows()
+    emit('changed')
   } catch (e: any) {
     showToast(e.message, true)
   }
@@ -690,6 +732,7 @@ async function deleteSelected() {
     table.value?.clearSelection()
     selected.value = []
     await reloadRows()
+    emit('changed')
     showToast(`Deleted ${ids.length} test${ids.length > 1 ? 's' : ''}`)
   } catch (e: any) {
     showToast(e.message, true)
@@ -764,6 +807,7 @@ async function saveNewTest(values: Record<string, any>) {
   }
   const outputFile: File | undefined = (values[TEST_OUTPUT_FIELD] || [])[0]
   const artifactFiles: File[] = values[TEST_ARTIFACTS_FIELD] || []
+  const runFiles: File[] = values[TEST_RUN_FILES_FIELD] || []
   const merged = mergeCustomValues(values, testFields.value, 'misc_data')
   const payload = {
     device_id: device.id,
@@ -778,12 +822,27 @@ async function saveNewTest(values: Record<string, any>) {
     misc_data: merged.misc_data,
   }
   creating.value = true
+  // A run started for this test, removed again if the test is refused.
+  let startedRun: string | null = null
   try {
-    const created = await api<any>('/tests', { method: 'POST', body: JSON.stringify(payload) })
+    let runId: string | null = props.testRunId || matchRun(values[TEST_RUN_FIELD], runChoices.value)?.id || null
+    const runName = String(values[TEST_RUN_FIELD] ?? '').trim()
+    if (!runId && runName) {
+      runId = startedRun = (await api<any>('/test-runs', { method: 'POST', body: JSON.stringify({ name: runName }) })).id
+    }
+    let created: any
+    try {
+      created = await api<any>('/tests', { method: 'POST', body: JSON.stringify({ ...payload, test_run_id: runId }) })
+    } catch (e) {
+      if (startedRun) await api(`/test-runs/${encodeURIComponent(startedRun)}`, { method: 'DELETE' }).catch(() => {})
+      throw e
+    }
     const failed = await uploadNewTestFiles(created.id, outputFile, artifactFiles)
+    if (runId) failed.push(...await uploadRunFiles(runId, runFiles))
     // A row that did not exist a moment ago: re-read the list rather than
     // refresh the window the grid is already holding.
     await reloadRows()
+    emit('changed')
     showNew.value = false
     // The test exists either way; a file that did not make it can be added
     // from the row's Output or Artifacts button.
@@ -794,6 +853,21 @@ async function saveNewTest(values: Record<string, any>) {
   } finally {
     creating.value = false
   }
+}
+
+/** Share files with every test in a run, returning what failed, in words. */
+async function uploadRunFiles(runId: string, files: File[]): Promise<string[]> {
+  const failed: string[] = []
+  for (const file of files) {
+    const body = new FormData()
+    body.append('file', file)
+    try {
+      await api(`/test-runs/${encodeURIComponent(runId)}/artifacts`, { method: 'POST', body })
+    } catch (e: any) {
+      failed.push(`${file.name} was not shared with the test run: ${e?.message || 'request failed'}`)
+    }
+  }
+  return failed
 }
 
 /** Upload a just-created test's files, returning what failed, in words. */
@@ -815,7 +889,7 @@ async function uploadNewTestFiles(testId: string, output: File | undefined, arti
 }
 
 function exportAs(format: string) {
-  const request = tableExportRequest('/tests', table.value?.getState(), { format }, selected.value.map((row) => row.id).filter(Boolean))
+  const request = tableExportRequest('/tests', table.value?.getState(), { format, ...runScope() }, selected.value.map((row) => row.id).filter(Boolean))
   download(request.path, `tests.${format}`, 'export', request.options)
 }
 
@@ -840,9 +914,10 @@ onMounted(loadFields)
 </script>
 
 <template>
-  <div class="page">
+  <div :class="testRunId ? 'embedded-tests' : 'page'">
     <div class="page-header">
-      <h2>Tests</h2>
+      <h3 v-if="testRunId">Tests in this run</h3>
+      <h2 v-else>Tests</h2>
       <div class="toolbar">
         <button
           v-if="auth.can(PERMISSION.testsEdit)"
@@ -856,7 +931,7 @@ onMounted(loadFields)
              unmounted mid-picker never fires `change`. -->
         <input ref="fileInput" type="file" accept=".json,.csv" style="display: none" @change="onImportFile" />
         <OverflowMenu>
-          <template v-if="auth.can(PERMISSION.testsEdit)">
+          <template v-if="auth.can(PERMISSION.testsEdit) && !testRunId">
             <button class="btn" @click="fileInput?.click()">Import</button>
             <button
               class="btn"
@@ -879,7 +954,7 @@ onMounted(loadFields)
          its rows are claims carrying no evidence; this one says these are the
          evidence. Neither is much use without the other, and a label alone
          cannot say who did the testing. -->
-    <p class="muted page-intro">
+    <p v-if="!testRunId" class="muted page-intro">
       Results this team recorded, each one a run of a software version against a
       device in this inventory. These are outcomes, not claims — what a vendor
       says its software supports is under
@@ -989,4 +1064,8 @@ onMounted(loadFields)
 /* Matches the Vendor Claims page, which carries the other half of the
    contrast: the two intros are meant to be read against each other. */
 .page-intro { margin: 0 0 12px; max-width: 70ch; }
+/* On a test run's page, below the run: the grid sizes itself to its parent,
+   which here has to give it a height of its own. */
+.embedded-tests { display: flex; flex-direction: column; height: 70vh; min-height: 420px; }
+.embedded-tests .page-header h3 { margin: 0; }
 </style>

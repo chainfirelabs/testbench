@@ -117,7 +117,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.13.6`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.14.0`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -464,13 +464,15 @@ deleted.
 
 Enable `backend.objectStorage` with the existing S3 endpoint and bucket. Test
 artifacts use `tests/<test-id>/artifacts/<artifact-id>/<filename>` in that bucket,
-and each test's text output uses `tests/<test-id>/output/<filename>`.
+and each test's text output uses `tests/<test-id>/output/<filename>`. Test runs
+keep their shared files, and the files of the tests in them, under
+`test-runs/<run-name>_<run-id>/`.
 The application Secret's S3 credentials need GetObject, PutObject, and DeleteObject
-on `tests/*`. Set `backend.objectStorage.artifactMaxBytes` for the per-file limit
+on `tests/*` and `test-runs/*`. Set `backend.objectStorage.artifactMaxBytes` for the per-file limit
 (default 104857600); the frontend proxy allows that limit plus 1 MiB of multipart
 overhead. Configure any external ingress limits accordingly. This setting is
 separate from `backend.objectStorage.maxBytes`, which limits ASCII test output.
 
-Schema migrations `0017_test_artifacts` and `0018_test_outputs` are required. Whole-test deletion retains
+Schema migrations `0017_test_artifacts`, `0018_test_outputs` and `0020_test_runs` are required. Whole-test deletion retains
 objects for an operator-managed retention policy; individual artifact deletion
 removes its object. See [artifact usage and API](../../README.md#downloadable-test-artifacts).

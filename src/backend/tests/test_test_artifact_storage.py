@@ -1,5 +1,5 @@
 import io
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -57,7 +57,7 @@ def test_missing_objects_have_a_useful_download_error(client_factory):
     assert error.value.status == 404
 
 
-@patch('app.api.test_artifacts.get_test')
+@patch('app.api.test_artifacts.get_test', return_value=Mock(test_run=None))
 @patch('app.api.test_artifacts.storage.upload_artifact', return_value=3)
 @patch('app.api.test_artifacts.storage.delete_artifact')
 @patch('app.api.test_artifacts.log_action')
@@ -79,6 +79,19 @@ def test_output_keys_sit_beside_artifacts_under_the_test():
     assert storage.output_key('test-123', '../run log.txt') == 'tests/test-123/output/.._run_log.txt'
     name = storage.artifact_filename('../../run.log')
     assert storage.output_key('test-123', name) == 'tests/test-123/output/run.log'
+
+
+def test_a_run_keeps_its_shared_files_and_its_tests_files_in_one_folder():
+    folder = storage.run_folder('run-1', 'Nightly #1234 / main')
+    assert folder == 'test-runs/Nightly-1234-main_run-1'
+    assert storage.run_folder('run-2', '  ../  ') == 'test-runs/run_run-2'
+    assert len(storage.run_folder('run-3', 'x' * 500)) == len('test-runs/') + 60 + len('_run-3')
+    assert storage.run_artifact_key(folder, 'a-1', 'pytest report.html') == (
+        'test-runs/Nightly-1234-main_run-1/artifacts/a-1/pytest_report.html')
+    assert storage.artifact_key('test-9', 'a-2', 'capture.pcap', folder) == (
+        'test-runs/Nightly-1234-main_run-1/tests/test-9/artifacts/a-2/capture.pcap')
+    assert storage.output_key('test-9', 'run.log', folder) == (
+        'test-runs/Nightly-1234-main_run-1/tests/test-9/output/run.log')
 
 
 @patch.object(storage, 'storage_client')

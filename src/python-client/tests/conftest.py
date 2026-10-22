@@ -32,6 +32,9 @@ class FakeAPI:
         # test id -> attached files, as the object store would hold them.
         self.artifacts: dict[str, list[dict]] = {}
         self.outputs: dict[str, dict] = {}
+        # Test runs by id, and the files each shares with its tests.
+        self.test_runs: dict[str, dict] = {}
+        self.run_artifacts: dict[str, list[dict]] = {}
         self.vendor_devices: list[dict] = []
         # What GET /tests/file-storage reports; None for a pre-1.13.4 server
         # without the endpoint.
@@ -392,7 +395,13 @@ class FakeAPI:
                 "misc_data": body.get("misc_data") or {}, "notes": body.get("notes"),
                 "run_at": body.get("run_at"), "created_at": "2026-01-01T00:00:00",
                 "updated_at": None, "created_by_username": self.me["username"],
+                "test_run_id": None, "test_run_name": None,
             }
+            if body.get("test_run_id"):
+                run = self.test_runs.get(body["test_run_id"])
+                if run is None:
+                    return httpx.Response(400, json={"detail": "Unknown test_run_id"})
+                row.update(test_run_id=run["id"], test_run_name=run["name"])
             self.tests.append(row)
             return httpx.Response(201, json=row)
 
@@ -405,7 +414,14 @@ class FakeAPI:
             for key in ("component_name", "component_version"):
                 if params.get(key) is not None:
                     rows = [r for r in rows if (r.get(key) or "") == params[key]]
+            if params.get("test_run_id") == "none":
+                rows = [r for r in rows if not r.get("test_run_id")]
+            elif params.get("test_run_id"):
+                rows = [r for r in rows if r.get("test_run_id") == params["test_run_id"]]
             return httpx.Response(200, json=self._page(rows, params))
+
+        if path == "/test-runs" or path.startswith("/test-runs/"):
+            return self._test_runs(request, method, path, params, body)
 
         if path == "/tests/file-storage" and method == "GET":
             if self.file_storage is None:
@@ -434,8 +450,12 @@ class FakeAPI:
                 "output_size_bytes": len(output["data"]) if output else None,
             })
         if rest == ["artifacts"] and method == "GET":
+            run = self.test_runs.get(test.get("test_run_id") or "")
+            shared = self.run_artifacts.get(run["id"], []) if run else []
             return httpx.Response(200, json={
                 "items": [{k: v for k, v in a.items() if k != "data"} for a in artifacts],
+                "test_run": {"id": run["id"], "name": run["name"]} if run else None,
+                "test_run_items": [{k: v for k, v in a.items() if k != "data"} for a in shared],
                 "storage_enabled": True, "max_bytes": 1024,
             })
         if rest == ["artifacts"] and method == "POST":
@@ -479,6 +499,70 @@ class FakeAPI:
                 if output is None:
                     return httpx.Response(404, json={"detail": "This test has no output"})
                 del self.outputs[test["id"]]
+                return httpx.Response(204)
+        return httpx.Response(404, json={"detail": f"no route for {method} {path}"})
+
+    def _test_runs(self, request: httpx.Request, method: str, path: str,
+                   params: dict, body: dict | None) -> httpx.Response:
+        """Test runs and the files they share, as the server answers them."""
+        parts = path.split("/")[2:]
+        if not parts and method == "POST":
+            if body.get("external_id"):
+                existing = next((r for r in self.test_runs.values()
+                                 if r["external_id"] == body["external_id"]), None)
+                if existing:
+                    return httpx.Response(200, json=existing)
+            run = {"id": f"run-{len(self.test_runs) + 1}", "name": body["name"],
+                   "external_id": body.get("external_id"), "url": body.get("url"),
+                   "started_at": body.get("started_at") or "2026-01-01T00:00:00",
+                   "finished_at": None, "notes": body.get("notes"), "test_count": 0,
+                   "created_at": "2026-01-01T00:00:00", "updated_at": None,
+                   "created_by_username": self.me["username"]}
+            self.test_runs[run["id"]] = run
+            return httpx.Response(201, json=run)
+        if not parts and method == "GET":
+            rows = list(self.test_runs.values())
+            if params.get("search"):
+                rows = [r for r in rows if params["search"].lower() in r["name"].lower()]
+            return httpx.Response(200, json=self._page(rows, params))
+        run = self.test_runs.get(parts[0])
+        if run is None:
+            return httpx.Response(404, json={"detail": "Test run not found"})
+        rest = parts[1:]
+        shared = self.run_artifacts.setdefault(run["id"], [])
+        if not rest and method == "GET":
+            return httpx.Response(200, json={
+                **run, "test_count": sum(t.get("test_run_id") == run["id"] for t in self.tests),
+                "artifact_count": len(shared)})
+        if not rest and method == "PATCH":
+            run.update(body)
+            return httpx.Response(200, json=run)
+        if not rest and method == "DELETE":
+            del self.test_runs[run["id"]]
+            for test in self.tests:
+                if test.get("test_run_id") == run["id"]:
+                    test.update(test_run_id=None, test_run_name=None)
+            return httpx.Response(204)
+        if rest == ["artifacts"] and method == "GET":
+            return httpx.Response(200, json={
+                "items": [{k: v for k, v in a.items() if k != "data"} for a in shared],
+                "storage_enabled": True, "max_bytes": 1024})
+        if rest == ["artifacts"] and method == "POST":
+            filename, content_type, data = _upload(request)
+            row = {"id": f"shared-{sum(map(len, self.run_artifacts.values())) + 1}",
+                   "test_run_id": run["id"], "filename": filename, "content_type": content_type,
+                   "size_bytes": len(data), "created_at": "2026-01-01T00:00:00", "data": data}
+            shared.append(row)
+            return httpx.Response(201, json={k: v for k, v in row.items() if k != "data"})
+        if len(rest) >= 2 and rest[0] == "artifacts":
+            row = next((a for a in shared if a["id"] == rest[1]), None)
+            if row is None:
+                return httpx.Response(404, json={"detail": "Artifact not found"})
+            if rest[2:] == ["download"] and method == "GET":
+                return httpx.Response(200, content=row["data"],
+                                      headers={"content-type": "application/octet-stream"})
+            if len(rest) == 2 and method == "DELETE":
+                shared.remove(row)
                 return httpx.Response(204)
         return httpx.Response(404, json={"detail": f"no route for {method} {path}"})
 

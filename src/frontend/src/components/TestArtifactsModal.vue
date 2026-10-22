@@ -10,6 +10,10 @@ const emit = defineEmits<{ (e: 'close'): void; (e: 'updated', count: number): vo
 const auth = useAuthStore()
 const dialog = ref<HTMLDialogElement | null>(null)
 const items = ref<Artifact[]>([])
+// Files the test's run shares with all of its tests: shown and downloadable
+// here, but uploaded and deleted on the run's own page.
+const testRun = ref<{ id: string; name: string } | null>(null)
+const sharedItems = ref<Artifact[]>([])
 const loading = ref(true)
 const busy = ref(false)
 const error = ref('')
@@ -25,8 +29,13 @@ function sizeLabel(bytes: number) {
 async function load() {
   loading.value = true
   try {
-    const result = await api<{ items: Artifact[]; storage_enabled: boolean; max_bytes: number }>(base)
+    const result = await api<{
+      items: Artifact[]; storage_enabled: boolean; max_bytes: number
+      test_run?: { id: string; name: string } | null; test_run_items?: Artifact[]
+    }>(base)
     items.value = result.items
+    testRun.value = result.test_run || null
+    sharedItems.value = result.test_run_items || []
     storageEnabled.value = result.storage_enabled
     maxBytes.value = result.max_bytes
     emit('updated', items.value.length)
@@ -92,6 +101,7 @@ onMounted(() => { dialog.value?.showModal(); load() })
           Upload files (up to {{ sizeLabel(maxBytes) }} each)
           <input type="file" multiple :disabled="busy || downloading" @change="upload" />
         </label>
+        <h3 v-if="testRun" class="section-title">This test's files</h3>
         <p v-if="!items.length" class="muted">No artifacts attached to this test.</p>
         <ul v-else class="artifact-list">
           <li v-for="item in items" :key="item.id">
@@ -104,6 +114,22 @@ onMounted(() => { dialog.value?.showModal(); load() })
             </div>
           </li>
         </ul>
+        <template v-if="testRun">
+          <h3 class="section-title">
+            From test run
+            <router-link :to="`/test-runs/${encodeURIComponent(testRun.id)}`">{{ testRun.name }}</router-link>
+          </h3>
+          <p v-if="!sharedItems.length" class="muted">The run has no shared files.</p>
+          <ul v-else class="artifact-list">
+            <li v-for="item in sharedItems" :key="item.id">
+              <div class="artifact-info"><strong>{{ item.filename }}</strong><span class="muted">{{ sizeLabel(item.size_bytes) }} · {{ item.content_type }} · shared by every test in the run</span></div>
+              <div class="artifact-actions">
+                <button class="btn btn-mini" :disabled="busy || downloading || !storageEnabled"
+                  @click="error = ''; download(`/test-runs/${encodeURIComponent(testRun.id)}/artifacts/${encodeURIComponent(item.id)}/download`, item.filename)">Download</button>
+              </div>
+            </li>
+          </ul>
+        </template>
       </template>
       <p v-if="status || downloading" role="status">{{ status || 'Downloading artifact…' }}</p>
     </dialog>
@@ -116,6 +142,7 @@ onMounted(() => { dialog.value?.showModal(); load() })
 header, .artifact-actions { display: flex; align-items: center; gap: 12px; }
 header { justify-content: space-between; }
 h2 { margin: 0; }
+.section-title { margin: 18px 0 0; font-size: 1rem; }
 .upload-label, .artifact-info { display: flex; flex-direction: column; gap: 8px; }
 .artifact-list { list-style: none; padding: 0; }
 .artifact-list li { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }

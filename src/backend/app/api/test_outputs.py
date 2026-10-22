@@ -1,6 +1,7 @@
 """One recorded test's text output: uploaded once, read in a viewer, never downloaded.
 
-The file lives beside the test's artifacts, at `tests/<test-id>/output/<filename>`.
+The file lives beside the test's artifacts, at `tests/<test-id>/output/<filename>`,
+or inside its test run's folder when it has one (see test_artifact_storage).
 A test has at most one; uploading again replaces it.
 """
 import logging
@@ -16,7 +17,7 @@ from ..services.audit import log_action
 from ..services.object_storage import OutputError
 from ..services import test_artifact_storage as storage
 from .deps import get_current_user, require_tests_edit
-from .test_artifacts import get_test
+from .test_artifacts import get_test, run_folder
 
 router = APIRouter(prefix='/tests/{test_id}/output', tags=['test-output'])
 logger = logging.getLogger(__name__)
@@ -53,9 +54,9 @@ def read_output(test_id: str, db: Session = Depends(get_db), user: User = Depend
 @router.put('')
 def upload_output(test_id: str, file: UploadFile, request: Request,
                   db: Session = Depends(get_db), user: User = Depends(require_tests_edit)):
-    get_test(db, test_id, lock=True)
+    test = get_test(db, test_id, lock=True)
     filename = storage.artifact_filename(file.filename or 'output.txt')
-    key = storage.output_key(test_id, filename)
+    key = storage.output_key(test_id, filename, run_folder(test))
     bucket = settings.object_storage_bucket
     previous = _output(db, test_id)
     stale = (previous.bucket, previous.object_key) if previous is not None else None

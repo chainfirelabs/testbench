@@ -125,8 +125,8 @@ data; none modify inventory or run plugins.
 A recorded test can carry any number of artifacts (reports, captures,
 screenshots, archives) and one ASCII text output, which the TestBench UI shows
 in a viewer. The server stores both beside the test in its object store, under
-`tests/<test-id>/artifacts/` and `tests/<test-id>/output/`, so object storage
-must be enabled there. Each command takes the test's UUID with `--test` (from
+`tests/<test-id>/artifacts/` and `tests/<test-id>/output/` (or in its test run's
+folder under `test-runs/`), so object storage must be enabled there. Each command takes the test's UUID with `--test` (from
 `--tests` listings or `--tests --get`) and exactly one action:
 
 ```bash

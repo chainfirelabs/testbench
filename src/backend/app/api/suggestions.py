@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db, utcnow
-from ..models import AuditLog, Device, Software, SoftwareComponent, Test, User, VendorDevice
+from ..models import AuditLog, Device, Software, SoftwareComponent, Test, TestRun, User, VendorDevice
 from ..schemas import SuggestionsOut
 from ..services.device_schema import device_field_expression, effective_field_map, union_field_map
 from ..services.entity_fields import entity_field_expression, entity_field_map
@@ -161,7 +161,7 @@ def field_filter_values(
         related = {
             "tests": {"device_unique_id": Device.unique_id, "software_name": Software.name,
                       "component_name": SoftwareComponent.name, "component_version": SoftwareComponent.version,
-                      "created_by_username": User.username},
+                      "created_by_username": User.username, "test_run_name": TestRun.name},
             "vendor-devices": {"software_name": Software.name, "software_version": Software.version},
         }.get(entity, {})
         if field in related and (not configured or not configured.sensitive):
@@ -251,7 +251,8 @@ def field_filter_values(
             filters = {key: value for key, value in params.items() if key not in controls}
             query = _query_tests(db, params.get("search"), params.get("device_id"),
                                  params.get("software_id"), params.get("outcome"),
-                                 params.get("tag"), filters)
+                                 params.get("tag"), filters, params.get("component_id"),
+                                 params.get("test_run_id"))
         elif entity in {"users", "audit_logs"}:
             base = User if entity == "users" else AuditLog
             query = select(base)
@@ -308,6 +309,7 @@ def field_filter_values(
                 "component_name": (SoftwareComponent, Test.component_id == SoftwareComponent.id),
                 "component_version": (SoftwareComponent, Test.component_id == SoftwareComponent.id),
                 "created_by_username": (User, Test.created_by == User.id),
+                "test_run_name": (TestRun, Test.test_run_id == TestRun.id),
             }[field]
             statement = statement.outerjoin(target, join)
         statement = statement.distinct().order_by(column.asc().nullsfirst()).offset(offset).limit(limit + 1)
@@ -323,6 +325,7 @@ def field_filter_values(
                 "component_name": (SoftwareComponent, Test.component_id == SoftwareComponent.id),
                 "component_version": (SoftwareComponent, Test.component_id == SoftwareComponent.id),
                 "created_by_username": (User, Test.created_by == User.id),
+                "test_run_name": (TestRun, Test.test_run_id == TestRun.id),
             }[field]
             related_values = select(column.label("value")).select_from(Test).outerjoin(target, join)
         else:

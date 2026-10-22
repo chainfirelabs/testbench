@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db, utcnow
-from ..models import Device, Test, Software, SoftwareComponent, User
+from ..models import Device, Test, TestRun, Software, SoftwareComponent, User
 from ..models.test import TEST_OUTCOMES, TEST_TAGS
 from ..schemas import (
     BulkIds,
@@ -29,11 +29,11 @@ router = APIRouter(prefix="/tests", tags=["tests"])
 
 EXPORT_COLUMNS = [
     "id", "software_id", "software_name", "software_version", "device_id", "device_unique_id",
-    "component_id", "component_name", "component_version",
+    "component_id", "component_name", "component_version", "test_run_id", "test_run_name",
     "device_make", "device_model", "outcome", "tag", "misc_data", "notes",
     "run_at", "created_at", "created_by_username",
 ]
-EDITABLE_FIELDS = ["component_id", "software_version", "outcome", "tag", "misc_data", "notes", "run_at"]
+EDITABLE_FIELDS = ["component_id", "test_run_id", "software_version", "outcome", "tag", "misc_data", "notes", "run_at"]
 
 # The columns an import template offers, required first. A row identifies its
 # software and device by name — a hand-filled file has no UUIDs to quote.
@@ -46,6 +46,7 @@ TEMPLATE_COLUMNS = [
 IMPORT_IGNORED = {
     "created_at", "updated_at", "created_by_username", "device_make", "device_model",
     "artifact_count", "output_filename", "output_size_bytes", *TEST_FILE_FIELDS,
+    "test_run_name", "test_run_artifact_count",
 }
 
 # CSV columns outside the import schema and the display-only export columns are
@@ -155,8 +156,14 @@ def _query_tests(
     tag: str | None,
     filters: dict | None = None,
     component_id: str | None = None,
+    test_run_id: str | None = None,
 ) -> select:
     q = select(Test)
+    # `none` asks for the tests recorded outside any run.
+    if test_run_id == NO_COMPONENT:
+        q = q.where(Test.test_run_id.is_(None))
+    elif test_run_id:
+        q = q.where(Test.test_run_id == test_run_id)
     if device_id:
         q = q.where(Test.device_id == device_id)
     if software_id:
@@ -176,7 +183,7 @@ def _query_tests(
     # on them means joining to reach them. They used to be skipped outright,
     # which did not disable the filter — it ignored it: the grid narrowed to a
     # device and the server answered with every test there is.
-    joined_component = joined_device = joined_software = joined_creator = False
+    joined_component = joined_device = joined_software = joined_creator = joined_run = False
     for key, value in (filters or {}).items():
         excluded = key.startswith("exclude__")
         included = key.startswith("include__")
@@ -204,6 +211,11 @@ def _query_tests(
                 q = q.outerjoin(User, Test.created_by == User.id)
                 joined_creator = True
             expression = User.username
+        elif key == "test_run_name":
+            if not joined_run:
+                q = q.outerjoin(TestRun, Test.test_run_id == TestRun.id)
+                joined_run = True
+            expression = TestRun.name
         elif key in {"component_name", "component_version"}:
             if not joined_component:
                 q = q.outerjoin(SoftwareComponent, Test.component_id == SoftwareComponent.id)
@@ -227,7 +239,7 @@ def _query_tests(
             if field.field_type in {"text", "textarea", "select"}
             and field.key not in {
                 "device_unique_id", "software_name", "component_name",
-                "component_version", "created_by_username", *TEST_FILE_FIELDS,
+                "component_version", "created_by_username", "test_run_name", *TEST_FILE_FIELDS,
             }
         ]
         # Only the joins a filter above has not already made: joining the same
@@ -259,6 +271,7 @@ def list_tests(
     device_id: str | None = None,
     software_id: str | None = None,
     component_id: str | None = None,
+    test_run_id: str | None = None,
     outcome: str | None = None,
     tag: str | None = None,
     sort: str = "created_at",
@@ -272,11 +285,11 @@ def list_tests(
     filters = {
         key: value for key, value in checklist_query(request, filters_body).items()
         if key not in {
-            "search", "device_id", "software_id", "component_id", "outcome", "tag",
+            "search", "device_id", "software_id", "component_id", "test_run_id", "outcome", "tag",
             "sort", "order", "page", "page_size",
         }
     }
-    q = _query_tests(db, search, device_id, software_id, outcome, tag, filters, component_id)
+    q = _query_tests(db, search, device_id, software_id, outcome, tag, filters, component_id, test_run_id)
     total = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     q = q.order_by(entity_order_by(db, "tests", Test, sort, order))
     items = db.scalars(q.offset((page - 1) * page_size).limit(page_size)).all()
@@ -290,6 +303,7 @@ def export_tests(
     search: str | None = None,
     device_id: str | None = None,
     software_id: str | None = None,
+    test_run_id: str | None = None,
     outcome: str | None = None,
     tag: str | None = None,
     request: Request = None,
@@ -298,13 +312,16 @@ def export_tests(
     body: ExportRequest | None = None,
 ):
     params = body.filters if body is not None else (request.query_params if request else {})
+    # The export button sends its filters in the body, a run's page included.
+    test_run_id = test_run_id or params.get("test_run_id")
     filters = {key: value for key, value in params.items()
-               if key not in {"format", "search", "device_id", "software_id", "outcome", "tag",
+               if key not in {"format", "search", "device_id", "software_id", "test_run_id", "outcome", "tag",
                               "sort", "order", "page", "page_size"}}
     def export_query(session: Session):
         if body is not None and body.ids is not None:
             return select(Test).where(Test.id.in_(body.ids))
-        return _query_tests(session, search, device_id, software_id, outcome, tag, filters)
+        return _query_tests(session, search, device_id, software_id, outcome, tag, filters,
+                            test_run_id=test_run_id)
     q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     fields = [field for field in get_entity_fields(db, "tests") if field.key not in TEST_FILE_FIELDS]
@@ -369,6 +386,8 @@ def create_test(
         raise HTTPException(status_code=400, detail="Unknown software_id")
     if db.get(Device, body.device_id) is None:
         raise HTTPException(status_code=400, detail="Unknown device_id")
+    if body.test_run_id and db.get(TestRun, body.test_run_id) is None:
+        raise HTTPException(status_code=400, detail="Unknown test_run_id")
     try:
         component = _resolve_component(
             db, software, body.component_id, body.component_name, body.component_version,
@@ -415,6 +434,8 @@ def update_test(
         component = db.get(SoftwareComponent, body.component_id)
         if component is None or component.software_id != test.software_id:
             raise HTTPException(status_code=400, detail="Component does not belong to this test's software")
+    if body.test_run_id is not None and db.get(TestRun, body.test_run_id) is None:
+        raise HTTPException(status_code=400, detail="Unknown test_run_id")
     old = {f: getattr(test, f) for f in EDITABLE_FIELDS}
     try:
         updates = validate_custom_values(
@@ -480,6 +501,8 @@ def bulk_tests(
                 software = db.get(Software, parsed.software_id)
                 if software is None:
                     raise ValueError("unknown software_id")
+                if parsed.test_run_id and db.get(TestRun, parsed.test_run_id) is None:
+                    raise ValueError("unknown test_run_id")
                 component = _resolve_component(
                     db, software, parsed.component_id, parsed.component_name, parsed.component_version,
                 )

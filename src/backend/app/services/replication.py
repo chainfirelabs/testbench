@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..db import as_utc, utcnow
 from ..models import (
     Device, DeviceType, ReplicationTombstone, Software, SoftwareComponent, Test,
-    VendorDevice, VendorDeviceComponentSupport,
+    TestRun, VendorDevice, VendorDeviceComponentSupport,
 )
 from .device_schema import union_field_map
 from .entity_fields import get_entity_fields
@@ -139,6 +139,9 @@ def serialize(db: Session, entity: str, row: Any, sensitive: set[str] | None = N
         data = {
             "data": _safe_document(row._data or {}, hidden), "device_id": row.device_id,
             "software_id": row.software_id, "component_id": row.component_id,
+            # The run travels with each of its tests rather than as a record of
+            # its own. Its shared files, like a test's, stay where they are.
+            "test_run": _run_payload(row.test_run),
         }
     return {
         "entity": entity, "id": row.id, "deleted": False,
@@ -232,6 +235,38 @@ def _apply_software(db: Session, row: Software | None, item: dict) -> Software:
     return row
 
 
+def _run_payload(run: TestRun | None) -> dict | None:
+    if run is None:
+        return None
+    return {
+        "id": run.id, "name": run.name, "external_id": run.external_id, "url": run.url,
+        "started_at": stamp(run.started_at) if run.started_at else None,
+        "finished_at": stamp(run.finished_at) if run.finished_at else None,
+        "notes": run.notes, "storage_folder": run.storage_folder,
+    }
+
+
+def _apply_run(db: Session, payload: dict) -> TestRun:
+    run = db.get(TestRun, payload["id"])
+    external_id = payload.get("external_id") or None
+    if external_id and db.scalar(select(TestRun.id).where(
+            TestRun.external_id == external_id, TestRun.id != payload["id"])):
+        raise ValueError(f"Test run external ID '{external_id}' belongs to a different record")
+    if run is None:
+        run = TestRun(id=payload["id"], storage_folder=payload.get("storage_folder")
+                      or f"test-runs/run_{payload['id']}")
+        db.add(run)
+    run.name = payload.get("name") or run.name or "Test run"
+    run.external_id = external_id
+    run.url = payload.get("url")
+    run.notes = payload.get("notes")
+    for name in ("started_at", "finished_at"):
+        value = payload.get(name)
+        setattr(run, name, parse_stamp(value) if value else None)
+    db.flush()
+    return run
+
+
 def _apply_test(db: Session, row: Test | None, item: dict) -> Test:
     payload = item["data"]
     if db.get(Device, payload["device_id"]) is None or db.get(Software, payload["software_id"]) is None:
@@ -245,6 +280,9 @@ def _apply_test(db: Session, row: Test | None, item: dict) -> Test:
     row.device_id = payload["device_id"]
     row.software_id = payload["software_id"]
     row.component_id = component_id
+    # Absent from a source older than test runs: leave the test's run alone.
+    if "test_run" in payload:
+        row.test_run_id = _apply_run(db, payload["test_run"]).id if payload["test_run"] else None
     row._data = _merge_document(row._data or {}, payload["data"], _sensitive_keys(db, "tests"))
     return row
 

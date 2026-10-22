@@ -122,11 +122,13 @@ class TestBench:
 
         from .devices import Devices
         from .software import SoftwareResource
+        from .test_runs import TestRuns
         from .tests import Tests
         from .vendor_devices import VendorDevices
 
         self.devices = Devices(self)
         self.tests = Tests(self)
+        self.test_runs = TestRuns(self)
         self.software = SoftwareResource(self)
         self.vendor_devices = VendorDevices(self)
 

@@ -1,5 +1,40 @@
 # Release notes
 
+## 1.14.0
+
+- **Test runs.** A test run is one execution of a pipeline or suite: the tests
+  it recorded, and files it shares with all of them, such as a pytest report,
+  stored once instead of uploaded to every test.
+  - Tests has a **Test Run** column. Clicking a run opens its page: its shared
+    files above the usual tests table, limited to the run. There is no
+    separate list of runs; filter the column to find one. Each test's
+    Artifacts dialog lists its run's shared files under its own
+    (`Artifacts (1 + 1 shared)`).
+  - API: `/test-runs`, with `/test-runs/{id}/artifacts` for shared files.
+    Starting a run with an `external_id` already in use returns that run, so
+    every job of one pipeline joins the same one. Tests take `test_run_id` on
+    create and update, and `GET /tests?test_run_id=` filters by it.
+  - The bucket keeps a run's files together under
+    `test-runs/<run-name>_<run-id>/`: shared files in `artifacts/`, and the
+    files of each test in the run under `tests/<test-id>/`. Tests outside a run
+    are stored under `tests/` as before, and existing files are not moved.
+  - **Upgrade note:** if your S3 credentials are limited to `tests/*`, also
+    grant GetObject, PutObject and DeleteObject on `test-runs/*`, or uploads to
+    runs, and to tests in runs, are refused.
+  - Runs travel with their tests in replication; files still do not. Migration
+    `0020_test_runs`.
+  - Python client: `tb.test_runs` (`start`, `attach`, `finish`, `tests`, …),
+    `test_run=` on `tb.tests.create()`, `update()` and `list()`, and
+    `tb.tests.shared_artifacts()`. `tb.test_runs.start_from_ci()` starts or
+    joins the run for the GitLab CI pipeline or GitHub Actions workflow run it
+    is running in, taking its ID, name and link from the CI environment.
+- **New test dialog: test run and its files.** **+ New test** on Tests has a
+  **Test Run** field, suggesting existing runs; a new name starts a run. **Test
+  Run Files** uploads files to the run, such as a report or test outline,
+  shared with every test in it. On a run's page the run is filled in.
+- Python client: `tb.tests.create(..., test_run=run, test_run_artifacts=[...])`
+  shares files with the run as the test is recorded.
+
 ## 1.13.6
 
 - The Python client (`src/python-client`) is versioned with TestBench, starting

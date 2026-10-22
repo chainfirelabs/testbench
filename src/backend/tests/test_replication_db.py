@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base, utcnow
 from app.models import (
-    Device, Software, SoftwareComponent, Test as ResultModel,
+    Device, Software, SoftwareComponent, Test as ResultModel, TestRun,
     VendorDevice, VendorDeviceComponentSupport,
 )
 from app.services.replication import apply_items, snapshot_page
@@ -43,15 +43,17 @@ class ReplicationDatabaseTests(unittest.TestCase):
                 software = Software(id=str(uuid4()), _data={"name": "Suite", "version": "1.0"})
                 component = SoftwareComponent(id=str(uuid4()), software_id=software.id,
                                               name="Agent", version="2", position=0)
+                run = TestRun(id=str(uuid4()), name="Nightly #7", external_id="pipeline-7",
+                              url="https://ci.example/7", storage_folder="test-runs/Nightly-7_x")
                 test = ResultModel(id=str(uuid4()), device_id=device.id, software_id=software.id,
-                            component_id=component.id, _data={"outcome": "pass"})
+                            component_id=component.id, test_run_id=run.id, _data={"outcome": "pass"})
                 claim = VendorDevice(id=str(uuid4()), software_id=software.id,
                                      make="Example", model="Router", match_key="example|router|||",
                                      support_status="supported", misc_data={})
                 support = VendorDeviceComponentSupport(vendor_device_id=claim.id,
                                                        component_id=component.id,
                                                        support_status="supported")
-                source.add_all([device, software, component, test, claim, support])
+                source.add_all([device, software, component, run, test, claim, support])
                 source.commit()
 
                 for entity in ("devices", "software", "vendor_claims", "tests"):
@@ -62,6 +64,11 @@ class ReplicationDatabaseTests(unittest.TestCase):
                 self.assertEqual(copied.unique_id, device.unique_id)
                 self.assertNotIn("password", copied.data)
                 self.assertEqual(peer.get(ResultModel, test.id).component_id, component.id)
+                # The run comes along with its test, folder and all.
+                self.assertEqual(peer.get(ResultModel, test.id).test_run_id, run.id)
+                copied_run = peer.get(TestRun, run.id)
+                self.assertEqual((copied_run.name, copied_run.external_id, copied_run.storage_folder),
+                                 ("Nightly #7", "pipeline-7", "test-runs/Nightly-7_x"))
                 self.assertEqual(peer.get(VendorDevice, claim.id).component_support[0].component_id, component.id)
 
                 # An edit made after the snapshot must survive its stale copy.

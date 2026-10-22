@@ -16,9 +16,9 @@ of permissions the installation defines — so what a key may do is
 `devices.edit` checks a device out and `tests.edit` records a result.
 """
 
-# Released with TestBench and versioned with it: client 1.13.6 is the one
-# that knows everything a 1.13.6 server offers.
-__version__ = "1.13.6"
+# Released with TestBench and versioned with it: client 1.14.0 is the one
+# that knows everything a 1.14.0 server offers.
+__version__ = "1.14.0"
 
 from .client import TestBench
 from .errors import (
@@ -63,6 +63,8 @@ from .models import (
     TestedDevice,
     TestFileStorage,
     TestOutput,
+    TestRun,
+    TestRunArtifact,
     VendorDevice,
 )
 
@@ -77,6 +79,8 @@ __all__ = [
     "TestedDevice",
     "TestFileStorage",
     "TestOutput",
+    "TestRun",
+    "TestRunArtifact",
     "VendorDevice",
     "CompatibleSoftware",
     "SearchResults",

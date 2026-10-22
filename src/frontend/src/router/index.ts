@@ -55,6 +55,17 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../views/TestsView.vue'),
     meta: { title: 'Tests' },
   },
+  // Runs are reached from their tests, so there is no list of them: the
+  // Tests list's Test Run column links to each, and filters by it.
+  { path: '/test-runs', redirect: '/tests' },
+  {
+    // One pipeline or suite execution: its tests and the files it shares
+    // with all of them.
+    path: '/test-runs/:id',
+    name: 'test-run-detail',
+    component: () => import('../views/TestRunDetailView.vue'),
+    meta: { title: 'Test Run' },
+  },
   {
     path: '/profile',
     name: 'profile',

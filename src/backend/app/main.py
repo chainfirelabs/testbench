@@ -19,6 +19,7 @@ from .api import (
     tests,
     test_artifacts,
     test_outputs,
+    test_runs,
     software,
     users,
     vendor_devices,
@@ -141,6 +142,7 @@ app.include_router(vendor_devices.catalog_router, prefix=API_PREFIX)
 app.include_router(test_artifacts.router, prefix=API_PREFIX)
 app.include_router(test_outputs.router, prefix=API_PREFIX)
 app.include_router(tests.router, prefix=API_PREFIX)
+app.include_router(test_runs.router, prefix=API_PREFIX)
 app.include_router(saved_filters.router, prefix=API_PREFIX)
 app.include_router(notifications.router, prefix=API_PREFIX)
 app.include_router(audit.router, prefix=API_PREFIX)
