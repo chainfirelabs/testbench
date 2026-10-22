@@ -62,6 +62,12 @@ you are seeing part of the answer — say so rather than presenting it as the
 whole. Read `testbench://schema` before filtering by a status, outcome or
 tag; guessing at those values wastes a round trip.
 
+ALL TESTS OF A SOFTWARE VERSION.
+For "show me all tests for nmap 7.94" or anything needing each test together
+with its device's details, call `list_software_tests`. It returns every test of
+that version with the device's fields, and a summary over all of them. Follow
+`next_offset` until it is absent before calling the list complete.
+
 CHECKOUT DEADLINES.
 For overdue devices or devices due soon, call `find_due_devices`. Its default
 window is the next 3 days and it includes already-overdue checkouts. Use

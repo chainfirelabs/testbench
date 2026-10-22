@@ -306,32 +306,142 @@ def export_tests(
     test_run_id: str | None = None,
     outcome: str | None = None,
     tag: str | None = None,
+    include_device: bool = False,
     request: Request = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     body: ExportRequest | None = None,
 ):
+    """Export the tests a filter selects. With `include_device`, every row also
+    carries its device's fields: `device_*` columns in CSV, a `device` object in
+    JSON. Sensitive device fields are never included."""
     params = body.filters if body is not None else (request.query_params if request else {})
     # The export button sends its filters in the body, a run's page included.
     test_run_id = test_run_id or params.get("test_run_id")
+    software_id = software_id or params.get("software_id")
     filters = {key: value for key, value in params.items()
                if key not in {"format", "search", "device_id", "software_id", "test_run_id", "outcome", "tag",
-                              "sort", "order", "page", "page_size"}}
+                              "sort", "order", "page", "page_size", "include_device"}}
     def export_query(session: Session):
         if body is not None and body.ids is not None:
-            return select(Test).where(Test.id.in_(body.ids))
+            # A selection stays inside the software it was made on.
+            q = select(Test).where(Test.id.in_(body.ids))
+            return q.where(Test.software_id == software_id) if software_id else q
         return _query_tests(session, search, device_id, software_id, outcome, tag, filters,
                             test_run_id=test_run_id)
     q = export_query(db)
     count = db.scalar(select(func.count()).select_from(q.subquery())) or 0
     fields = [field for field in get_entity_fields(db, "tests") if field.key not in TEST_FILE_FIELDS]
-    log_action(db, user, "export.tests", "test", None, {"format": format, "count": count}, request)
+    columns = [field.key for field in fields]
+    pairs: list[tuple[str, str]] = []
+    lifted: list[tuple[str, str]] = []
+    if include_device:
+        # The test's own id too, so a row can be followed up (its output, its
+        # files) and a re-import updates the tests rather than copying them.
+        columns.insert(0, "id")
+        pairs = _device_export_columns(db)
+        lifted = _device_misc_columns(db, q, pairs, columns) if format == "csv" else []
+        columns += [column for column, _ in pairs + lifted if column not in columns and column != "device_misc_data"]
+        # Only the values a column of their own could not take stay behind.
+        if format == "csv" and _has_residual_misc(db, q, {key for _, key in lifted}):
+            columns.append("device_misc_data")
+    log_action(db, user, "export.tests", "test", None,
+               {"format": format, "count": count, "include_device": include_device}, request)
     db.commit()
     def rows(export_db: Session):
         query = export_query(export_db)
+        add_device = _device_projector(export_db, format, pairs, lifted) if include_device else None
         for item in export_db.scalars(query.order_by(Test.created_at, Test.id).execution_options(yield_per=500)):
-            yield project_fields(_test_dict(item), fields, "misc_data")
-    return streaming_export_response(database_export_rows(rows), [field.key for field in fields], format, "tests")
+            row = project_fields(_test_dict(item), fields, "misc_data")
+            if add_device:
+                row = add_device({"id": item.id, **row}, item.device)
+            yield row
+    return streaming_export_response(database_export_rows(rows), columns, format, "tests")
+
+
+def _device_column(key: str) -> str:
+    """A device field's column in a test export: prefixed so it cannot be
+    mistaken for the test's own, unless it already is (`device_type`)."""
+    return key if key.startswith("device_") else f"device_{key}"
+
+
+def _device_export_columns(db: Session) -> list[tuple[str, str]]:
+    """(test export column, device field) for every device field a test export
+    carries: the device export's own fields across every type, minus secrets."""
+    from .devices import _union_fields
+
+    fields = [field for field in _union_fields(db) if not field.sensitive]
+    keys = ["device_type", *dict.fromkeys(["unique_id", *(field.key for field in fields), "misc_data"])]
+    return [(_device_column(key), key) for key in keys]
+
+
+def _exported_devices(db: Session, tests_query):
+    """Each device the exported tests ran on, once."""
+    from .devices import _export_shape
+
+    _, project = _export_shape(db, None, "all")
+    ids = tests_query.with_only_columns(Test.device_id).distinct()
+    for device in db.scalars(select(Device).where(Device.id.in_(ids)).execution_options(yield_per=500)):
+        yield project(device)
+
+
+def _device_misc_columns(db: Session, tests_query, pairs, test_columns) -> list[tuple[str, str]]:
+    """A CSV column for each device value no field accounts for, as the device
+    export lifts them, so firmware kept outside the schema is a column rather
+    than a JSON blob. Sorted, so the same tests export the same way twice."""
+    taken = {column for column, _ in pairs} | set(test_columns)
+    keys = {key for device in _exported_devices(db, tests_query) for key in (device.get("misc_data") or {})}
+    return [(_device_column(key), key) for key in sorted(keys) if _device_column(key) not in taken]
+
+
+def _has_residual_misc(db: Session, tests_query, lifted: set[str]) -> bool:
+    return any(set(device.get("misc_data") or {}) - lifted for device in _exported_devices(db, tests_query))
+
+
+def _device_projector(db: Session, format: str, pairs, lifted):
+    """Adds a test's device to its export row: flat columns for CSV, one
+    `device` object for JSON."""
+    from .devices import _export_shape
+
+    _, project = _export_shape(db, None, "all")
+    lifted_keys = {key for _, key in lifted}
+    cache: dict[str, dict] = {}
+
+    def values_of(device: Device) -> dict:
+        if device.id not in cache:
+            projected = project(device)
+            values = {key: projected.get(key) for _, key in pairs}
+            values["misc_data"] = projected.get("misc_data") or {}
+            cache[device.id] = values
+        return cache[device.id]
+
+    def add(row: dict, device: Device | None) -> dict:
+        values = values_of(device) if device is not None else {}
+        if format != "csv":
+            row["device"] = dict(values) if device is not None else None
+            return row
+        misc = values.get("misc_data") or {}
+        for column, key in pairs:
+            if key != "misc_data":
+                row.setdefault(column, values.get(key))
+        for column, key in lifted:
+            row.setdefault(column, misc.get(key))
+        residual = {key: value for key, value in misc.items() if key not in lifted_keys}
+        row["device_misc_data"] = residual or None
+        return row
+
+    return add
+
+
+def _device_export_columns_in(row: dict, configured: set[str]) -> set[str]:
+    """The columns a device-detail export added to a row, which an import of
+    it leaves alone. Such an export is the one with a `device_type` column or
+    a `device` object; a test field that shares a column's name is kept."""
+    if "device" in row and (row["device"] is None or isinstance(row["device"], dict)):
+        return {"device"}
+    if "device_type" not in row:
+        return set()
+    return {key for key in row if key.startswith("device_")} - configured - IMPORT_RELATION_FIELDS
 
 
 @router.get("/template")
@@ -557,8 +667,11 @@ async def import_tests(
             with row_scope(db):
                 if not isinstance(row, dict):
                     raise ValueError("row must be an object")
+                configured = {field.key for field in get_entity_fields(db, "tests")}
+                # An export with its devices re-imports as plain tests.
+                device_keys = _device_export_columns_in(row, configured)
+                row = {k: v for k, v in row.items() if k not in device_keys}
                 if is_csv:
-                    configured = {field.key for field in get_entity_fields(db, "tests")}
                     row = _merge_csv_extra_columns(
                         row, IMPORT_RELATION_FIELDS | configured | IMPORT_IGNORED
                     )

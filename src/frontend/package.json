@@ -1,7 +1,7 @@
 {
   "name": "testbench-frontend",
   "private": true,
-  "version": "1.14.1",
+  "version": "1.14.2",
   "license": "MIT",
   "type": "module",
   "scripts": {

@@ -25,7 +25,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.14.1`.
+`chainfirelabs/testbench` and tag `1.14.2`.
 
 | Image repository | Purpose |
 |---|---|
@@ -204,7 +204,7 @@ Keep the bucket private. TestBench writes only under the `tests/` and
 
 Each recorded test can carry one text output file, such as a run log. Use
 **Output** on a Tests row, a Device → Tests row, or a test in Software → Tested
-Devices: **View output** opens the text in a dialog rather than downloading it,
+Devices: **View output** opens the text in a dialog, with **Download output** to save it as a file,
 and users with `tests.edit` can upload, replace, or delete it there (**Add
 output** when a test has none). The file lives beside the test's artifacts:
 

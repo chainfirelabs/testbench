@@ -5,7 +5,8 @@
  * The output is read here rather than downloaded: it is a log to look at, and a
  * file save dialog for every glance would be the wrong way round. Artifacts are
  * the place for files meant to leave the browser. Editors upload, replace and
- * remove the output from the same dialog.
+ * remove the output from the same dialog. Download saves the text on show,
+ * under the output's own name, for anyone who does want the file.
  */
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client'
@@ -78,6 +79,19 @@ async function upload(event: Event) {
   }
 }
 
+/** Save the text already on show: the whole output, which is plain text and capped in size. */
+function download() {
+  if (!output.value || text.value == null) return
+  const url = URL.createObjectURL(new Blob([text.value], { type: 'text/plain;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = output.value.filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
 async function remove() {
   if (!output.value || !window.confirm(`Delete output "${output.value.filename}"?`)) return
   busy.value = true
@@ -114,13 +128,16 @@ onMounted(() => { dialog.value?.showModal(); load() })
         <p v-if="!output" class="muted">No output recorded for this test.</p>
         <p v-else-if="readError" role="alert" class="login-error">{{ readError }}</p>
         <pre v-else class="output-text">{{ text }}</pre>
-        <div v-if="canEdit" class="output-actions">
-          <label class="btn btn-mini upload-label" :class="{ disabled: busy }">
-            {{ output ? 'Replace output' : 'Upload output' }}
-            <input type="file" accept=".txt,.log,text/plain" :disabled="busy" @change="upload" />
-          </label>
-          <button v-if="output" class="btn btn-mini btn-danger" :disabled="busy" @click="remove">Delete output</button>
-          <span class="muted">ASCII text, up to {{ sizeLabel(maxBytes) }}.</span>
+        <div v-if="canEdit || (output && text != null)" class="output-actions">
+          <button v-if="output && text != null" class="btn btn-mini" :disabled="busy" @click="download">Download output</button>
+          <template v-if="canEdit">
+            <label class="btn btn-mini upload-label" :class="{ disabled: busy }">
+              {{ output ? 'Replace output' : 'Upload output' }}
+              <input type="file" accept=".txt,.log,text/plain" :disabled="busy" @change="upload" />
+            </label>
+            <button v-if="output" class="btn btn-mini btn-danger" :disabled="busy" @click="remove">Delete output</button>
+            <span class="muted">ASCII text, up to {{ sizeLabel(maxBytes) }}.</span>
+          </template>
         </div>
       </template>
       <p v-if="busy" role="status">Saving…</p>

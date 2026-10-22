@@ -1,5 +1,21 @@
 # Release notes
 
+## 1.14.2
+
+- **Export a software version's tests with their devices.** Software →
+  Tested Devices has **Export tests JSON / CSV**: every test of the version
+  you are viewing, each with its device's details (`device_*` columns in CSV,
+  a `device` object in JSON). Select devices to export only their tests.
+  Sensitive device fields such as passwords are never included. The API takes
+  `include_device=true` on `/tests/export`; rows then carry the test's `id`
+  too, so re-importing the file updates those tests rather than copying them.
+- **Ask the MCP server for every test of a software version.** New tool
+  `list_software_tests`: "show me all tests for nmap 7.94" returns each test
+  with its device's details (make, model, serial, firmware and the rest; never
+  passwords), plus pass/fail/warn totals, in chunks for large versions.
+- **Download a test's output.** The output dialog has **Download output**,
+  saving the log under its own filename, for anyone who can view it.
+
 ## 1.14.1
 
 - **Edit a test's test run.** The test edit dialog has **Test Run** (pick a

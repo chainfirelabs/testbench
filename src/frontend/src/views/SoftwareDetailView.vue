@@ -1072,6 +1072,25 @@ async function loadRemoteTestedDevices(request: RemoteTableRequest) {
   return { rows, total: res.total }
 }
 
+const testedSelected = ref<any[]>([])
+// The grid unmounts with its tab, and a new version is a new list of devices.
+watch([tab, () => software.value?.id], () => { testedSelected.value = [] })
+
+/**
+ * Every test of this version, each row carrying its device's details. A
+ * selection narrows it to the selected devices' tests, whichever component
+ * they ran against.
+ */
+function exportTestsAs(format: string) {
+  const stem = `${software.value.name} ${versionLabel(software.value)}`.replace(/\s+/g, '_')
+  const filters: Record<string, string> = { software_id: software.value.id }
+  const devices = [...new Set(testedSelected.value.map((row) => row.unique_id))]
+  if (devices.length) filters.include__device_unique_id = JSON.stringify(devices)
+  download(`/tests/export?format=${format}&include_device=true`, `${stem}-tests.${format}`, 'export', {
+    method: 'POST', body: JSON.stringify({ filters, ids: null }),
+  })
+}
+
 /* ---------------- Load ---------------- */
 
 async function load() {
@@ -1359,6 +1378,18 @@ onMounted(load)
           Inventory devices {{ software.name }} has actually been run against, summarised from
           recorded tests. Read-only — edit the underlying runs on the Tests page.
         </p>
+        <div class="toolbar">
+          <OverflowMenu>
+            <button class="btn" :disabled="downloading" title="Every test of this version, with its device's details"
+              @click="exportTestsAs('json')">
+              {{ downloading ? 'Preparing…' : testedSelected.length ? 'Export selected devices\' tests JSON' : 'Export tests JSON' }}
+            </button>
+            <button class="btn" :disabled="downloading" title="Every test of this version, with its device's details"
+              @click="exportTestsAs('csv')">
+              {{ downloading ? 'Preparing…' : testedSelected.length ? 'Export selected devices\' tests CSV' : 'Export tests CSV' }}
+            </button>
+          </OverflowMenu>
+        </div>
       </div>
       <DataTable
         ref="testedTable"
@@ -1366,6 +1397,8 @@ onMounted(load)
         :rows="testedRows"
         :remote-loader="loadRemoteTestedDevices"
         :filter-values="testedFilterValues"
+        :selectable="true"
+        @selection-change="(r: any[]) => (testedSelected = r)"
         @grid-ready="onTestedGridReady"
       >
         <template #table-actions>

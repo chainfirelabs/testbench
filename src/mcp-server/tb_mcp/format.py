@@ -153,6 +153,32 @@ def test_brief(t: dict) -> dict:
     })
 
 
+def test_with_device(t: dict) -> dict:
+    """One row of a `/tests/export?include_device=true` export.
+
+    The device's values that no field accounts for are merged into the
+    device object rather than left as a nested blob, since to the model they
+    are just more facts about the device.
+    """
+    device = dict(t.get("device") or {})
+    misc = device.pop("misc_data", None) or {}
+    device.update({key: value for key, value in misc.items() if key not in device})
+    return drop_empty({
+        "id": t.get("id"),
+        "software_version": t.get("software_version") or None,
+        "component": t.get("component_name"),
+        "component_version": t.get("component_version") or None,
+        "outcome": t.get("outcome"),
+        "tag": t.get("tag"),
+        "run_at": _date(t.get("run_at") or t.get("created_at")),
+        "test_run": t.get("test_run_name"),
+        "by": t.get("created_by_username"),
+        "notes": _preview(t.get("notes")),
+        "fields": t.get("misc_data"),
+        "device": drop_empty(device),
+    })
+
+
 def vendor_device_brief(v: dict) -> dict:
     custom = {
         key: value for key, value in (v.get("misc_data") or {}).items()

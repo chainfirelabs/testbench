@@ -25,9 +25,9 @@ def suite(api):
 
 
 def test_the_client_is_versioned_with_testbench(tb, api):
-    assert testbench_client.__version__ == "1.14.1"
+    assert testbench_client.__version__ == "1.14.2"
     tb.whoami()
-    assert api.requests[-1].headers["user-agent"] == "testbench-client/1.14.1"
+    assert api.requests[-1].headers["user-agent"] == "testbench-client/1.14.2"
 
 
 def test_a_suite_lists_its_components(tb, suite):

@@ -7,6 +7,7 @@ well. Nothing here writes — no `set_`, `record_` or `import_` tool exists yet.
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -34,6 +35,7 @@ from .format import (
     software_brief,
     software_full,
     test_brief,
+    test_with_device,
     vendor_device_brief,
 )
 from .resolve import (
@@ -606,7 +608,9 @@ async def find_tests(
     `testbench://schema` before using it.
 
     For a summary rather than individual runs, use `list_devices_tested_with` or
-    `list_software_tested_on` — they aggregate in the database instead.
+    `list_software_tested_on` — they aggregate in the database instead. For
+    every test of one software version with full device details, use
+    `list_software_tests`.
     """
     limit = clamp_limit(limit)
     client = api()
@@ -648,6 +652,65 @@ async def find_tests(
         rows = rows[:limit]
 
     return envelope([test_brief(t) for t in rows], total, **resolved)
+
+
+@server.tool()
+async def list_software_tests(
+    software: str,
+    version: str | None = None,
+    outcome: str | None = None,
+    devices: list[str] | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+) -> dict:
+    """EVERY test of one software version, each with its device's full details.
+
+    The tool for "show me all tests for nmap 7.94" or "what was nmap 7.94 tested
+    on, and how did it go". One row per test — outcome, tag, component, run
+    date, test run, notes and the installation's own test fields — with a
+    `device` object: make, model, serial, firmware and the rest of its fields
+    (passwords and other secrets are never included). It is the same data as
+    Software → Tested Devices → Export tests.
+
+    `software` is a name; `version` pins the version, otherwise the CURRENT one
+    is used — check the echoed `software` before reporting. `outcome` is pass,
+    fail or warn. `devices` narrows to some unique_ids. `summary` counts every
+    matching test, not just the rows returned. A large version comes in chunks:
+    when `next_offset` is present, call again with it to continue, and say the
+    answer is partial until you have.
+
+    Each row's `id` works with `get_test_output` and `list_test_artifacts`. For
+    per-device counts only, `list_devices_tested_with` is lighter; for tests
+    across software or within a date range, use `find_tests`.
+    """
+    limit = clamp_limit(limit)
+    offset = max(0, int(offset or 0))
+    client = api()
+    try:
+        record = await resolve_software(client, software, version)
+    except Unresolved as miss:
+        return miss.payload
+    params: dict[str, Any] = {
+        "format": "json", "include_device": "true", "software_id": record["id"],
+        "outcome": check(outcome, "test outcome", TEST_OUTCOMES),
+    }
+    if devices:
+        params["include__device_unique_id"] = json.dumps(list(devices))
+    rows = await client.get("/tests/export", params=params)
+    # The export is oldest first; a question about tests wants the newest.
+    rows.reverse()
+    summary = {
+        "tests": len(rows),
+        "devices": len({row.get("device_unique_id") for row in rows}),
+        "outcomes": _outcome_counts(rows),
+    }
+    return envelope(
+        [test_with_device(row) for row in rows[offset:offset + limit]],
+        len(rows),
+        offset,
+        software=describe_software(record),
+        summary=summary,
+    )
 
 
 def _in_window(test: dict, start: datetime | None, end: datetime | None) -> bool:

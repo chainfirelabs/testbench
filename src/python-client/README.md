@@ -25,8 +25,8 @@ pip install testbench-client   # once it is published
 
 One dependency: `httpx`. Python 3.10+.
 
-The client is versioned with TestBench: client 1.14.1 covers everything a
-1.14.1 server offers, and still works against older servers for whatever they
+The client is versioned with TestBench: client 1.14.2 covers everything a
+1.14.2 server offers, and still works against older servers for whatever they
 have.
 
 ## Authenticating

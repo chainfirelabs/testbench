@@ -35,7 +35,7 @@ images such as PostgreSQL are not built by these Dockerfiles and are unchanged.
 
 ## Build triggers and tags
 
-Default-branch pushes publish the chart's `appVersion` (currently `1.14.1`),
+Default-branch pushes publish the chart's `appVersion` (currently `1.14.2`),
 `latest`, and `sha-<full-commit-SHA>` tags. Rebuilding the same product version
 updates its version tag; use a digest or SHA tag to pin an exact build.
 Pushing a version tag such as `v1.7.3` publishes `1.7.3` and the SHA tag.
@@ -43,7 +43,7 @@ Prerelease tags such as `v1.6.8-rc.1` are supported. Version-tag builds do not
 change `latest`. GitLab pushes to `feature/*` publish
 the chart's `appVersion` and `sha-<full-commit-SHA>` tags. A feature build updates
 the same GitLab registry version tag as a default-branch or release build, so
-the most recent push of each image determines what `1.14.1` points to there.
+the most recent push of each image determines what `1.14.2` points to there.
 Feature builds do not update `latest`. The SHA tag identifies an exact build.
 GitHub continues to publish only its default branch and version tags. Builds
 use the runner's native architecture (GitHub's configured runner is Linux
@@ -69,12 +69,12 @@ See [GitHub's publishing documentation](https://docs.github.com/en/actions/tutor
 Enable the project's container registry. The pipeline publishes to
 `$CI_REGISTRY_IMAGE/<component>` using GitLab's built-in registry credentials.
 For example, a successful pipeline for `feature/dashboard-widgets-plan` makes
-`$CI_REGISTRY_IMAGE/frontend:1.14.1` available when the chart's `appVersion` is
-`1.14.1`.
+`$CI_REGISTRY_IMAGE/frontend:1.14.2` available when the chart's `appVersion` is
+`1.14.2`.
 Use the pipeline's commit SHA tag when you need to reproduce a particular build.
 To pull a private image locally, authenticate to `$CI_REGISTRY` with a GitLab
 account or token that has `read_registry`, then run
-`docker pull "$CI_REGISTRY_IMAGE/frontend:1.14.1"`
+`docker pull "$CI_REGISTRY_IMAGE/frontend:1.14.2"`
 with the actual registry image path from the GitLab project. Protected CI/CD
 variables are unavailable to unprotected feature branches; configure any
 required runner or mirror variables accordingly.
@@ -218,7 +218,7 @@ The chart defaults to GHCR: `global.imageRegistry: ghcr.io` with repositories
 such as `chainfirelabs/testbench/backend` and `chainfirelabs/testbench/frontend`.
 These match GitHub workflow publications from the `chainfirelabs/testbench`
 repository. For a different GitHub owner/project, update the component repository
-paths accordingly. The default tag is `1.14.1`; publish Git tag `v1.14.1` to produce
+paths accordingly. The default tag is `1.14.2`; publish Git tag `v1.14.2` to produce
 that image tag, or override the chart tags to another published version.
 
 GitLab defaults to its project registry. Override `global.imageRegistry` and,
@@ -260,6 +260,6 @@ passes the release version through Docker's `VERSION` build argument, which the
 frontend build exposes as `VITE_APP_VERSION`. The same value labels the image;
 changing a Helm image tag does not rewrite a previously built frontend.
 
-For a direct image build, pass `--build-arg VERSION=1.14.1`. For a local frontend
-build or dev server, set `VITE_APP_VERSION=1.14.1` when running `npm run build` or
+For a direct image build, pass `--build-arg VERSION=1.14.2`. For a local frontend
+build or dev server, set `VITE_APP_VERSION=1.14.2` when running `npm run build` or
 `npm run dev` in `src/frontend`. Without a version, the label is `TestBench dev`.
