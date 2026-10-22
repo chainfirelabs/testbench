@@ -1,5 +1,19 @@
 # Release notes
 
+## 1.14.1
+
+- **Edit a test's test run.** The test edit dialog has **Test Run** (pick a
+  run, type a new name to start one, or clear it to take the test out) and
+  **Test Run Files**. Bulk edit can move the selected tests into a run, or out
+  of their runs.
+- **Fixed: changing a test's component in the edit dialog did nothing.** It
+  was two free-text boxes the API ignored; it is now a choice over the test's
+  software components. Bulk edit no longer offers it, since selected tests can
+  be of different software.
+- **Edit a user's email.** **Change role** on Users is now **Edit user**: the
+  email of any local account, including your own, and the role of others. SSO
+  accounts take both from Authentik.
+
 ## 1.14.0
 
 - **Test runs.** A test run is one execution of a pipeline or suite: the tests

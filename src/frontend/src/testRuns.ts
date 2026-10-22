@@ -83,12 +83,20 @@ export function matchRun<T extends RunChoice>(name: string | null | undefined, r
 export function newTestRunFields(
   runs: RunChoice[],
   values: Record<string, any>,
-  options: { fixedRun?: RunChoice | null; storageEnabled: boolean; maxBytes?: number; noStorage: string },
+  options: {
+    fixedRun?: RunChoice | null
+    /** Editing a test: the run it is in now, so clearing the field says what it does. */
+    currentName?: string | null
+    storageEnabled: boolean
+    maxBytes?: number
+    noStorage: string
+  },
 ): FormField[] {
   const typed = String(values[TEST_RUN_FIELD] ?? '').trim()
   const match = options.fixedRun ?? matchRun(typed, runs)
   let hint = 'Optional. Pick a test run, or type a new name to start one.'
   if (options.fixedRun) hint = 'Recorded in this test run.'
+  else if (!typed && options.currentName) hint = `Blank takes the test out of "${options.currentName}". Its files stay where they are.`
   else if (match) hint = `Joins the run started ${runTimeLabel(match.started_at || match.created_at)}.`
   else if (typed) hint = `A new test run named "${typed}" will be started.`
   const names = [...new Set(runs.map((run) => run.name))]

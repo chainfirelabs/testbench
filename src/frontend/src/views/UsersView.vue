@@ -227,9 +227,21 @@ const NEW_USER_FIELDS = computed<FormField[]>(() => [
   { key: 'email', label: 'Email', placeholder: 'Optional' },
 ])
 
-const ROLE_FIELDS = computed<FormField[]>(() => [
-  { key: 'role', label: 'Role', type: 'select', required: true, options: roleOptions.value, hint: ROLE_HINT.value },
-])
+/*
+ * Editing a local account: its email, and its role unless it is your own
+ * (demoting yourself would lock you out of this page). An SSO account has
+ * neither to edit: both come from Authentik at every login.
+ */
+const ROLE_FIELDS = computed<FormField[]>(() => {
+  const self = roleTarget.value?.id === auth.user?.id
+  return [
+    { key: 'email', label: 'Email', placeholder: 'Optional' },
+    {
+      key: 'role', label: 'Role', type: 'select', required: !self, disabled: self, options: roleOptions.value,
+      hint: self ? 'You cannot change your own role.' : ROLE_HINT.value,
+    },
+  ]
+})
 
 /**
  * What is wrong with the password just typed, or '' if nothing is.
@@ -305,14 +317,20 @@ async function submitReset(values: Record<string, any>) {
 }
 
 function openRole(row: any) {
-  roleValues.value = { role: row.role }
+  roleValues.value = { email: row.email || '', role: row.role }
   roleTarget.value = row
 }
 
 async function submitRole(values: Record<string, any>) {
   const target = roleTarget.value
   if (!target) return
-  if (values.role === target.role) {
+  // Only what changed: a role sent unchanged would still be checked against
+  // the rules for changing one.
+  const changes: Record<string, any> = {}
+  const email = String(values.email ?? '').trim() || null
+  if (email !== (target.email || null)) changes.email = email
+  if (values.role && values.role !== target.role) changes.role = values.role
+  if (!Object.keys(changes).length) {
     roleTarget.value = null
     return
   }
@@ -320,10 +338,10 @@ async function submitRole(values: Record<string, any>) {
   try {
     const updated = await api<any>(`/users/${target.id}`, {
       method: 'PATCH',
-      body: JSON.stringify({ role: values.role }),
+      body: JSON.stringify(changes),
     })
     roleTarget.value = null
-    showToast(`${updated.username} is now ${updated.role}`)
+    showToast(changes.role ? `${updated.username} is now ${updated.role}` : `${updated.username} saved`)
     // The role is on screen, so the grid has to be told; reloading is what
     // makes the cell repaint.
     await load()
@@ -359,12 +377,12 @@ function extraActions(row: any): RowAction[] {
       onClick: () => openReset(row),
     })
   }
-  if (isLocal && !isSelf) {
-    // Local only: an SSO user's role is re-resolved from their Authentik
-    // groups at every login, so an edit here would not survive the next one.
+  if (isLocal) {
+    // Local only: an SSO user's role and email are re-resolved from Authentik
+    // at every login, so an edit here would not survive the next one.
     actions.push({
-      label: 'Change role',
-      title: `Change ${row.username}'s role`,
+      label: 'Edit user',
+      title: isSelf ? 'Edit your email' : `Edit ${row.username}'s email and role`,
       icon: SHIELD_ICON,
       onClick: () => openRole(row),
     })
@@ -499,11 +517,11 @@ onMounted(() => {
     />
     <FormModal
       v-if="roleTarget"
-      :title="`Change Role — ${roleTarget.username}`"
+      :title="`Edit User — ${roleTarget.username}`"
       :fields="ROLE_FIELDS"
       :values="roleValues"
       :busy="savingRole"
-      submit-label="Save role"
+      submit-label="Save changes"
       @submit="submitRole"
       @cancel="roleTarget = null"
     />

@@ -289,16 +289,42 @@ const NEW_TEST_FORM = computed<FormField[]>(() => [
 /** Read the runs on offer; a failure leaves the field free text, still able to start a run. */
 async function loadRunChoices() {
   try {
-    if (props.testRunId) {
-      fixedRun.value = await api<any>(`/test-runs/${encodeURIComponent(props.testRunId)}`)
-      runChoices.value = [fixedRun.value]
-    } else {
-      runChoices.value = (await api<{ items: any[] }>('/test-runs?page_size=1000&sort=created_at&order=desc')).items
-    }
+    runChoices.value = (await api<{ items: any[] }>('/test-runs?page_size=1000&sort=created_at&order=desc')).items
   } catch {
     runChoices.value = []
   }
+  if (props.testRunId) {
+    fixedRun.value = runChoices.value.find((run) => run.id === props.testRunId)
+      ?? await api<any>(`/test-runs/${encodeURIComponent(props.testRunId)}`).catch(() => ({ id: props.testRunId, name: '' }))
+  }
 }
+
+/**
+ * The run a dialog's Test Run field names: `keep` when it still names the run
+ * the test is in (two runs can share a name), an existing run, or a new one
+ * started under that name. Null when blank. `started` is set to a run this
+ * call created, for the caller to remove if what it was for is refused.
+ */
+async function resolveRunId(typed: any, keep?: { id: string; name: string } | null): Promise<{ id: string | null; started: string | null }> {
+  const name = String(typed ?? '').trim()
+  if (!name) return { id: null, started: null }
+  if (keep?.id && keep.name.trim().toLowerCase() === name.toLowerCase()) return { id: keep.id, started: null }
+  const match = matchRun(name, runChoices.value)
+  if (match) return { id: match.id, started: null }
+  const run = await api<any>('/test-runs', { method: 'POST', body: JSON.stringify({ name }) })
+  return { id: run.id, started: run.id }
+}
+
+/** The edit dialog: the schema's fields, then the test run and files to share with it. */
+const EDIT_TEST_FORM = computed<FormField[]>(() => [
+  ...EDIT_TEST_FIELDS.value,
+  ...newTestRunFields(runChoices.value, editValues.value, {
+    currentName: editTarget.value?.test_run_name,
+    storageEnabled: !!fileStorage.value?.storage_enabled,
+    maxBytes: fileStorage.value?.artifact_max_bytes,
+    noStorage: NO_STORAGE,
+  }),
+])
 
 /*
  * Opening the dialog has to fetch the fleet first, which is not instant and
@@ -640,40 +666,101 @@ const BASE_EDIT_TEST_FIELDS = computed<FormField[]>(() => [
   { key: 'misc_data', label: 'Misc data (JSON)', type: 'json', placeholder: '{}' },
 ])
 
-const EDIT_TEST_FIELDS = computed<FormField[]>(() => testFields.value
-  .filter((field) => field.writable && !['device_unique_id', 'software_name'].includes(field.key))
-  .map((field) => {
-    const builtIn = BASE_EDIT_TEST_FIELDS.value.find((item) => item.key === field.key)
-    return builtIn ? { ...builtIn, label: field.label } : customFormField(field)
-  }))
+/*
+ * The component is picked, not typed: the API takes a component of the test's
+ * software by id, so the name and version fields the grid shows are replaced
+ * by one choice over that software's components. Software without components
+ * has nothing to pick, and offers no field.
+ */
+const COMPONENT_KEYS = ['component_name', 'component_version']
+const editComponents = ref<any[]>([])
 
-function openEdit(row: any) {
+const EDIT_TEST_FIELDS = computed<FormField[]>(() => {
+  const fields = testFields.value
+    .filter((field) => field.writable && !['device_unique_id', 'software_name', ...COMPONENT_KEYS].includes(field.key))
+    .map((field) => {
+      const builtIn = BASE_EDIT_TEST_FIELDS.value.find((item) => item.key === field.key)
+      return builtIn ? { ...builtIn, label: field.label } : customFormField(field)
+    })
+  const offered = testFields.value.some((field) => field.key === 'component_name' && field.writable)
+  if (offered && editComponents.value.length) {
+    const label = testFields.value.find((field) => field.key === 'component_name')?.label || 'Component'
+    const at = fields.findIndex((field) => field.key === 'software_version') + 1
+    fields.splice(at, 0, {
+      key: 'component_id', label, type: 'select',
+      options: editComponents.value.map((item: any) => ({ value: item.id, label: item.version ? `${item.name} ${item.version}` : item.name })),
+      hint: 'Optional. The component of this software suite the run tested.',
+    })
+  }
+  return fields
+})
+
+async function openEdit(row: any) {
+  editComponents.value = []
+  await Promise.all([
+    loadRunChoices(),
+    api<any>(`/software/${encodeURIComponent(row.software_id)}`)
+      .then((item) => (editComponents.value = item.bundle_components || []))
+      .catch(() => null),
+    fileStorage.value ? null : api<TestFileStorage>('/tests/file-storage').then((s) => (fileStorage.value = s)).catch(() => null),
+  ])
   // Read from the row, so unsaved cell edits carry into the dialog rather
   // than being silently reverted by it.
-  editValues.value = Object.fromEntries(EDIT_TEST_FIELDS.value.map((item) => {
-    const field = testFields.value.find((candidate) => candidate.key === item.key)!
-    const value = dataValue(row, field, 'misc_data')
-    return [item.key, item.type === 'json' ? JSON.stringify(value || {}, null, 2) : value ?? '']
-  }))
+  editValues.value = {
+    ...Object.fromEntries(EDIT_TEST_FIELDS.value.filter((item) => item.key !== 'component_id').map((item) => {
+      const field = testFields.value.find((candidate) => candidate.key === item.key)!
+      const value = dataValue(row, field, 'misc_data')
+      return [item.key, item.type === 'json' ? JSON.stringify(value || {}, null, 2) : value ?? '']
+    })),
+    ...(editComponents.value.length ? { component_id: row.component_id || '' } : {}),
+    [TEST_RUN_FIELD]: row.test_run_name || '',
+    [TEST_RUN_FILES_FIELD]: [],
+  }
   editTarget.value = row
 }
 
 async function saveEdit(values: Record<string, any>) {
   const row = editTarget.value
   if (!row) return
+  const { [TEST_RUN_FIELD]: typedRun, [TEST_RUN_FILES_FIELD]: runFiles = [], component_id: componentId, ...fields } = values
+  // Sent only when it changed; '' is "(none)".
+  const component = componentId === undefined || (componentId || null) === (row.component_id || null)
+    ? {} : { component_id: componentId || null }
   savingEdit.value = true
+  let startedRun: string | null = null
   try {
-    const updated = await api<any>(`/tests/${row.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(mergeCustomValues(
-        { misc_data: row.misc_data || {}, ...values }, testFields.value, 'misc_data',
-      )),
-    })
+    const current = row.test_run_id ? { id: row.test_run_id, name: row.test_run_name || '' } : null
+    const resolved = await resolveRunId(typedRun, current)
+    startedRun = resolved.started
+    const runId = resolved.id
+    const moved = runId !== (row.test_run_id ?? null)
+    let updated: any
+    try {
+      updated = await api<any>(`/tests/${row.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ...mergeCustomValues({ misc_data: row.misc_data || {}, ...fields }, testFields.value, 'misc_data'),
+          ...component,
+          ...(moved ? { test_run_id: runId } : {}),
+        }),
+      })
+    } catch (e) {
+      if (startedRun) await api(`/test-runs/${encodeURIComponent(startedRun)}`, { method: 'DELETE' }).catch(() => {})
+      throw e
+    }
+    const failed = runId ? await uploadRunFiles(runId, runFiles) : []
     Object.assign(row, updated)
     // The dialog wrote every field, so nothing is left pending on the row.
     dirty.value.delete(row.id)
     editTarget.value = null
-    showToast('Test saved')
+    if (moved || runFiles.length) {
+      // On a run's page a test moved out leaves the list, and the run's
+      // counts and files change; elsewhere the shared-file count does.
+      await reloadRows()
+      emit('changed')
+    }
+    if (failed.length) showToast(`Test saved, but ${failed.join('; ')}`, true)
+    else showToast('Test saved')
   } catch (e: any) {
     showToast(e.message, true)
   } finally {
@@ -739,15 +826,29 @@ async function deleteSelected() {
   }
 }
 
-const BULK_TEST_FIELDS = computed<FormField[]>(() => testFields.value
-  .filter((field) => field.visible && field.writable
-    && !['device_unique_id', 'software_name'].includes(field.key))
-  .map((field) => {
-    const builtIn = BASE_EDIT_TEST_FIELDS.value.find((item) => item.key === field.key)
-    const form = builtIn ? { ...builtIn, label: field.label } : customFormField(field)
-    form.required = false
-    return form
-  }))
+/*
+ * No component: the selected tests can be of different software, each with
+ * its own components. The test run is offered instead, to move the selection
+ * into one run together, or (blank) out of their runs.
+ */
+const BULK_TEST_FIELDS = computed<FormField[]>(() => [
+  ...testFields.value
+    .filter((field) => field.visible && field.writable
+      && !['device_unique_id', 'software_name', ...COMPONENT_KEYS].includes(field.key))
+    .map((field) => {
+      const builtIn = BASE_EDIT_TEST_FIELDS.value.find((item) => item.key === field.key)
+      const form = builtIn ? { ...builtIn, label: field.label } : customFormField(field)
+      form.required = false
+      return form
+    }),
+  bulkRunField(),
+])
+
+function bulkRunField(): FormField {
+  const [field] = newTestRunFields(runChoices.value, bulkEditValues.value, { storageEnabled: false, noStorage: '' })
+  const typed = String(bulkEditValues.value[TEST_RUN_FIELD] ?? '').trim()
+  return typed ? field : { ...field, hint: 'Blank takes the selected tests out of their test runs.' }
+}
 
 function sharedTestValue(fieldKey: string, type?: FormField['type']): any {
   const field = testFields.value.find((candidate) => candidate.key === fieldKey)!
@@ -757,7 +858,8 @@ function sharedTestValue(fieldKey: string, type?: FormField['type']): any {
   return type === 'json' ? JSON.stringify(shared || {}, null, 2) : shared ?? ''
 }
 
-function openBulkEdit() {
+async function openBulkEdit() {
+  await loadRunChoices()
   bulkEditValues.value = Object.fromEntries(BULK_TEST_FIELDS.value.map((field) => [
     field.key, sharedTestValue(field.key, field.type),
   ]))
@@ -768,13 +870,26 @@ async function saveBulkEdit(values: Record<string, any>) {
   savingBulkEdit.value = true
   let updated = 0
   const errors: string[] = []
+  // Checked fields only arrive; the run, when checked, is resolved once for all.
+  const { [TEST_RUN_FIELD]: typedRun, ...fields } = values
+  let run: Record<string, any> = {}
+  if (TEST_RUN_FIELD in values) {
+    try {
+      run = { test_run_id: (await resolveRunId(typedRun)).id }
+    } catch (e: any) {
+      savingBulkEdit.value = false
+      showToast(e.message, true)
+      return
+    }
+  }
   for (const row of selected.value) {
     try {
       const result = await api<any>(`/tests/${row.id}`, {
         method: 'PATCH',
-        body: JSON.stringify(mergeCustomValues(
-          { misc_data: row.misc_data || {}, ...values }, testFields.value, 'misc_data',
-        )),
+        body: JSON.stringify({
+          ...mergeCustomValues({ misc_data: row.misc_data || {}, ...fields }, testFields.value, 'misc_data'),
+          ...run,
+        }),
       })
       Object.assign(row, result)
       dirty.value.delete(row.id)
@@ -784,6 +899,10 @@ async function saveBulkEdit(values: Record<string, any>) {
     }
   }
   table.value?.refreshRows(selected.value.map((row) => row.id))
+  if (TEST_RUN_FIELD in values) {
+    await reloadRows()
+    emit('changed')
+  }
   savingBulkEdit.value = false
   if (errors.length) {
     showToast(`Updated ${updated}; ${errors.length} failed — ${errors.slice(0, 3).join('; ')}`, true)
@@ -825,11 +944,8 @@ async function saveNewTest(values: Record<string, any>) {
   // A run started for this test, removed again if the test is refused.
   let startedRun: string | null = null
   try {
-    let runId: string | null = props.testRunId || matchRun(values[TEST_RUN_FIELD], runChoices.value)?.id || null
-    const runName = String(values[TEST_RUN_FIELD] ?? '').trim()
-    if (!runId && runName) {
-      runId = startedRun = (await api<any>('/test-runs', { method: 'POST', body: JSON.stringify({ name: runName }) })).id
-    }
+    let runId: string | null = props.testRunId || null
+    if (!runId) ({ id: runId, started: startedRun } = await resolveRunId(values[TEST_RUN_FIELD]))
     let created: any
     try {
       created = await api<any>('/tests', { method: 'POST', body: JSON.stringify({ ...payload, test_run_id: runId }) })
@@ -1029,7 +1145,7 @@ onMounted(loadFields)
     <FormModal
       v-if="editTarget"
       :title="`Edit Test — ${editTarget.device_unique_id} / ${editTarget.software_name}`"
-      :fields="EDIT_TEST_FIELDS"
+      :fields="EDIT_TEST_FORM"
       :values="editValues"
       :busy="savingEdit"
       submit-label="Save changes"

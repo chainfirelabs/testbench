@@ -52,3 +52,10 @@ test('on a run page the run is fixed and its files can be added', async () => {
   assert.equal(run.disabled, true)
   assert.equal(files.disabled({}), false)
 })
+
+test('editing a test says that clearing its run takes it out', async () => {
+  const { newTestRunFields } = await import('../src/testRuns.ts')
+  const opts = { currentName: 'Nightly', storageEnabled: true, noStorage: '' }
+  assert.match(newTestRunFields([], { test_run_name: '' }, opts)[0].hint, /^Blank takes the test out of "Nightly"/)
+  assert.match(newTestRunFields([{ id: 'r', name: 'Nightly' }], { test_run_name: 'Nightly' }, opts)[0].hint, /^Joins/)
+})
