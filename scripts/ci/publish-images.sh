@@ -70,7 +70,7 @@ export BUILDX_NO_DEFAULT_ATTESTATIONS=1
 tb_setup_builder
 
 # Build every image before publishing any of them.
-for component in backend frontend mcp network-scan device-info reboot replication; do
+for component in backend frontend mcp network-scan device-info reboot test-summary replication; do
   case "$component" in
     backend|frontend) context="src/$component" ;;
     mcp) context=src/mcp-server ;;
@@ -95,7 +95,7 @@ for component in backend frontend mcp network-scan device-info reboot replicatio
     --label "org.opencontainers.image.revision=$commit" \
     --tag "$prefix/$component:sha-$commit" "$repo_root/$context"
 done
-for component in backend frontend mcp network-scan device-info reboot replication; do
+for component in backend frontend mcp network-scan device-info reboot test-summary replication; do
   image="$prefix/$component"
   docker push "$image:sha-$commit"
   docker tag "$image:sha-$commit" "$image:$version"

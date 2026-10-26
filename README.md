@@ -25,7 +25,7 @@ compatibility, and testing history into one web app.
 ## Images
 
 The chart defaults to registry `ghcr.io`, with TestBench images under
-`chainfirelabs/testbench` and tag `1.14.2`.
+`chainfirelabs/testbench` and tag `1.15.0`.
 
 | Image repository | Purpose |
 |---|---|
@@ -35,6 +35,7 @@ The chart defaults to registry `ghcr.io`, with TestBench images under
 | `chainfirelabs/testbench/network-scan` | Network Scan plugin controller and scan workers. |
 | `chainfirelabs/testbench/device-info` | Device Info plugin controller, which starts device discovery jobs. |
 | `chainfirelabs/testbench/reboot` | Reboot plugin controller and SSH reboot workers. |
+| `chainfirelabs/testbench/test-summary` | AI Test Summary plugin, which writes AI reports on test runs. |
 | `oh-my-pi` | Separate browser-agent image used by Device Info and browser-based reboot jobs. Defaults to tag `latest`; configure a compatible image available in your registry. |
 
 Set `global.imageRegistry` to change the default registry for images. Repositories
@@ -51,9 +52,9 @@ override `global.imageRegistry`. Omit it to inherit the global default, or set
 
 ## Plugins
 
-Plugins add optional actions to the device inventory. All three are disabled by
-default. Enable a plugin in Helm, then allow it for the relevant device types in
-**Schema → Plugins**. Device fields use semantic roles, such as
+Plugins add optional actions to the device inventory and to test runs. All of
+them are disabled by default. Enable a plugin in Helm; device plugins must then
+be allowed for the relevant device types in **Schema → Plugins**. Device fields use semantic roles, such as
 `scan_address_lan` or `device_vendor`, so plugins can work with your own column names.
 
 | Plugin | What it does | Helm switch |
@@ -61,6 +62,7 @@ default. Enable a plugin in Helm, then allow it for the relevant device types in
 | Network Scan | Checks device reachability through individual scans, Scan all, or scheduled scans. | `plugins.networkScan.enabled: true` |
 | Device Info | Uses a browser agent to identify hardware, firmware, and MAC details on eligible online devices. Confirms before starting the agent and saves successful discovery steps for reuse. | `plugins.deviceInfo.enabled: true` |
 | Reboot | Restarts eligible online devices and checks that they return online. Uses per-type SSH or AI browser settings with global defaults. | `plugins.reboot.enabled: true` |
+| AI Test Summary | Adds **Summarize with AI** to every test run: an AI-written report on the run's devices, results, outputs and files, saved to the run's shared files. Global; not enabled per device type. | `plugins.testSummary.enabled: true` |
 
 Device Info and Reboot use per-device credentials. Browser-agent actions require
 an AI endpoint and model from either Helm or the admin GUI; Helm-managed AI also
@@ -88,6 +90,31 @@ Reboot streams the selected SSH or browser-agent workflow and verifies that the
 device returns online.
 
 ![Completed browser-assisted device reboot output](screenshots/testbench_reboot.png)
+
+### AI Test Summary
+
+**Summarize with AI** on a test run's page sends the whole run to an AI model:
+every test with all of its fields, notes and output, each tested device (across
+every device type in the run, without sensitive fields), and the text of the
+run's shared files and each test's artifacts. Binary files are listed by name,
+type and size. Text that looks like a credential (passwords, tokens,
+authorization headers, private keys, credentials in URLs) is removed first.
+
+The plugin computes the result tables itself (outcomes, and results by device,
+software, component and tag), so the numbers are always exact; the model writes
+the summary, failures and warnings, device and software differences, notable
+artifacts and recommended follow-ups. Large runs are read in parts, failures
+first, and combined.
+
+Each report is saved as a new `ai-summary-<UTC time>.md` file in the run's
+shared files, so every version is kept; earlier reports are not fed back into
+new ones. Saving needs object storage; without it the report is shown but not
+kept. Anyone who can record tests (testers and admins) can run it.
+
+Choose the provider and model under **AI Providers** (AI Test Summary), or set
+`plugins.testSummary.ai.url` and `model` to manage them from Helm. Replace the
+default instructions with `plugins.testSummary.prompt`; rules that keep the
+model to the run's data are always added.
 
 ## Install with Helm
 
@@ -398,8 +425,9 @@ plugin assignments; it never changes or deletes existing configuration.
 ### Plugin settings
 
 All plugins require `plugins.sharedSecret.existingSecret`; its key defaults to
-`shared-secret`. Each plugin has image settings and `maxConcurrentPods` (default
-`5`) to limit how many of its jobs run at once.
+`shared-secret`. Each plugin has image settings. The device plugins have
+`maxConcurrentPods` (default `5`) to limit how many of their jobs run at once;
+AI Test Summary runs no jobs and uses `maxConcurrentRuns` instead.
 
 | Values under `plugins.` | Default / options |
 |---|---|
@@ -416,6 +444,11 @@ All plugins require `plugins.sharedSecret.existingSecret`; its key defaults to
 | `reboot.sshCommand` | `reboot`; global nonempty SSH command. Type, ordered-rule, and device `ssh_command` settings override it; null/omitted inherits. |
 | `reboot.sshPort` | `22`; global SSH port. Type, ordered-rule, and device `ssh_port` settings use the same override precedence. |
 | `reboot.recoveryTimeoutSeconds` | `300`; time allowed for a device to return online. |
+| `testSummary.ai.url` / `model` / `existingSecret` | Optional OpenAI-compatible endpoint, model and API-key Secret (release namespace, key `ai.apiKeySecretKey`, default `OPENAI_API_KEY`). Setting URL and model locks the AI settings to Helm; leave both empty to choose on the AI Providers page. |
+| `testSummary.prompt` | Empty uses the built-in report instructions. Rules keeping the model to the run's data, and the exact result tables, are always added. |
+| `testSummary.maxConcurrentRuns` | `3`; reports written at once. |
+| `testSummary.maxInputChars` / `maxAiCalls` | `100000` characters per model request / `12` requests per report. Larger runs are read in parts. |
+| `testSummary.requestTimeoutSeconds` | `300`; time allowed for one model answer. |
 
 Job settings live under `networkScan.worker`, `deviceInfo.research`, and
 `reboot.worker`. Each supports `namespace` (empty uses the release namespace),

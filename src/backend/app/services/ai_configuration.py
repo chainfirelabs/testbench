@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import AiPluginDefault, AiProviderProfile
 
-AI_PLUGINS = {"device-info-agent", "device-reboot"}
+AI_PLUGINS = {"device-info-agent", "device-reboot", "test-summary"}
 PROVIDER_TYPES = {"openai", "openai-compatible", "azure-openai", "ollama", "litellm"}
 
 

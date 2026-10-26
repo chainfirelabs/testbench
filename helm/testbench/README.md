@@ -84,8 +84,8 @@ The older `authentik.tls` setting remains available for backend-only trust;
 
 ### AI provider ownership
 
-When an enabled Device Info or Reboot plugin has both `ai.url` and `ai.model`
-set, those values and the optional `ai.repeatModel` are authoritative: the web
+When an enabled Device Info, Reboot or AI Test Summary plugin has both `ai.url`
+and `ai.model` set, those values and the optional `ai.repeatModel` are authoritative: the web
 UI displays them read-only and uses the configured Kubernetes API-key Secret.
 Leave both URL and model empty to let administrators create encrypted provider
 profiles under **AI Providers**, discover available models, select plugin
@@ -117,7 +117,7 @@ The default is `ghcr.io`. Use a host with an optional port/path,
 without an `https://` scheme; a trailing slash is accepted. Each component's
 `image.repository` (and `researchImage.repository`) is a relative path:
 for example, `chainfirelabs/testbench/backend` becomes
-`ghcr.io/chainfirelabs/testbench/backend:1.14.2`. Tags and digest overrides
+`ghcr.io/chainfirelabs/testbench/backend:1.15.0`. Tags and digest overrides
 continue to work as before.
 
 `global.imagePullPolicy` applies to all application containers, schema Jobs,
@@ -332,6 +332,16 @@ after observing an outage, and reports an explicit failure if SSH never goes
 offline within 60 seconds. Browser reboot verifies the device is reachable
 again before reporting success. The action only appears for online devices with
 a configured WAN or LAN scan-address role.
+
+Enable AI reports on test runs with `plugins.testSummary.enabled=true`. Unlike
+the device plugins it is global: once deployed, **Summarize with AI** appears on
+every test run, whatever device types the run covers, for anyone who can
+record tests. It runs no Jobs and needs no RBAC. Choose its provider and model
+under **AI Providers**, or set `plugins.testSummary.ai.url`, `ai.model` and
+`ai.existingSecret` (a Secret in the release namespace, mounted into the plugin
+only). `plugins.testSummary.prompt` replaces the built-in report instructions.
+Reports are saved to the run's shared files, so object storage must be enabled
+to keep them.
 
 Device Info uses `plugins.deviceInfo.httpPort` and `httpsPort` as its global
 web-interface ports (defaults `80` and `443`). The corresponding plugin

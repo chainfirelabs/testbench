@@ -567,6 +567,10 @@ def get_type_plugins(type_id: str, db: Session = Depends(get_db), user: User = D
         manifest = installed.get(plugin_id, {})
         row = assigned.get(plugin_id)
         actions = [action for action in manifest.get("actions", []) if action.get("entity") == "devices"]
+        if manifest and not actions and row is None:
+            # A plugin with nothing to do on devices — the AI Test Summary acts
+            # on test runs — is not something a device type enables.
+            continue
         result.append({
             "plugin_id": plugin_id,
             "label": manifest.get("label", plugin_id),

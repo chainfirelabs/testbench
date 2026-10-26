@@ -1,4 +1,5 @@
 import hmac
+import io
 import httpx
 from typing import Any
 
@@ -9,7 +10,9 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db, utcnow
-from ..models import Device, DeviceType, DeviceTypePlugin, PluginArtifact, PluginResultReceipt, PluginRun, User
+from ..models import (
+    Device, DeviceType, DeviceTypePlugin, PluginArtifact, PluginResultReceipt, PluginRun, TestRun, User,
+)
 from ..services.audit import field_diff, log_action
 from ..services.device_schema import (
     PluginPolicyError,
@@ -25,11 +28,26 @@ from ..services.device_schema import (
 from ..services.plugin_configuration import resolve_plugin_configuration, validate_plugin_configuration
 from ..services.ai_configuration import resolve_ai_configuration, validate_ai_profile_references
 from ..services.plugin_host import registry
+from ..services.test_run_report import build_report
 from .deps import get_current_user, require_plugins_manage, require_devices_edit
-from ..services.permissions import caller_permissions, satisfies_role
+from .test_runs import add_run_file, get_run
+from ..services.permissions import DEVICES_EDIT, TESTS_EDIT, caller_permissions, satisfies_role
 
 router = APIRouter(prefix="/plugins", tags=["plugins"])
 host_router = APIRouter(prefix="/plugin-host", tags=["plugin-host"])
+
+TEST_SUMMARY_PLUGIN = "test-summary"
+# What a caller needs to run a plugin action on each kind of thing. Devices are
+# further limited per device type; a test run belongs to no device type — one
+# run can cover several — so a test-run action is available on every run.
+ENTITY_PERMISSIONS = {
+    "devices": (DEVICES_EDIT, "Permission to edit devices is required"),
+    "test_runs": (TESTS_EDIT, "Permission to record tests is required"),
+}
+
+
+def _manifest_action(manifest: dict | None, action_id: str) -> dict | None:
+    return next((item for item in (manifest or {}).get("actions", []) if item.get("id") == action_id), None)
 
 
 class InvokeIn(BaseModel):
@@ -127,6 +145,9 @@ def list_actions(
     result = []
     for manifest in registry.manifests():
         plugin_id = manifest["id"]
+        if entity != "devices":
+            result.extend(_entity_actions(db, manifest, entity, caller_permissions(db, user)))
+            continue
         enabled_for = sorted(key for key, allowed in allowed_by_type.items() if plugin_id in allowed)
         if device_type is not None and device_type not in enabled_for:
             continue
@@ -158,6 +179,27 @@ def list_actions(
             elif scoped_types and len(reasons_by_type) == len(scoped_types):
                 contributed["unavailable_reason"] = "; ".join(sorted(set(reasons_by_type.values())))
             result.append(contributed)
+    return result
+
+
+def _entity_actions(db: Session, manifest: dict, entity: str, held: frozenset[str]) -> list[dict]:
+    """A plugin's actions on something other than devices, such as test runs.
+
+    No device-type allowlist applies: a deployed plugin's action is offered on
+    every one, to whoever holds the permission that kind of thing needs.
+    """
+    permission, refusal = ENTITY_PERMISSIONS.get(entity, (None, None))
+    result = []
+    for action in manifest.get("actions", []):
+        if action.get("entity") != entity:
+            continue
+        contributed = {**action, "plugin_id": manifest["id"], "risk": action.get("risk", "normal"),
+                       "device_types": []}
+        if permission is None or permission not in held:
+            contributed["unavailable_reason"] = refusal or "this action is not available"
+        elif action.get("required_user_role") and not satisfies_role(db, held, action["required_user_role"]):
+            contributed["unavailable_reason"] = f"{action['required_user_role']} permission is required"
+        result.append(contributed)
     return result
 
 
@@ -193,7 +235,7 @@ def invoke_action(
     body: InvokeIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_devices_edit),
+    user: User = Depends(get_current_user),
 ):
     """Run one plugin action, after re-deciding whether it is allowed to run.
 
@@ -202,8 +244,20 @@ def invoke_action(
     action safe. A direct request to reboot a phone is refused here even though
     no interface would ever have sent it.
     """
-    ids = [i for i in ([body.entity_id] if body.entity_id else body.entity_ids) if i]
+    if body.entity not in ENTITY_PERMISSIONS:
+        raise HTTPException(status_code=422, detail=f"Plugins cannot act on '{body.entity}'")
     manifest = registry.manifest(plugin_id)
+    declared = _manifest_action(manifest, action_id)
+    if declared is not None and declared.get("entity", "devices") != body.entity:
+        raise HTTPException(status_code=422, detail=f"This action does not act on {body.entity}")
+    if body.entity == "test_runs":
+        # Device actions are authorised by validate_plugin_invocation below,
+        # per device type; a test run has only the permission to check.
+        permission, refusal = ENTITY_PERMISSIONS["test_runs"]
+        if permission not in caller_permissions(db, user):
+            raise HTTPException(status_code=403, detail=refusal)
+        return _invoke_on_test_run(db, user, request, plugin_id, action_id, manifest, declared, body)
+    ids = [i for i in ([body.entity_id] if body.entity_id else body.entity_ids) if i]
     scope = next(
         (a.get("scope") for a in (manifest or {}).get("actions", []) if a.get("id") == action_id),
         None,
@@ -272,6 +326,45 @@ def invoke_action(
     log_action(db, user, "plugin.action.invoke", body.entity, body.entity_id, {
         "plugin_id": plugin_id, "action_id": action_id, "run_id": result.get("run_id"),
         "devices": [device.unique_id for device in eligible[:50]], "count": len(eligible),
+    }, request)
+    db.commit()
+    return result
+
+
+def _invoke_on_test_run(db: Session, user: User, request: Request, plugin_id: str, action_id: str,
+                        manifest: dict | None, action: dict | None, body: InvokeIn) -> dict:
+    """Run a test-run action: one run, sent by id; the plugin reads it back."""
+    if manifest is None:
+        raise HTTPException(status_code=409, detail=f"Plugin '{plugin_id}' is not installed or is unhealthy")
+    if action is None:
+        raise HTTPException(status_code=404, detail="Plugin action not found")
+    required = action.get("required_user_role")
+    if required and not satisfies_role(db, caller_permissions(db, user), required):
+        raise HTTPException(status_code=403, detail=f"{required} permission is required")
+    run = db.get(TestRun, body.entity_id) if body.entity_id else None
+    if run is None:
+        raise HTTPException(status_code=404, detail="Test run not found")
+    entity = {"type": "test_run", "id": run.id, "name": run.name}
+    if "ai_configuration" in manifest:
+        try:
+            entity["_ai_configuration"] = resolve_ai_configuration(db, plugin_id, {}, manifest)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    payload = {
+        "action_id": action_id,
+        "actor": {"id": user.id, "username": user.username, "role": user.role},
+        "entities": [entity],
+    }
+    try:
+        result = registry.request(plugin_id, "POST", f"/plugin/v1/actions/{action_id}/invoke", payload)
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.json().get("detail") if exc.response.content else None
+        raise HTTPException(status_code=502, detail=f"Plugin invocation failed: {detail or exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Plugin invocation failed: {exc}") from exc
+    _save_run(db, plugin_id, {**result, "action_id": action_id, "entity_ids": [run.id]})
+    log_action(db, user, "plugin.action.invoke", "test_run", run.id, {
+        "plugin_id": plugin_id, "action_id": action_id, "run_id": result.get("run_id"),
     }, request)
     db.commit()
     return result
@@ -442,7 +535,13 @@ def run_status(plugin_id: str, run_id: str, db: Session = Depends(get_db), user:
 
 
 @router.delete("/{plugin_id}/runs/{run_id}")
-def cancel_run(plugin_id: str, run_id: str, db: Session = Depends(get_db), user: User = Depends(require_devices_edit)):
+def cancel_run(plugin_id: str, run_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    # Stopping a run takes the permission starting it did.
+    stored = _stored_run(db, plugin_id, run_id)
+    action = _manifest_action(registry.manifest(plugin_id), (stored.status or {}).get("action_id") if stored else "")
+    permission, refusal = ENTITY_PERMISSIONS.get((action or {}).get("entity", "devices"), ENTITY_PERMISSIONS["devices"])
+    if permission not in caller_permissions(db, user):
+        raise HTTPException(status_code=403, detail=refusal.replace("is required", "is required to stop this"))
     try:
         result = registry.request(plugin_id, "DELETE", f"/plugin/v1/runs/{run_id}")
         _save_run(db, plugin_id, result)
@@ -674,6 +773,49 @@ def network_scan_devices(
         snapshot.append(plugin_payload_for(device, fields_for_device(db, device), action,
                            output_roles=(manifest or {}).get("required_output_roles", [])))
     return snapshot
+
+
+class TestSummaryIn(BaseModel):
+    run_id: str = Field(min_length=1, max_length=100)
+    actor_id: str | None = None
+    markdown: str = Field(min_length=1, max_length=1_000_000)
+    model: str | None = Field(default=None, max_length=200)
+
+
+def _test_summary_identity(plugin_id: str = Depends(_plugin_identity)) -> str:
+    if plugin_id != TEST_SUMMARY_PLUGIN:
+        raise HTTPException(status_code=403, detail="Plugin lacks test run access")
+    return plugin_id
+
+
+@host_router.get("/test-summary/test-runs/{test_run_id}/report")
+def test_summary_report(test_run_id: str, db: Session = Depends(get_db),
+                        plugin_id: str = Depends(_test_summary_identity)):
+    """Everything the run recorded, read for the AI Test Summary plugin."""
+    return build_report(db, get_run(db, test_run_id))
+
+
+@host_router.post("/test-summary/test-runs/{test_run_id}/summaries", status_code=201)
+def save_test_summary(test_run_id: str, body: TestSummaryIn, db: Session = Depends(get_db),
+                      plugin_id: str = Depends(_test_summary_identity)):
+    """Keep a summary as a new shared file on the run. Every version is kept:
+    each report is a file of its own, named by when it was written."""
+    prior = db.scalar(select(PluginResultReceipt).where(
+        PluginResultReceipt.plugin_id == plugin_id, PluginResultReceipt.run_id == body.run_id))
+    if prior:
+        return prior.result
+    if not settings.object_storage_enabled:
+        raise HTTPException(status_code=503, detail="Object storage is disabled, so the summary cannot be saved to the run")
+    run = get_run(db, test_run_id, lock=True)
+    actor = db.get(User, body.actor_id) if body.actor_id else None
+    filename = f"ai-summary-{utcnow():%Y-%m-%dT%H-%M-%SZ}.md"
+    artifact = add_run_file(db, run, filename, io.BytesIO(body.markdown.encode("utf-8")), "text/markdown",
+                            actor, audit={"via": "plugin", "plugin_id": plugin_id,
+                                          "plugin_run_id": body.run_id, "model": body.model})
+    result = {"stored": True, "artifact_id": artifact.id, "filename": artifact.filename}
+    db.add(PluginResultReceipt(plugin_id=plugin_id, run_id=body.run_id, device_id=None, result=result))
+    db.commit()
+    return result
 
 
 @host_router.get("/artifacts/{plugin_id}/devices/{device_id}/{artifact_type}")

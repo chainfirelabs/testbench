@@ -100,9 +100,10 @@ class DeviceUnavailable(Conflict):
     """The device cannot be checked out: someone else holds it, or it is not
     available (broken, missing, in inventory).
 
-    Raised by this library rather than returned by the API — `PATCH /devices`
-    accepts a redundant status change silently — so it carries no HTTP status.
-    `device` is the record as it was when the attempt was refused.
+    Raised by this library, usually before the API is asked at all, so it
+    carries no HTTP status — except when the API's own 409 caught a device
+    claimed mid-checkout, which it passes on. `device` is the record as it was
+    when the attempt was refused.
     """
 
     def __init__(self, message: str, *, device=None, **kwargs) -> None:

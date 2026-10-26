@@ -256,6 +256,28 @@ class FakeAPI:
             if method == "PATCH":
                 if self.on_patch:
                     self.on_patch(row)
+                # Someone else's checkout is theirs: re-stating it with a new
+                # purpose or return date, or ending it, is a 409 unless the
+                # caller is an admin — who may end it, or take it over with
+                # ?take_over=true — as on the server.
+                holder = row.get("checked_out_by_username")
+                is_admin = self.me["role"] == "admin"
+                take_over = params.get("take_over") == "true"
+                if row["status"] == "checked_out" and holder and holder != self.me["username"]:
+                    ending = body.get("status") not in (None, "checked_out")
+                    restated = any(k in body and body[k] != row.get(k)
+                                   for k in ("checkout_purpose", "checkout_due"))
+                    if take_over and not is_admin:
+                        return httpx.Response(403, json={
+                            "detail": "Only an admin can take over someone else's checkout."})
+                    if take_over:
+                        row["status"] = "available"  # re-entered below, stamped as ours
+                    elif (ending and not is_admin) or (restated and not ending):
+                        return httpx.Response(409, json={"detail": {
+                            "code": "checked_out_by_other", "holder": holder,
+                            "can_take_over": is_admin,
+                            "message": f"{row['unique_id']} is already checked out by {holder}.",
+                        }})
                 # Fields first, then the status — the order the server uses
                 # (api/devices.py), and the reason a checkout can supply its
                 # purpose and return date in the same request as the status.
@@ -573,8 +595,9 @@ class FakeAPI:
         return row["name"] if row else key
 
     def _apply_status(self, row: dict, status: str | None) -> None:
-        """Mirror the server's transition rules, including the one that bites:
-        setting checked_out on an already-checked-out device does nothing.
+        """Mirror the server's transition rules: setting checked_out on an
+        already-checked-out device changes nothing about who holds it (the PATCH
+        handler refuses a new purpose or date on someone else's first).
 
         Also mirrors the requirement: entering checked_out without a purpose
         and a return date is a 422, and leaving it clears both. Raises rather

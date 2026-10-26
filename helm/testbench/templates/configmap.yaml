@@ -40,6 +40,7 @@ data:
   {{- if .Values.plugins.networkScan.enabled }}{{ $plugins = append $plugins (printf "network-scan=http://%s-network-scan:8080" (include "testbench.fullname" .)) }}{{ end }}
   {{- if .Values.plugins.deviceInfo.enabled }}{{ $plugins = append $plugins (printf "device-info-agent=http://%s-device-info:8080" (include "testbench.fullname" .)) }}{{ end }}
   {{- if .Values.plugins.reboot.enabled }}{{ $plugins = append $plugins (printf "device-reboot=http://%s-reboot:8080" (include "testbench.fullname" .)) }}{{ end }}
+  {{- if .Values.plugins.testSummary.enabled }}{{ $plugins = append $plugins (printf "test-summary=http://%s-test-summary:8080" (include "testbench.fullname" .)) }}{{ end }}
   TB_PLUGINS: {{ join "," $plugins | quote }}
   {{- if eq .Values.schema.devices.source "configMap" }}
   TB_DEVICE_SCHEMA_PATH: {{ printf "/etc/testbench/device-schema/%s" .Values.schema.devices.key | quote }}

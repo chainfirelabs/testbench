@@ -11,9 +11,12 @@ export function setToken(token: string | null): void {
 
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /** The server's `detail` as sent — an object for the refusals that carry data. */
+  detail: unknown
+  constructor(status: number, message: string, detail?: unknown) {
     super(message)
     this.status = status
+    this.detail = detail
   }
 }
 
@@ -38,6 +41,8 @@ function errorMessage(status: number, data: any): string {
   const detail = data?.detail
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail) && detail[0]?.msg) return validationMessage(detail[0])
+  // A structured refusal still says it in words; the data rides on `detail`.
+  if (detail && typeof detail.message === 'string' && !detail.errors) return detail.message
   if (detail) return JSON.stringify(detail)
   return `HTTP ${status}`
 }
@@ -73,7 +78,7 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   // exists") was being replaced with a bare "HTTP 409".
   if (!res.ok) throw new ApiError(res.status, ct.includes('application/json')
     ? errorMessage(res.status, data)
-    : `HTTP ${res.status}`)
+    : `HTTP ${res.status}`, data?.detail)
   return data as T
 }
 

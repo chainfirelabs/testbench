@@ -12,7 +12,7 @@ IMAGE_PATHS = [
     ('frontend', 'image'), ('backend', 'image'), ('mcp', 'image'),
     ('plugins', 'networkScan', 'image'), ('plugins', 'deviceInfo', 'image'),
     ('plugins', 'deviceInfo', 'researchImage'), ('plugins', 'reboot', 'image'),
-    ('plugins', 'reboot', 'researchImage'),
+    ('plugins', 'reboot', 'researchImage'), ('plugins', 'testSummary', 'image'),
 ]
 BASE = {
     'global': {'imageRegistry': 'global.example/'},
@@ -26,6 +26,7 @@ BASE = {
         'networkScan': {'enabled': True},
         'deviceInfo': {'enabled': True, 'ai': {'url': 'https://ai.example', 'model': 'test', 'existingSecret': 'test'}},
         'reboot': {'enabled': True, 'ai': {'url': 'https://ai.example', 'model': 'test', 'existingSecret': 'test'}},
+        'testSummary': {'enabled': True},
     },
 }
 
@@ -153,9 +154,9 @@ class ImageRegistryTests(unittest.TestCase):
         }
         result = render(values)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.count('name: SSL_CERT_FILE'), 6)
-        self.assertEqual(result.stdout.count('value: /etc/testbench/ca/roots.pem'), 30)
-        self.assertEqual(result.stdout.count('name: global-ca'), 12)
+        self.assertEqual(result.stdout.count('name: SSL_CERT_FILE'), 7)
+        self.assertEqual(result.stdout.count('value: /etc/testbench/ca/roots.pem'), 35)
+        self.assertEqual(result.stdout.count('name: global-ca'), 14)
         self.assertIn('name: TB_WORKER_CA_CONFIGMAP, value: "testbench-ca"', result.stdout)
         self.assertNotIn('old-authentik-ca', result.stdout)
 
@@ -203,6 +204,39 @@ class ImageRegistryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('name: TB_INFO_CAPTURE_IMAGES, value: "true"', result.stdout)
 
+    def test_test_summary_is_a_plugin_with_gui_managed_ai_by_default(self):
+        result = render(copy.deepcopy(BASE))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('test-summary=http://testbench-testbench-test-summary:8080', result.stdout)
+        self.assertIn('name: testbench-testbench-test-summary', result.stdout)
+        self.assertIn('name: TB_TEST_SUMMARY_AI_URL, value: ""', result.stdout)
+        self.assertNotIn('TB_TEST_SUMMARY_AI_API_KEY', result.stdout)
+        self.assertIn('name: TB_TEST_SUMMARY_MAX_INPUT_CHARS, value: "100000"', result.stdout)
+
+    def test_test_summary_helm_ai_mounts_its_key_and_prompt(self):
+        values = copy.deepcopy(BASE)
+        values['plugins']['testSummary'] = {
+            'enabled': True, 'prompt': 'Three bullets.',
+            'ai': {'url': 'https://ai.example/v1', 'model': 'summary-model', 'existingSecret': 'summary-ai'}}
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('name: TB_TEST_SUMMARY_AI_MODEL, value: "summary-model"', result.stdout)
+        self.assertIn('name: TB_TEST_SUMMARY_AI_API_KEY', result.stdout)
+        self.assertIn('{name: summary-ai, key: OPENAI_API_KEY}', result.stdout)
+        self.assertIn('name: TB_TEST_SUMMARY_PROMPT, value: "Three bullets."', result.stdout)
+
+    def test_test_summary_alone_still_requires_the_shared_secret_and_full_ai_settings(self):
+        values = copy.deepcopy(BASE)
+        for plugin in ('networkScan', 'deviceInfo', 'reboot'):
+            values['plugins'][plugin]['enabled'] = False
+        result = render(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('TB_PLUGIN_SHARED_SECRET', result.stdout)
+        values['plugins']['testSummary']['ai'] = {'url': 'https://ai.example/v1', 'model': ''}
+        result = render(values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('plugins.testSummary.ai.url and model must either both be set', result.stderr)
+
     def test_configmap_source_requires_external_name(self):
         values = copy.deepcopy(BASE)
         values['schema']['devices']['existingConfigMap'] = ''
@@ -215,9 +249,9 @@ class ImageRegistryTests(unittest.TestCase):
         values['global']['imagePullPolicy'] = 'Always'
         result = render(values)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Six controllers/deployments, two audit-cleanup workloads, and two
+        # Seven controllers/deployments, two audit-cleanup workloads, and two
         # database-schema Job containers.
-        self.assertEqual(result.stdout.count('imagePullPolicy: Always'), 10)
+        self.assertEqual(result.stdout.count('imagePullPolicy: Always'), 11)
         for variable in (
             'TB_SCAN_WORKER_IMAGE_PULL_POLICY',
             'TB_INFO_RESEARCH_IMAGE_PULL_POLICY',

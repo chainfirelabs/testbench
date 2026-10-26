@@ -1,0 +1,1886 @@
+{
+ "version": "1.15.0",
+ "guide": [
+  {
+   "slug": "overview",
+   "title": "Overview",
+   "markdown": "Python client for the TestBench API. Built for automated test frameworks:\nlist the fleet, take a device for the duration of a run, record what happened.\n\n```python\nfrom testbench_client import TestBench\n\nwith TestBench.from_env() as tb:\n    with tb.devices.reserved(\"dev-0042\", purpose=\"Automated suite\", due=\"2026-12-31\") as device:\n        passed, metrics = run_my_suite(device.wan_ip)\n        tb.tests.record(device, \"curl-smoke\", passed, misc_data=metrics)\n```\n\nThe device is checked back in when the block ends — including when it ends by\nraising, which is the case that otherwise leaves hardware stranded as\n`checked_out` while someone works out who has it."
+  },
+  {
+   "slug": "install",
+   "title": "Install",
+   "markdown": "```bash\npip install -e src/python-client        # from a checkout\npip install testbench-client   # once it is published\n```\n\nOne dependency: `httpx`. Python 3.10+.\n\nThe client is versioned with TestBench: client 1.15.0 covers everything a\n1.15.0 server offers, and still works against older servers for whatever they\nhave."
+  },
+  {
+   "slug": "authenticating",
+   "title": "Authenticating",
+   "markdown": "Mint an API key in the web app under **Profile → API keys** and export it. The\nfull key is shown once, at creation.\n\n```bash\nexport TB_API_URL=http://localhost:8001   # /api/v1 is appended if you omit it\nexport TB_API_KEY=tb_1ba207b36474_...\n```\n\n```python\ntb = TestBench.from_env()                       # reads those two variables\ntb = TestBench(\"http://localhost:8001\", key)    # or pass them directly\n```\n\nPick the **lowest role that does the job**. Reading needs no permission at all;\nchecking a device out needs `devices.edit` and recording a result needs\n`tests.edit`. A key never grants more than its owner does, and it can be revoked\nfrom the same page without disturbing the account it belongs to — so give each\nframework its own and label it.\n\nRoles are defined per installation, so the role's *name* tells you nothing\nportable: check the permissions. `tb.identity` carries both, and is worth\nasserting at the top of a run rather than discovering an hour in:\n\n```python\nfrom testbench_client import DEVICES_EDIT, TESTS_EDIT\n\nif not tb.identity.can_write:                   # tests.edit and devices.edit\n    sys.exit(f\"key is {tb.identity.role}, which cannot run a suite\")\n\nif not tb.identity.can(TESTS_EDIT):             # or ask for one permission\n    sys.exit(\"this key cannot record results\")\n```\n\nAn older TestBench that predates definable roles reports only a role name;\n`can()` answers from what those three fixed roles granted, so this keeps\nworking against one."
+  },
+  {
+   "slug": "devices",
+   "title": "Devices",
+   "markdown": "Addressed by `unique_id` (\"dev-0042\") everywhere. UUIDs work in the same place\nbut you never need one.\n\n```python\ntb.devices.list()                              # the whole fleet, all pages\ntb.devices.list(status=\"available\")            # available / checked_out / inventory / missing / broken\ntb.devices.list(location=\"Lab A\", limit=10)\ntb.devices.list(search=\"mikrotik\")             # unique_id, make, model, location, IPs\ntb.devices.iter()                              # same, streamed instead of buffered\n\ndevice = tb.devices.get(\"dev-0042\")            # detail record, with test history\ndevice.wan_ip, device.architecture, device.firmware_version\ndevice.online                                  # from network scanning\ndevice.is_available, device.is_checked_out     # from the workflow status\ndevice.tests                                   # every recorded run against it\n```\n\n`status` and `online` are unrelated: a checked-out device can be answering\npings, and an available one can be dark.\n\nEvery timestamp comes back timezone-aware in UTC, so comparing one to\n`datetime.now(timezone.utc)` works rather than raising."
+  },
+  {
+   "slug": "checking-devices-in-and-out",
+   "title": "Checking devices in and out",
+   "markdown": "```python\ntb.devices.check_out(\"dev-0042\", purpose=\"Testing\", due=\"2026-12-31\")               # raises DeviceUnavailable if taken\ntb.devices.check_out(\"dev-0042\", purpose=\"Testing\", due=\"2026-12-31\", force=True)   # admins: take it over\ntb.devices.check_in(\"dev-0042\")\ntb.devices.set_status(\"dev-0042\", \"broken\")    # any status, plus other fields\n\nwith tb.devices.reserved(\"dev-0042\", purpose=\"Automated suite\", due=\"2026-12-31\") as device:\n    ...                                        # released however the block ends\n```\n\nEvery checkout requires a purpose and return date; choose a date appropriate to your run.\n\nChecking out a device you already hold is not an error, so retries and reruns\nare safe.\n\n**Someone else's checkout is theirs.** The API refuses (409) to check out a\ndevice another user holds. `check_out()` reads the device first and raises\n`DeviceUnavailable` naming the holder; if another run claims it between that\nread and the checkout, the API's refusal — or the re-read afterwards — raises\nthe same way rather than letting your suite proceed on hardware it does not own.\nOnly the holder or an admin can check it back in or change its status.\n`force=True` takes the device over, which only an admin may do: the checkout\nbecomes yours in one step, the audit log records it as a take-over, and the\nprevious holder is notified. Anyone else gets `PermissionDenied`.\n\nThat is a guard, not a lock. Two clients calling it at the same instant can\nstill both pass the API's check. If the hardware is genuinely contended,\nserialise somewhere that has a real lock to offer — a CI job queue, a pytest\nresource plugin — and use this to record the outcome.\n\n`check_in()` leaves a device alone unless it is checked out *by you*, and\n`reserved()` leaves behind any other status the block set. A run that discovered\nthe device is broken and marked it so does not get that quietly undone on the\nway out."
+  },
+  {
+   "slug": "recording-results",
+   "title": "Recording results",
+   "markdown": "```python\ntb.tests.create(\n    device=\"dev-0042\",\n    software=\"curl-smoke\",          # bare name = the current version\n    outcome=\"pass\",                 # pass / fail / warn\n    tag=\"acceptance\",               # adhoc / acceptance / end-to-end / automated\n    misc_data={\"duration_s\": 12.4, \"mbps\": 940, \"log\": \"https://ci/…/42\"},\n    notes=\"nightly run\",\n)\n\ntb.tests.record(device, \"curl-smoke\", passed=True, misc_data=metrics)   # boolean shorthand\n```\n\n`misc_data` is free-form JSON and is the field that makes results worth querying\nlater — put the numbers there, not in `notes`.\n\nCustom test fields an administrator added under **Schema → Tests** live in\n`misc_data` too, by their field key. One marked required has to be there, or\nthe run is refused with a `ValidationError` naming it (`Lab is required`). To\nsee what this installation expects:\n\n```python\nfor field in tb.entity_fields(\"tests\"):\n    print(field[\"key\"], field[\"label\"], field[\"required\"])\n\ntb.tests.create(device=\"dev-0042\", software=\"curl-smoke\", outcome=\"pass\",\n                misc_data={\"lab\": \"East\", \"duration_s\": 12.4})\ntb.tests.list(fields={\"lab\": \"East\"})          # filter on any field by key\n```\n\n### Suites and components\n\nSoftware can be a suite of components (\"Microsoft 365\" with Outlook and\nTeams). A run can be recorded against one of them:\n\n```python\nsuite = tb.software.get(\"Microsoft 365\")\nsuite.components                                  # [Outlook 16.2, Teams 2.1]\noutlook = suite.component(\"Outlook\")\n\ntb.tests.create(device=\"dev-0042\", software=suite, outcome=\"pass\", component=outlook)\n# Or by name; a component the suite does not list yet is added to it:\ntb.tests.create(device=\"dev-0042\", software=\"Microsoft 365\", outcome=\"fail\",\n                component=\"Word\", component_version=\"16.0\")\n\ntb.tests.list(component=outlook)\ntb.tests.update(result, component=suite.component(\"Teams\"))   # move a run\n```\n\nYou pass names; the UUIDs the API wants are resolved and cached for you, so a\nsuite recording a result per test case makes one request per result rather than\nthree.\n\nLeaving `software_version` unset records whatever version the software is on\n*now*, which is almost always what a run exercised. Pass it explicitly to pin an\nolder build — an unknown version tells you which ones exist:\n\n```\nUnknownSoftware: curl-smoke has no version '0.1'. Known versions: 3.8.6, 3.8.5.\n```\n\nReading results back:\n\n```python\ntb.tests.for_device(\"dev-0042\")\ntb.tests.list(software=\"curl-smoke\", outcome=\"fail\", limit=20)\ntb.tests.update(result, notes=\"retried, flaky network\")\ntb.tests.delete(result)\n```\n\n### Artifacts and output\n\nA run can carry files: any number of **artifacts** (reports, captures,\nscreenshots, archives) and one **output** — the run's ASCII text log, which the\nTestBench UI shows in a viewer rather than as a download. Both are stored in the\nserver's object store beside the run, at `tests/<test-id>/artifacts/…` and\n`tests/<test-id>/output/…` (inside its test run's folder when it is in one), so\nthe server needs object storage enabled.\n\nAttach them when recording:\n\n```python\ntb.tests.create(\n    device=\"dev-0042\", software=\"curl-smoke\", outcome=\"fail\",\n    artifacts=[\"capture.pcap\", Path(\"report.html\")],   # paths, bytes or open binary files\n    output=log_text,                                     # or output_file=\"run.log\"\n)\n```\n\nBefore recording a run with files, the client asks the server whether it can\nstore any. If object storage is off, it raises `TestBenchError` and records\nnothing, rather than leaving a run behind without the files you meant it to\nhave. `tb.tests.file_storage()` asks the same question directly, with the size\nlimits:\n\n```python\nstorage = tb.tests.file_storage()\nstorage.enabled, storage.output_max_bytes, storage.artifact_max_bytes\n```\n\nPast that check the run is saved first and the files after it. If an upload\nfails, the run is still recorded and the exception carries it as `.test`, so\nthe upload can be retried without recording the run twice.\n\nOr work with a recorded run directly:\n\n```python\ntb.tests.upload_artifact(result, \"capture.pcap\")\ntb.tests.upload_artifact(result, png_bytes, filename=\"screen.png\")\nfor artifact in tb.tests.artifacts(result):\n    tb.tests.download_artifact(result, artifact, \"downloads/\")   # or no dest: returns bytes\ntb.tests.delete_artifact(result, artifact)\n\ntb.tests.set_output(result, \"all 42 checks passed\\n\")    # text\ntb.tests.upload_output(result, \"run.log\")                # or a file\nprint(tb.tests.output(result).text)                       # None when the run has no output\ntb.tests.delete_output(result)\n```\n\nOutput must be ASCII and within the server's limit (1 MiB by default); anything\nelse is refused with a `ValidationError` before it is stored. Uploading output\nagain replaces it. A `Test` reports what is attached through `artifact_count`,\n`output_filename` and `has_output`. Uploads and deletions need `tests.edit`.\n\n### Test runs\n\nA test run groups the results one pipeline execution recorded, and holds files\nthat describe the whole execution — a pytest report, say — once, instead of a\ncopy on every result. Each result in the run lists them beside its own files.\n\n```python\nrun = tb.test_runs.start(\n    f\"Nightly #{os.environ['CI_PIPELINE_ID']}\",\n    external_id=os.environ[\"CI_PIPELINE_ID\"],   # every job of the pipeline joins one run\n    url=os.environ[\"CI_PIPELINE_URL\"],\n)\ntb.test_runs.attach(run, \"report.html\")          # stored once, shared by every test in the run\nfor target in targets:\n    tb.tests.create(device=target, software=\"RouterOS\", outcome=\"pass\", test_run=run)\ntb.test_runs.finish(run)\n```\n\n`start()` with an `external_id` already in use returns that run rather than a\nnew one, so parallel jobs can each call it. Without one, each call starts a new\nrun.\n\nA test can also share files with its run as it is recorded, which suits a test\nrecorded by hand, with its outline or report:\n\n```python\nrun = tb.test_runs.start(\"Acceptance 2026-10\")\ntb.tests.create(device=\"dev-0042\", software=\"RouterOS\", outcome=\"pass\", test_run=run,\n                artifacts=[\"capture.pcap\"],                # this test's own files\n                test_run_artifacts=[\"test-outline.pdf\"])   # shared with every test in the run\n```\n\nIn GitLab CI or GitHub Actions, `start_from_ci()` fills all of that in from the\npipeline's own environment variables:\n\n```python\nrun = tb.test_runs.start_from_ci()      # every job of the pipeline gets the same run\n```\n\n| | GitLab CI | GitHub Actions |\n|---|---|---|\n| One run per | pipeline (`CI_PIPELINE_ID`) | workflow run (`GITHUB_RUN_ID`) |\n| Name | `group/project #812 (main)` | `owner/repo CI #57 (main)` |\n| `external_id` | `gitlab:<host>:<pipeline id>` | `github:<host>:<run id>` |\n| Link | `CI_PIPELINE_URL` | the workflow run's page |\n\nRetried GitLab jobs and re-run GitHub jobs keep their pipeline's ID, so their\nresults join the same run. Pass a name to use your own (`start_from_ci(\"Nightly\nsmoke\")`); only the job that creates the run sets it. Outside either CI system\nit raises `ValueError` — use `start()` there.\n\n```python\ntb.test_runs.list(search=\"nightly\")           # newest first\ntb.test_runs.get(run_id).fail_count           # test_count, pass_count, fail_count, warn_count\ntb.test_runs.tests(run, outcome=\"fail\")       # the run's results; takes tb.tests.list() filters\ntb.tests.list(test_run=\"none\")                # results recorded outside any run\ntb.tests.shared_artifacts(result)             # the run's files, from one of its results\ntb.test_runs.download_artifact(run, artifact, \"downloads/\")\ntb.tests.update(result, test_run=other_run)   # or test_run=None to take it out\ntb.test_runs.delete(run)                      # its results are kept, in no run\n```\n\nA `Test` names its run in `test_run_id` and `test_run_name`, and counts the\nrun's shared files in `test_run_artifact_count`.\n\n### One run, one build\n\nA bare software name resolves once per client and stays resolved. If someone\nadds a new version halfway through your suite, results keep attaching to the\nbuild the run started against — one run, one set of evidence, rather than a\nsuite split across two versions at an arbitrary point. Call `tb.clear_cache()`\nif you want the opposite."
+  },
+  {
+   "slug": "software",
+   "title": "Software",
+   "markdown": "Read-only. Recording a result needs software that already exists; a test\nframework inventing catalogue rows is how a catalogue fills up with typos.\n\n```python\ntb.software.list(latest_only=True)\ntb.software.get(\"curl-smoke\")                  # current version\ntb.software.get(\"curl-smoke\", \"3.8.5\")         # a specific one\ntb.software.versions(\"curl-smoke\")             # all of them, newest first\ntb.software.components(\"Microsoft 365\")        # a suite's components\n\n# Devices this version has actually been run against, from its results:\nfor entry in tb.software.tested_devices(\"curl-smoke\"):\n    print(entry.device.unique_id, entry.test_count, entry.outcomes, entry.component)\n```"
+  },
+  {
+   "slug": "search",
+   "title": "Search",
+   "markdown": "The web app's search box, across devices, software, tests and vendor claims at\nonce. It matches suite components too:\n\n```python\nfound = tb.search(\"Outlook\", limit=20)\nfor software in found.software:\n    print(software, [c.name for c in software.matching_components])\nfound.devices_total, found.software_total, found.tests_total, found.vendor_devices_total\n```"
+  },
+  {
+   "slug": "vendor-devices",
+   "title": "Vendor devices",
+   "markdown": "Hardware a vendor **claims** their software supports — their published\ncompatibility list. These are not the same as `tests`:\n\n- a vendor device is a **claim**. Not evidence, and not necessarily hardware\n  this fleet owns.\n- a test is **evidence**. Absence of one means untested, not unsupported.\n\nCode that treats them as interchangeable is the mistake this section exists to\nprevent; `tb.vendor_devices.for_device(...)` and `tb.tests.for_device(...)`\nanswer different questions and routinely disagree.\n\n```python\n# Every compatibility list at once — the question no single software answers.\ntb.vendor_devices.list(search=\"ISR 4331\")\ntb.vendor_devices.list(make=\"Cisco\", support_status=\"supported\")\nmatches = tb.vendor_devices.list(\n    model=\"R1\", component_name=\"Outlook\", component_version=\"16.2\",\n    component_status=\"supported\",\n)\nfor claim in matches:\n    print(claim.matching_components)  # effective status and inherited flag\n\n# One software's own list. A bare name gives the current version's.\ntb.vendor_devices.for_software(\"curl-smoke\")\ntb.vendor_devices.for_software(\"curl-smoke\", \"3.8.5\")\n\n# Who claims to support a device in the fleet, found by its make and model.\nfor claim in tb.vendor_devices.for_device(\"dev-0042\", supported_only=True):\n    print(claim)        # Cisco ISR 4331: supported (Backup-Restore 2.0)\n\n# The same question answered the way the device page answers it, one entry\n# per software version. Broader: a claim naming only a make matches.\nfor match in tb.devices.compatible_software(\"dev-0042\"):\n    print(match.software, match.support_status, match.matched_on, match.claims)\n\n# And the other way round: which devices in the fleet a claim describes.\nclaim = tb.vendor_devices.list(make=\"Cisco\")[0]\nclaim.inventory_match_count, claim.inventory_devices   # count, first few\ntb.vendor_devices.inventory_matches(claim)             # every unique ID\n```\n\nEvery row names the software and version making the claim. `software_is_latest`\nis false for a claim made by a version that has since been superseded — still a\nreal claim, but not current guidance:\n\n```python\ncurrent = [c for c in tb.vendor_devices.for_device(\"dev-0042\") if c.software_is_latest]\n```\n\n`support_status` is the vendor's own word — `supported`, `partial`,\n`unsupported` or `planned`. Unsupported rows come back like any other, because\n\"the vendor says no\" is an answer; `supported_only=` and `.is_supported` filter\nto the unqualified yes.\n`component_status` filters the effective status of the same named component\nversion, falling back to the suite status when that component has no explicit\noverride. It describes a vendor claim, not a recorded test result.\n\nTo import claims, use one row per component. Each row must include the software\nname and version plus the same hardware fields for claims that should merge.\nThe API key needs `software.edit`:\n\n```python\ntb.vendor_devices.import_csv(\"vendor-claims.csv\")\n# Or pass dictionaries directly:\ntb.vendor_devices.import_rows([\n    {\"software_name\": \"Microsoft 365\", \"software_version\": \"2026.1\",\n     \"make\": \"Acme\", \"model\": \"R1\", \"component_name\": \"Outlook\",\n     \"component_version\": \"16.2\", \"component_status\": \"supported\"},\n    {\"software_name\": \"Microsoft 365\", \"software_version\": \"2026.1\",\n     \"make\": \"Acme\", \"model\": \"R1\", \"component_name\": \"Teams\",\n     \"component_version\": \"2.1\", \"component_status\": \"unsupported\"},\n])\n```\n\nBoth methods return `created`, `updated`, and `errors`. The older\n`component_support` list also remains accepted."
+  },
+  {
+   "slug": "errors",
+   "title": "Errors",
+   "markdown": "Every exception subclasses `TestBenchError` and carries `.status` and\n`.detail`. The API's own `detail` strings are passed through rather than\nreplaced — they usually say what to do next.\n\n| Exception | When |\n|---|---|\n| `AuthenticationError` | 401 — key missing, expired or revoked |\n| `PermissionDenied` | 403 — the key's role is too low |\n| `NotFound` / `UnknownDevice` / `UnknownSoftware` | 404, the latter two with `.suggestions` |\n| `Conflict` / `DeviceUnavailable` | the device is held, or not available |\n| `ValidationError` | 400/422 |\n| `ServerError` | 5xx |\n| `TransportError` | never reached the API |\n\n`UnknownDevice` includes near misses, which is usually enough to spot a typo\nfrom a CI log alone:\n\n```\nUnknownDevice: No device 'dev-00'. Did you mean: dev-0001, dev-0002, dev-0003?\n```\n\nBad enum values are caught before the request goes out. This matters more than\nit looks: the API does not validate *filter* values, so `status=\"braken\"`\nreturns an empty page — which reads as \"there are no broken devices\". A wrong\nanswer is worse than an error."
+  },
+  {
+   "slug": "retries",
+   "title": "Retries",
+   "markdown": "GETs retry twice through transport failures and 5xx, with jittered backoff.\nWrites are never retried: a `POST /tests` that may have landed must not be sent\ntwice, because a duplicate result is worse than a failure you can see. 401 and\n403 are never retried either — a revoked key does not become valid by asking\nagain.\n\nTune with `TestBench(..., retries=0)`."
+  },
+  {
+   "slug": "concurrency",
+   "title": "Concurrency",
+   "markdown": "`httpx.Client` is thread-safe and the resolution cache is locked, so one client\ncan be shared across threads. Prefer one per process: it holds the connection\npool and the cache, which is most of why this is faster than shelling out to\ncurl. Under `pytest-xdist` each worker is its own process and gets its own."
+  },
+  {
+   "slug": "examples",
+   "title": "Examples",
+   "markdown": "- `examples/inventory.py` — the fleet, grouped by status\n- `examples/run_suite.py` — reserve, run, record\n- `examples/coverage_gap.py` — vendor claims with no test evidence behind them\n- `examples/pytest_conftest.py` — fixtures that reserve a device for a session\n  and record a result per test from its actual outcome"
+  },
+  {
+   "slug": "not-included",
+   "title": "Not included",
+   "markdown": "- Creating or editing devices and software — `POST /devices`, `POST /software`\n  and friends exist; they are deliberately not wrapped, because an automated\n  framework should be recording evidence, not editing the inventory.\n- Bulk and CSV import (`/devices/import`, `/tests/import`).\n- Saved filters, users, roles, audit log.\n\nEach is a short method following the pattern in `devices.py` if you need it."
+  },
+  {
+   "slug": "a-note-on-the-audit-log",
+   "title": "A note on the audit log",
+   "markdown": "Actions taken with an API key are audited under the owner's username with the\nkey's id and label attached. Two consequences worth knowing: results recorded by\nyour framework are attributed to a person, and revoking a key answers \"what did\nit do?\" and not only \"who owned it?\". Label keys so that stays useful."
+  }
+ ],
+ "reference": [
+  {
+   "slug": "testbench",
+   "accessor": "TestBench",
+   "class": "TestBench",
+   "doc": "A connection to a TestBench instance.\n\n```python\nfrom testbench_client import TestBench\n\nwith TestBench.from_env() as tb:\n    for device in tb.devices.list(status=\"available\"):\n        print(device)\n```\n\nSafe to share between threads: `httpx.Client` is thread-safe and the name\nresolution cache is locked. Prefer one client per process — each holds a\nconnection pool, and reusing it is most of why this is faster than curl.",
+   "members": [
+    {
+     "name": "entity_fields",
+     "kind": "method",
+     "signature": "(entity: str | None = None) -> Any",
+     "doc": "Logical device/software/test fields this installation exposes.\n\nWith no argument, every entity's fields by entity name. With one —\n\"software\", \"tests\" or \"vendor_devices\" — that entity's list alone,\neach field with its key, label, type, and whether it is `visible` and\n`required`. A custom field marked required has to be in a record's\n`misc_data` for the server to accept it.\n\nThe device entry is the *global* device schema — the fields every\ndevice type inherits. For one type's own fields, use\n`device_schema(type_key)`."
+    },
+    {
+     "name": "search",
+     "kind": "method",
+     "signature": "(text: str, *, limit: int = 5) -> SearchResults",
+     "doc": "Search devices, software, tests and vendor claims at once, as the\nweb app's search box does.\n\nMatches suite components too: software comes back with the\n`matching_components` that matched, and devices with the\n`tested_components` that did. `limit` caps each group (at most 200)."
+    },
+    {
+     "name": "device_types",
+     "kind": "method",
+     "signature": "(*, include_disabled: bool = False) -> list[DeviceType]",
+     "doc": "The inventory categories this installation defines."
+    },
+    {
+     "name": "device_schema",
+     "kind": "method",
+     "signature": "(type_key: str | None = None) -> dict",
+     "doc": "The published schema for one device type, or the global one.\n\nWhat a device of this type looks like here: which fields it carries, in\nwhat order, which are required, and which plugins may act on it. Field\nkeys are stable and are what every other call in this library uses;\nlabels are presentation only."
+    },
+    {
+     "name": "device_schema_revision",
+     "kind": "method",
+     "signature": "() -> int",
+     "doc": "The published revision, for a caller that caches schemas."
+    },
+    {
+     "name": "from_env",
+     "kind": "classmethod",
+     "signature": "(**overrides: Any) -> 'TestBench'",
+     "doc": "Build a client from `TB_API_URL` and `TB_API_KEY`.\n\nThe usual shape for CI, where the key is an injected secret and nothing\nshould be reading it out of a checked-in config file."
+    },
+    {
+     "name": "close",
+     "kind": "method",
+     "signature": "() -> None",
+     "doc": ""
+    },
+    {
+     "name": "whoami",
+     "kind": "method",
+     "signature": "(*, refresh: bool = False) -> Identity",
+     "doc": "The account and effective role this key resolves to.\n\nWorth calling once at the start of a run: it turns a revoked key into\none clear failure at setup instead of a confusing one an hour into a\nsuite. The result is cached; pass refresh=True to re-check."
+    },
+    {
+     "name": "identity",
+     "kind": "property",
+     "signature": ": Identity",
+     "doc": ""
+    },
+    {
+     "name": "request",
+     "kind": "method",
+     "signature": "(method: str, path: str, *, params: dict | None = None, json: Any = None, files: dict | None = None) -> Any",
+     "doc": "Make one API call and return parsed JSON (None for 204).\n\nRetries idempotent requests through transport failures and 5xx; a\nresponse the API meant to send is never retried, because a 403 does not\nbecome a 200 by asking again."
+    },
+    {
+     "name": "clear_cache",
+     "kind": "method",
+     "signature": "() -> None",
+     "doc": "Forget resolved names.\n\nCall this if software gained a new version mid-run and you want bare\nnames to start meaning the new one. See `software.resolve()` for why\nthat is otherwise sticky on purpose."
+    }
+   ],
+   "init_signature": "(base_url: str | None = None, api_key: str | None = None, *, timeout: float = 30.0, retries: int = 2, verify: bool | str = True, page_size: int = 200, transport: httpx.BaseTransport | None = None) -> None"
+  },
+  {
+   "slug": "tb-devices",
+   "accessor": "tb.devices",
+   "class": "Devices",
+   "doc": "Accessed as `tb.devices`.\n\nDevices are addressed by their `unique_id` (\"dev-0042\") everywhere in this\nlibrary. The API accepts a UUID in the same position, so either works, but\nnothing here requires you to know one.",
+   "members": [
+    {
+     "name": "list",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, device_type: str | None = None, status: str | None = None, location: str | None = None, overdue: bool | None = None, fields: dict[str, str | int | float | bool] | None = None, sort: str = 'unique_id', order: str = 'asc', limit: int | None = None) -> list[Device]",
+     "doc": "Every device matching the filters, across as many pages as it takes.\n\nWith no filters this is the whole fleet. `limit` caps the rows fetched,\nnot just the rows returned — it stops paging early.\n\n`overdue=True` narrows to devices past their return date; False to\neverything else. `device_type` takes a stable type key — \"router\",\n\"mobile\", or \"uncategorized\" for devices with no type — never a label,\nwhich an administrator may rename at any time.\n\n`fields` filters on any field this installation defines, by its stable\nkey: `fields={\"serial_number\": \"SN-1\"}`."
+    },
+    {
+     "name": "iter",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, device_type: str | None = None, status: str | None = None, location: str | None = None, overdue: bool | None = None, fields: dict[str, str | int | float | bool] | None = None, sort: str = 'unique_id', order: str = 'asc', limit: int | None = None) -> Iterator[Device]",
+     "doc": "Like `list()`, but yields as pages arrive rather than buffering."
+    },
+    {
+     "name": "overdue",
+     "kind": "method",
+     "signature": "(*, min_days: int = 1, limit: int | None = None) -> list[Device]",
+     "doc": "Devices past their return date, longest overdue first.\n\nThe dedicated endpoint rather than `list(overdue=True)`: it sorts by how\nlate each one is, which is the order you want when the list is a queue\nof people to go and ask."
+    },
+    {
+     "name": "get",
+     "kind": "method",
+     "signature": "(identifier: str | Device) -> Device",
+     "doc": "One device by unique_id (or UUID), with its test history attached.\n\nThis is the detail record: `device.tests` and `device.verified_tests`\nare populated, which `list()` does not do."
+    },
+    {
+     "name": "exists",
+     "kind": "method",
+     "signature": "(identifier: str | Device) -> bool",
+     "doc": ""
+    },
+    {
+     "name": "actions",
+     "kind": "method",
+     "signature": "(identifier: str | Device) -> list[dict]",
+     "doc": "Plugin actions for one device, each saying whether it can run.\n\nNot every installed action applies to every device: a plugin is\navailable only where the device type's policy allows it and the fields\nit needs are both configured and filled in. Each entry carries\n`available` and, when it is false, `unavailable_reason`."
+    },
+    {
+     "name": "compatible_software",
+     "kind": "method",
+     "signature": "(identifier: str | Device) -> list[CompatibleSoftware]",
+     "doc": "Software whose vendor claims describe this device, as its page shows.\n\nThe server's own matching, which is broader than `vendor_devices.for_device()`:\na claim pinning only the make matches every device of that make, and\nfirmware, hardware version and architecture are compared too when the\nclaim names them. Each entry is one software version with its matching\nclaims and how well they fit (`matched_on`).\n\nClaims, not evidence: what has actually run here is `tests.for_device()`."
+    },
+    {
+     "name": "schema",
+     "kind": "method",
+     "signature": "(identifier: str | Device) -> dict",
+     "doc": "The published schema for this device's type."
+    },
+    {
+     "name": "resolve",
+     "kind": "method",
+     "signature": "(identifier: str | Device) -> str",
+     "doc": "The device's UUID, which `POST /tests` needs and people do not have.\n\nCached for the life of the client: a device's id never changes, and a\nsuite recording a result per test case would otherwise re-fetch the\nsame row hundreds of times."
+    },
+    {
+     "name": "set_status",
+     "kind": "method",
+     "signature": "(identifier: str | Device, status: str, **fields) -> Device",
+     "doc": "Set a device's status, and optionally other fields in the same call.\n\nCrossing into `checked_out` stamps the key owner and the day; crossing\nout of it clears them, along with the purpose and the return date. That\nhappens server-side — this does not, and cannot, set `checked_out_by`\nitself.\n\nNote that entering `checked_out` needs `checkout_purpose` and\n`checkout_due` passed as fields, or the API returns 422. `check_out()`\nis the method that gets that right."
+    },
+    {
+     "name": "check_out",
+     "kind": "method",
+     "signature": "(identifier: str | Device, *, purpose: str, due: date | str, force: bool = False) -> Device",
+     "doc": "Take the device, refusing if it is not free.\n\n`purpose` and `due` are required, because the API requires them: a\ncheckout has to say why the device is out and when it is coming back.\nPast `due` the device shows as overdue and whoever holds it is\nreminded daily — nothing takes it back automatically.\n\nThe API refuses (409) a checkout of a device someone else holds, and\nthis checks first as well, so the refusal comes back as\n`DeviceUnavailable` naming the holder. `force=True` takes it over\ninstead — an admin's call only; anyone else gets `PermissionDenied`. If another run claimed it between\nthe check and the checkout, that 409 — or the re-read afterwards —\nraises the same way, rather than letting a suite proceed on hardware it\ndoes not own.\n\nThat is a guard, not a lock: two clients calling this at the same\ninstant can both pass the API's check. For genuinely contended\nhardware, serialise at a level that has a lock to offer (a CI job\nqueue, a resource plugin).\n\nAlready holding it is not an error — this is safe to call twice."
+    },
+    {
+     "name": "check_in",
+     "kind": "method",
+     "signature": "(identifier: str | Device, *, only_if_mine: bool = True) -> Device",
+     "doc": "Return the device to `available`.\n\nIdempotent: a device that is not checked out is left exactly as it is,\nincluding one someone deliberately marked `broken` — an automated\nrelease should not quietly undo that.\n\n`only_if_mine=False` returns someone else's checkout, which the API\nallows only an admin; anyone else gets `DeviceUnavailable`."
+    },
+    {
+     "name": "reserved",
+     "kind": "method",
+     "signature": "(identifier: str | Device, *, purpose: str, due: date | str, force: bool = False)",
+     "doc": "Hold a device for the duration of a block, and always give it back.\n\n```python\nwith tb.devices.reserved(\"dev-0042\", purpose=\"Nightly suite\",\n                         due=date.today() + timedelta(days=1)) as device:\n    run_the_suite_against(device.wan_ip)\n```\n\nThe purpose and return date are the ones every checkout needs. For a\nblock that gives the device back at the end, a date a day or two out is\nthe honest answer: it is what the fleet should show if the block never\nreaches its release.\n\nThe release runs even if the block raises, which is the entire point:\na crashed run that strands hardware as `checked_out` costs someone an\nafternoon of wondering who has it.\n\nIf the block leaves the device in some other state — `broken`, say,\nbecause that is what the run discovered — the release leaves it there."
+    }
+   ]
+  },
+  {
+   "slug": "tb-software",
+   "accessor": "tb.software",
+   "class": "SoftwareResource",
+   "doc": "Accessed as `tb.software`.\n\nNamed `SoftwareResource` rather than `Software` so it does not collide with\nthe record class of that name; you never write the class name yourself.",
+   "members": [
+    {
+     "name": "list",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, latest_only: bool = False, fields: dict[str, str | int | float | bool] | None = None, limit: int | None = None) -> list[Software]",
+     "doc": "Software in the catalogue. `latest_only` collapses version groups to\nthe current version of each name."
+    },
+    {
+     "name": "iter",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, latest_only: bool = False, fields: dict[str, str | int | float | bool] | None = None, limit: int | None = None) -> Iterator[Software]",
+     "doc": ""
+    },
+    {
+     "name": "get",
+     "kind": "method",
+     "signature": "(name: str | Software, version: str | None = None) -> Software",
+     "doc": "One piece of software by name (or UUID).\n\nA bare name gives the CURRENT version — the highest numeric version.\nPass `version` for a specific one."
+    },
+    {
+     "name": "versions",
+     "kind": "method",
+     "signature": "(name: str | Software) -> list[Software]",
+     "doc": "Every version sharing this name, newest first."
+    },
+    {
+     "name": "components",
+     "kind": "method",
+     "signature": "(name: str | Software, version: str | None = None) -> list[SoftwareComponent]",
+     "doc": "The components of a software suite at one version (current by default).\n\nEmpty for software that is not a suite. Pass one to\n`tests.create(component=...)` to record a run against it."
+    },
+    {
+     "name": "tested_devices",
+     "kind": "method",
+     "signature": "(name: str | Software, version: str | None = None, *, search: str | None = None, limit: int | None = None) -> list[TestedDevice]",
+     "doc": "Devices this software version has actually been tested on, from its runs.\n\nOne entry per device (per component, for a suite), with how many runs\nthere were, the outcome counts and the latest run date. Evidence, unlike\n`vendor_devices.for_software()`, which is what the vendor claims."
+    },
+    {
+     "name": "resolve",
+     "kind": "method",
+     "signature": "(name: str | Software, version: str | None = None) -> str",
+     "doc": "The software's UUID, which `POST /tests` needs.\n\nCached for the life of the client. For a bare name that means the run\nkeeps recording against whichever version was current when the first\nresult was written, even if someone adds a new version halfway through\n— which is what you want from a test run: one build, one set of\nevidence. Call `tb.clear_cache()` if you want the opposite."
+    }
+   ]
+  },
+  {
+   "slug": "tb-tests",
+   "accessor": "tb.tests",
+   "class": "Tests",
+   "doc": "Accessed as `tb.tests`.",
+   "members": [
+    {
+     "name": "create",
+     "kind": "method",
+     "signature": "(*, device: str | Device, software: str | Software, outcome: str, tag: str = 'adhoc', software_version: str | None = None, component: str | SoftwareComponent | None = None, component_version: str | None = None, misc_data: dict | None = None, notes: str | None = None, run_at: date | str | None = None, test_run: str | TestRun | None = None, test_run_artifacts: Iterable[FileSource] | None = None, artifacts: Iterable[FileSource] | None = None, output: str | None = None, output_file: FileSource | None = None) -> Test",
+     "doc": "Record one run, optionally with its files.\n\n```python\ntb.tests.create(device=\"dev-0042\", software=\"nmap\", outcome=\"pass\",\n                tag=\"acceptance\", misc_data={\"duration_s\": 12.4})\n```\n\n`device` and `software` are the names you already have; the UUIDs the\nAPI wants are resolved and cached for you.\n\nLeaving `software_version` unset records the version the software is on\nnow, which is almost always right — the run exercised whatever is\ncurrent. Set it when the run exercised a build the catalogue has moved\npast.\n\n`component` records the run against one component of a software suite\n(\"Outlook\" in \"Microsoft 365\"): a `SoftwareComponent` from\n`software.components`, or its name with `component_version`. A name the\nsuite does not list yet is added to it, as the web app does.\n\n`misc_data` is free-form JSON: durations, throughput, log URLs, exit codes.\nIt is the field that makes these results worth querying later, so put\nthe numbers in it rather than in `notes`. Custom test fields an\nadministrator defined under Schema -> Tests live in it too, by their\nfield key; one marked required has to be there or the run is refused\nwith a ValidationError naming it. `tb.entity_fields(\"tests\")` lists them.\n\n`test_run` puts the run in a test run (a `TestRun` from\n`tb.test_runs.start()`, or its id), whose shared files, such as a\npytest report, then show with this run's own. Its own files are\nstored in the test run's folder in the bucket.\n\n`test_run_artifacts` shares files with every test in that run, such as\na report or a test outline, as `tb.test_runs.attach()` does; it needs\n`test_run`. Attach a file once per run, not with every test.\n\n`artifacts` attaches files (paths, bytes or open binary files) and\n`output` the run's text output — or `output_file` to read it from disk.\nWhen there are files, the server is asked first whether it can store\nany (`file_storage()`), so a run is never recorded with files that were\nalways going to be refused. Past that, the run is recorded first and the\nfiles uploaded after it, so an upload that fails leaves the run\nrecorded: the exception carries it as `.test`, for a retry with\n`upload_artifact()` or `set_output()`."
+    },
+    {
+     "name": "record",
+     "kind": "method",
+     "signature": "(device, software, passed: bool, **kwargs) -> Test",
+     "doc": "`create()` for the common case where a framework has a boolean.\n\nMaps True to \"pass\" and False to \"fail\". \"warn\" has no boolean, so\nreach for `create()` when you want it."
+    },
+    {
+     "name": "update",
+     "kind": "method",
+     "signature": "(test: str | Test, **fields) -> Test",
+     "doc": "Amend a recorded result (outcome, tag, misc_data, notes, run_at,\nsoftware_version).\n\n`component=` moves the run onto another component of its suite; it\ntakes a `SoftwareComponent` or a component id, since the API amends by\nid only.\n\n`test_run=` moves the run into a test run (a `TestRun` or its id), and\n`test_run=None` takes it out of one. Files already uploaded stay where\nthey were stored."
+    },
+    {
+     "name": "delete",
+     "kind": "method",
+     "signature": "(test: str | Test) -> None",
+     "doc": ""
+    },
+    {
+     "name": "list",
+     "kind": "method",
+     "signature": "(*, device: str | Device | None = None, software: str | Software | None = None, software_version: str | None = None, outcome: str | None = None, tag: str | None = None, component: str | SoftwareComponent | None = None, component_version: str | None = None, test_run: str | TestRun | None = None, search: str | None = None, fields: dict[str, str | int | float | bool] | None = None, sort: str = 'created_at', order: str = 'desc', limit: int | None = None) -> list[Test]",
+     "doc": "Recorded runs, newest first, across as many pages as it takes.\n\n`component` and `component_version` narrow to runs recorded against a\nsuite component. `test_run` narrows to one test run's (a `TestRun` or\nits id); `test_run=\"none\"` to runs recorded outside any. `fields` filters on any test field by its key,\nincluding custom ones: `fields={\"lab\": \"East\"}`."
+    },
+    {
+     "name": "iter",
+     "kind": "method",
+     "signature": "(*, device: str | Device | None = None, software: str | Software | None = None, software_version: str | None = None, outcome: str | None = None, tag: str | None = None, component: str | SoftwareComponent | None = None, component_version: str | None = None, test_run: str | TestRun | None = None, search: str | None = None, fields: dict[str, str | int | float | bool] | None = None, sort: str = 'created_at', order: str = 'desc', limit: int | None = None) -> Iterator[Test]",
+     "doc": ""
+    },
+    {
+     "name": "get",
+     "kind": "method",
+     "signature": "(test_id: str) -> Test",
+     "doc": ""
+    },
+    {
+     "name": "for_device",
+     "kind": "method",
+     "signature": "(device: str | Device, *, limit: int | None = None) -> list[Test]",
+     "doc": "Every recorded run against one device, newest first."
+    },
+    {
+     "name": "file_storage",
+     "kind": "method",
+     "signature": "() -> TestFileStorage",
+     "doc": "Whether this server can store output and artifacts, and the limits.\n\nBoth live in object storage an administrator configures; without it,\nuploads are refused. A server older than 1.13.4 cannot say, and is\nreported as enabled with no known limits — the upload itself is then\nwhat finds out."
+    },
+    {
+     "name": "artifacts",
+     "kind": "method",
+     "signature": "(test: str | Test) -> list[TestArtifact]",
+     "doc": "The files attached to a run, oldest first.\n\nFiles its test run shares with all of its tests are not among them;\n`shared_artifacts()` lists those."
+    },
+    {
+     "name": "shared_artifacts",
+     "kind": "method",
+     "signature": "(test: str | Test) -> list[TestRunArtifact]",
+     "doc": "The files the run's test run shares with all of its tests, such as a\npytest report. Empty for a run outside any test run. Download them with\n`tb.test_runs.download_artifact()`."
+    },
+    {
+     "name": "upload_artifact",
+     "kind": "method",
+     "signature": "(test: str | Test, file: FileSource, *, filename: str | None = None, content_type: str | None = None) -> TestArtifact",
+     "doc": "Attach one file to a run. Repeat for more; duplicate names are fine.\n\n```python\ntb.tests.upload_artifact(result, \"capture.pcap\")\ntb.tests.upload_artifact(result, png_bytes, filename=\"screen.png\")\n```\n\nNeeds `tests.edit`, and object storage enabled on the server."
+    },
+    {
+     "name": "download_artifact",
+     "kind": "method",
+     "signature": "(test: str | Test, artifact: str | TestArtifact, dest: str | os.PathLike[str] | BinaryIO | None = None) -> bytes | Path | None",
+     "doc": "Fetch an artifact's bytes.\n\nWith no `dest`, returns the bytes. With a directory, saves under the\nartifact's own filename (which needs the `TestArtifact`, not just its\nid) and returns the path; with a file path, saves there and returns it;\nwith an open binary file, writes into it and returns None."
+    },
+    {
+     "name": "delete_artifact",
+     "kind": "method",
+     "signature": "(test: str | Test, artifact: str | TestArtifact) -> None",
+     "doc": ""
+    },
+    {
+     "name": "output",
+     "kind": "method",
+     "signature": "(test: str | Test) -> TestOutput | None",
+     "doc": "The run's text output, or None when it has none."
+    },
+    {
+     "name": "set_output",
+     "kind": "method",
+     "signature": "(test: str | Test, text: str, *, filename: str = 'output.txt') -> TestOutput",
+     "doc": "Store `text` as the run's output, replacing any it had.\n\nOutput is ASCII text the TestBench UI shows in a viewer; anything else is\nrefused with a ValidationError, as is a file over the server's limit\n(1 MiB unless configured otherwise)."
+    },
+    {
+     "name": "upload_output",
+     "kind": "method",
+     "signature": "(test: str | Test, file: FileSource, *, filename: str | None = None) -> TestOutput",
+     "doc": "Store a file (path, bytes or open binary file) as the run's output."
+    },
+    {
+     "name": "delete_output",
+     "kind": "method",
+     "signature": "(test: str | Test) -> None",
+     "doc": "Remove the run's output. Raises NotFound when it has none."
+    }
+   ]
+  },
+  {
+   "slug": "tb-test-runs",
+   "accessor": "tb.test_runs",
+   "class": "TestRuns",
+   "doc": "Accessed as `tb.test_runs`.",
+   "members": [
+    {
+     "name": "start",
+     "kind": "method",
+     "signature": "(name: str, *, external_id: str | None = None, url: str | None = None, started_at: datetime | str | None = None, notes: str | None = None) -> TestRun",
+     "doc": "Start a test run, or join the one already started with `external_id`.\n\nPass the CI pipeline's ID as `external_id` and every job of the\npipeline can call this and get the same run back, whichever starts\nfirst; the first caller's name and link are the ones kept. Without\none, every call starts a run of its own. `started_at` defaults to now."
+    },
+    {
+     "name": "start_from_ci",
+     "kind": "method",
+     "signature": "(name: str | None = None, *, notes: str | None = None, env: Mapping[str, str] | None = None) -> TestRun",
+     "doc": "Start, or join, the test run for the CI pipeline this is running in.\n\nReads GitLab CI or GitHub Actions' own environment variables for the\npipeline's ID, link and a name, so every job of one pipeline gets the\nsame run without passing anything:\n\n```python\nrun = tb.test_runs.start_from_ci()\n```\n\n- GitLab: one run per pipeline (`CI_PIPELINE_ID`), named like\n  `group/project #812 (main)` and linked to `CI_PIPELINE_URL`. Retried\n  jobs stay in the pipeline, so their results join the same run.\n- GitHub Actions: one run per workflow run (`GITHUB_RUN_ID`), named like\n  `owner/repo CI #57 (main)` and linked to the run's page. Re-running\n  jobs keeps the run ID, so their results join the same run too.\n\nThe external ID is prefixed with the CI system and its host\n(`gitlab:gitlab.example.com:812`), so pipelines from two systems never\nshare a run. `name` overrides the generated name, which only the job\nthat creates the run gets to set. Raises ValueError outside either CI\nsystem; use `start()` there. `env` defaults to `os.environ`."
+    },
+    {
+     "name": "update",
+     "kind": "method",
+     "signature": "(run: str | TestRun, **fields) -> TestRun",
+     "doc": "Change a run's name, external_id, url, notes, started_at or finished_at."
+    },
+    {
+     "name": "finish",
+     "kind": "method",
+     "signature": "(run: str | TestRun, *, at: datetime | str | None = None) -> TestRun",
+     "doc": "Mark the run finished, now unless `at` says when."
+    },
+    {
+     "name": "delete",
+     "kind": "method",
+     "signature": "(run: str | TestRun) -> None",
+     "doc": "Delete the run. Its tests are kept, no longer in a run."
+    },
+    {
+     "name": "get",
+     "kind": "method",
+     "signature": "(run_id: str) -> TestRun",
+     "doc": ""
+    },
+    {
+     "name": "list",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, sort: str = 'created_at', order: str = 'desc', limit: int | None = None) -> list[TestRun]",
+     "doc": "Test runs, newest first. `search` matches the name or external_id."
+    },
+    {
+     "name": "iter",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, sort: str = 'created_at', order: str = 'desc', limit: int | None = None) -> Iterator[TestRun]",
+     "doc": ""
+    },
+    {
+     "name": "tests",
+     "kind": "method",
+     "signature": "(run: str | TestRun, **filters) -> list[Test]",
+     "doc": "The tests recorded in the run; takes the filters `tb.tests.list()` does."
+    },
+    {
+     "name": "artifacts",
+     "kind": "method",
+     "signature": "(run: str | TestRun) -> list[TestRunArtifact]",
+     "doc": "The files the run shares with all of its tests, oldest first."
+    },
+    {
+     "name": "attach",
+     "kind": "method",
+     "signature": "(run: str | TestRun, file: FileSource, *, filename: str | None = None, content_type: str | None = None) -> TestRunArtifact",
+     "doc": "Share a file (path, bytes or open binary file) with every test in the run.\n\nStored once, in the run's folder in the bucket. Needs `tests.edit`, and\nobject storage enabled on the server."
+    },
+    {
+     "name": "download_artifact",
+     "kind": "method",
+     "signature": "(run: str | TestRun, artifact: str | TestRunArtifact, dest: str | os.PathLike[str] | BinaryIO | None = None) -> bytes | Path | None",
+     "doc": "Fetch a shared file: bytes with no `dest`, else saved as\n`tb.tests.download_artifact()` saves."
+    },
+    {
+     "name": "delete_artifact",
+     "kind": "method",
+     "signature": "(run: str | TestRun, artifact: str | TestRunArtifact) -> None",
+     "doc": "Remove a shared file, from every test in the run."
+    }
+   ]
+  },
+  {
+   "slug": "tb-vendor-devices",
+   "accessor": "tb.vendor_devices",
+   "class": "VendorDevices",
+   "doc": "Accessed as `tb.vendor_devices`.\n\nSearches every software version's compatibility list at once. To read one\nsoftware's list on its own, pass `software=`.",
+   "members": [
+    {
+     "name": "import_rows",
+     "kind": "method",
+     "signature": "(rows: Iterable[dict]) -> dict",
+     "doc": "Import vendor claims across software versions.\n\nEach row needs `software_name`, `software_version`, and hardware fields.\nUse `component_name`, `component_version`, and optional\n`component_status` for one component per row. Rows for the same\nsoftware version and hardware merge their component claims. The server\nreports `created`, `updated`, and per-row `errors`."
+    },
+    {
+     "name": "import_csv",
+     "kind": "method",
+     "signature": "(path: str | Path) -> dict",
+     "doc": "Upload a Vendor Claims CSV, including flat component columns."
+    },
+    {
+     "name": "list",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, software: str | Software | None = None, make: str | None = None, model: str | None = None, firmware_version: str | None = None, hardware_version: str | None = None, architecture: str | None = None, support_status: str | None = None, component_name: str | None = None, component_version: str | None = None, component_status: str | None = None, sort: str = 'make', order: str = 'asc', limit: int | None = None) -> list[VendorDevice]",
+     "doc": "Every claim matching the filters, across as many pages as it takes.\n\n`search` matches make, model, firmware, hardware version, architecture,\nsource, notes, component names and versions, and the software's own\nname and version at once; the\nnamed filters are narrower and combine with AND.\n\n`software` takes a name and covers **every version of it** — a claim\nmade by 1.0 and one made by 2.0 are separate rows, and both come back.\nUse `for_software()` to read one version's list on its own.\n\n`support_status` filters the general vendor claim: supported, partial,\nunsupported or planned. Per-component overrides are available on each\nreturned row's `component_support` list. Component filters match one\ncomponent version's effective status; `matching_components` identifies\neach match and whether it inherited the suite status."
+    },
+    {
+     "name": "iter",
+     "kind": "method",
+     "signature": "(*, search: str | None = None, software: str | Software | None = None, make: str | None = None, model: str | None = None, firmware_version: str | None = None, hardware_version: str | None = None, architecture: str | None = None, support_status: str | None = None, component_name: str | None = None, component_version: str | None = None, component_status: str | None = None, sort: str = 'make', order: str = 'asc', limit: int | None = None) -> Iterator[VendorDevice]",
+     "doc": "Like `list()`, but yields as pages arrive rather than buffering."
+    },
+    {
+     "name": "for_software",
+     "kind": "method",
+     "signature": "(name: str | Software, version: str | None = None, *, search: str | None = None, support_status: str | None = None, component_name: str | None = None, component_version: str | None = None, component_status: str | None = None, limit: int | None = None) -> list[VendorDevice]",
+     "doc": "One software version's own compatibility list.\n\nA bare name gives the current version's list, the same way every other\nname in this library resolves. Note that versions do not inherit from\none another: a new version starts as a copy and the two diverge, so\nthis is genuinely the list that version publishes — not its ancestor's.\n\nResolved to an id and asked of the catalogue rather than of the\nsoftware's own sub-resource: the catalogue takes the same filters as\n`list()` and its rows already name the software they belong to, so a\nrecord is the same shape whichever way it arrived."
+    },
+    {
+     "name": "for_device",
+     "kind": "method",
+     "signature": "(identifier: str | Device, *, supported_only: bool = False, component_name: str | None = None, component_version: str | None = None, component_status: str | None = None, limit: int | None = None) -> list[VendorDevice]",
+     "doc": "Claims describing a device in the fleet, by its own make and model.\n\nA convenience over `list()`, not a new question: it reads the device's\nmake and model and searches the catalogue for them. Claims are matched\non the hardware a vendor published, so a claim naming only a make will\nnot be found by a search that also pins the model — this errs towards\nthe narrow answer, which is the one that is actually about this device.\n\nReturns nothing for a device with neither a make nor a model; there is\nnothing to match on, and every claim in the catalogue is not an answer."
+    },
+    {
+     "name": "inventory_matches",
+     "kind": "method",
+     "signature": "(claim: VendorDevice, *, limit: int | None = None) -> list[str]",
+     "doc": "Unique IDs of the devices in the fleet this claim describes.\n\n`claim.inventory_devices` holds only the first few; this pages through\nall of them. Matched the same way the claims list counts them."
+    }
+   ]
+  }
+ ],
+ "models": [
+  {
+   "slug": "device",
+   "name": "Device",
+   "doc": "A device in the fleet.\n\n`status` is the workflow state a person sets; `online` comes from network\nscanning and is unrelated — a checked-out device can be online, and an\navailable one offline.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "unique_id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "device_type_id",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "device_type_key",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "device_type_label",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "status",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "location",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "make",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "model",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "firmware_version",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "hardware_version",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "architecture",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "wan_ip",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "lan_ip",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "online",
+     "type": "bool",
+     "default": "False"
+    },
+    {
+     "name": "last_seen_online",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "last_scanned_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "misc_data",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "checked_out_by",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "checked_out_by_username",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "checked_out_at",
+     "type": "date | None",
+     "default": "None"
+    },
+    {
+     "name": "checkout_purpose",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "checkout_due",
+     "type": "date | None",
+     "default": "None"
+    },
+    {
+     "name": "data",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "link_overrides",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "tested_components",
+     "type": "list[dict]",
+     "default": "[]"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "updated_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "tests",
+     "type": "list['Test']",
+     "default": "[]"
+    },
+    {
+     "name": "verified_tests",
+     "type": "list['Test']",
+     "default": "[]"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'Device'",
+     "doc": ""
+    },
+    {
+     "name": "field",
+     "kind": "method",
+     "signature": "(key: str, default: Any = None) -> Any",
+     "doc": "One installation-defined value, by its stable field key.\n\nKeys are stable; labels are presentation and may be changed by an\nadministrator at any time, so nothing here is addressed by label."
+    },
+    {
+     "name": "is_available",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": ""
+    },
+    {
+     "name": "is_checked_out",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": ""
+    },
+    {
+     "name": "is_overdue",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": "Past its return date and still out.\n\nDerived here the same way the API derives it, so a Device read from any\nendpoint can answer without a second call."
+    },
+    {
+     "name": "days_overdue",
+     "kind": "property",
+     "signature": ": int",
+     "doc": "How many days late, or 0 if it is not."
+    }
+   ]
+  },
+  {
+   "slug": "devicetype",
+   "name": "DeviceType",
+   "doc": "One inventory category, with its own page, columns and rules.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "key",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "label",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "description",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "icon",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "enabled",
+     "type": "bool",
+     "default": "True"
+    },
+    {
+     "name": "position",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "device_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "configuration_source",
+     "type": "str",
+     "default": "'gui'"
+    },
+    {
+     "name": "field_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "required_field_keys",
+     "type": "list[str]",
+     "default": "[]"
+    },
+    {
+     "name": "plugin_ids",
+     "type": "list[str]",
+     "default": "[]"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'DeviceType'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "software",
+   "name": "Software",
+   "doc": "A piece of software at one version.\n\nRows sharing a name are one software; a bare name always addresses the\nCURRENT version, which is the highest numeric version in its name group.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "name",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "version",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "version_count",
+     "type": "int",
+     "default": "1"
+    },
+    {
+     "name": "is_latest",
+     "type": "bool",
+     "default": "True"
+    },
+    {
+     "name": "vendor_device_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "misc_data",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "components",
+     "type": "list[SoftwareComponent]",
+     "default": "[]"
+    },
+    {
+     "name": "bundle_parent_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "matching_components",
+     "type": "list[SoftwareComponent]",
+     "default": "[]"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "updated_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'Software'",
+     "doc": ""
+    },
+    {
+     "name": "is_suite",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": "Whether this version is made of components."
+    },
+    {
+     "name": "component",
+     "kind": "method",
+     "signature": "(name: str, version: str | None = None) -> SoftwareComponent | None",
+     "doc": "One of this version's components by name (any case), or None."
+    }
+   ]
+  },
+  {
+   "slug": "softwarecomponent",
+   "name": "SoftwareComponent",
+   "doc": "One component of a software suite at one version: \"Outlook 16.2\" in\n\"Microsoft 365 2026.1\".\n\nA suite version lists its components; a test can be recorded against one of\nthem, and a vendor claim can say something different about one of them than\nabout the suite as a whole.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "name",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "version",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "required",
+     "type": "bool",
+     "default": "True"
+    },
+    {
+     "name": "position",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'SoftwareComponent'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "test",
+   "name": "Test",
+   "doc": "One recorded run of a piece of software against a device.\n\n`software_version` is a snapshot taken when the run was recorded, not a\nlive reference: the software moves on, the evidence stays attached to the\nbuild it was gathered on.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "software_id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "software_name",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "software_version",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "component_id",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "component_name",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "component_version",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "device_id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "device_unique_id",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "device_make",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "device_model",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "outcome",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "tag",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "misc_data",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "notes",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "run_at",
+     "type": "date | None",
+     "default": "None"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "updated_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "created_by_username",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "artifact_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "output_filename",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "output_size_bytes",
+     "type": "int | None",
+     "default": "None"
+    },
+    {
+     "name": "test_run_id",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "test_run_name",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "test_run_artifact_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'Test'",
+     "doc": ""
+    },
+    {
+     "name": "passed",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": ""
+    },
+    {
+     "name": "has_output",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "testartifact",
+   "name": "TestArtifact",
+   "doc": "A file attached to a recorded run: a report, a capture, a screenshot.\n\nStored privately in the server's object store under\n`tests/<test-id>/artifacts/<artifact-id>/<filename>`, or inside its test\nrun's folder when the test belongs to one; download it with\n`tb.tests.download_artifact()`.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "test_id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "filename",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "content_type",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "size_bytes",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'TestArtifact'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "testeddevice",
+   "name": "TestedDevice",
+   "doc": "A device a software version has actually been run against, from its tests.\n\nEvidence, unlike a vendor claim. With a suite, each component tested on a\ndevice is its own entry, naming the `component`.",
+   "fields": [
+    {
+     "name": "device",
+     "type": "Device",
+     "default": "Device(id='', unique_id='', device_type_id=None, device_type_key=None, device_type_label=None, status='', location=None, make=None, model=None, firmware_version=None, hardware_version=None, architecture=None, wan_ip=None, lan_ip=None, online=False, last_seen_online=None, last_scanned_at=None, misc_data={}, checked_out_by=None, checked_out_by_username=None, checked_out_at=None, checkout_purpose=None, checkout_due=None, data={}, link_overrides={}, created_at=None, updated_at=None)"
+    },
+    {
+     "name": "test_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "last_test_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "outcomes",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "component",
+     "type": "SoftwareComponent | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'TestedDevice'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "testfilestorage",
+   "name": "TestFileStorage",
+   "doc": "Whether recorded runs can carry files here, and how big.\n\nOutput and artifacts both live in the server's object storage. With it\nswitched off, uploads are refused and reads find nothing.",
+   "fields": [
+    {
+     "name": "enabled",
+     "type": "bool",
+     "default": "False"
+    },
+    {
+     "name": "output_max_bytes",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "artifact_max_bytes",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'TestFileStorage'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "testoutput",
+   "name": "TestOutput",
+   "doc": "A run's one text output file, as read back from the server.\n\n`text` is None when the server could not read the stored file; `error` then\nsays why (most often that the object has gone from the bucket). The output\ncan still be replaced or deleted.",
+   "fields": [
+    {
+     "name": "filename",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "size_bytes",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "text",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "error",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "updated_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'TestOutput'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "testrun",
+   "name": "TestRun",
+   "doc": "One execution of a pipeline or suite: the tests it recorded, and the\nfiles it shares with all of them, such as a pytest report, stored once.\n\n`external_id` is the caller's own identity for the run, such as a CI\npipeline ID; starting a run with one already in use joins that run.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "name",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "external_id",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "url",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "started_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "finished_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "notes",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "test_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "pass_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "fail_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "warn_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "artifact_count",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "updated_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "created_by_username",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'TestRun'",
+     "doc": ""
+    },
+    {
+     "name": "finished",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "testrunartifact",
+   "name": "TestRunArtifact",
+   "doc": "A file a test run shares with every test in it.\n\nStored once, under `test-runs/<run-name>_<run-id>/artifacts/` in the\nserver's object store, and listed with each of the run's tests.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "test_run_id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "filename",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "content_type",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "size_bytes",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'TestRunArtifact'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "vendordevice",
+   "name": "VendorDevice",
+   "doc": "Hardware a vendor CLAIMS their software supports.\n\nNot a device in the fleet and not evidence: a row here says a vendor\npublished support for that hardware, whether or not anyone owns one and\nwhether or not it has ever been run. What has actually been tested is a\n`Test`, and absence of one means untested, not unsupported.\n\nA claim belongs to one software version, which `software_name` and\n`software_version` name. `software_is_latest` is false for a claim made by\na version that has since been superseded — still a real claim, but not\ncurrent guidance.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "software_id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "software_name",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "software_version",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "software_is_latest",
+     "type": "bool",
+     "default": "True"
+    },
+    {
+     "name": "make",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "model",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "firmware_version",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "hardware_version",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "architecture",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "support_status",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "component_support",
+     "type": "list[dict]",
+     "default": "[]"
+    },
+    {
+     "name": "matching_components",
+     "type": "list[dict]",
+     "default": "[]"
+    },
+    {
+     "name": "inventory_match_count",
+     "type": "int | None",
+     "default": "None"
+    },
+    {
+     "name": "inventory_devices",
+     "type": "list[str]",
+     "default": "[]"
+    },
+    {
+     "name": "source",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "notes",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "misc_data",
+     "type": "dict",
+     "default": "{}"
+    },
+    {
+     "name": "created_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "updated_at",
+     "type": "datetime | None",
+     "default": "None"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'VendorDevice'",
+     "doc": ""
+    },
+    {
+     "name": "is_supported",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": "The vendor said yes without qualification. `partial` is not this."
+    },
+    {
+     "name": "hardware",
+     "kind": "property",
+     "signature": ": str",
+     "doc": "Make and model as one string, for a log line."
+    }
+   ]
+  },
+  {
+   "slug": "compatiblesoftware",
+   "name": "CompatibleSoftware",
+   "doc": "A software version whose vendor claims describe one device.\n\nAnswers \"who claims to support this box?\", matched the way the device page\nmatches it. Still a claim, not evidence: see `VendorDevice`.",
+   "fields": [
+    {
+     "name": "software",
+     "type": "Software",
+     "default": "Software(id='', name='', version='', version_count=1, is_latest=True, vendor_device_count=0, misc_data={}, components=[], bundle_parent_count=0, matching_components=[], created_at=None, updated_at=None)"
+    },
+    {
+     "name": "support_status",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "matched_on",
+     "type": "list[str]",
+     "default": "[]"
+    },
+    {
+     "name": "claims",
+     "type": "list[VendorDevice]",
+     "default": "[]"
+    },
+    {
+     "name": "fields",
+     "type": "list[dict]",
+     "default": "[]"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'CompatibleSoftware'",
+     "doc": ""
+    },
+    {
+     "name": "is_supported",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "searchresults",
+   "name": "SearchResults",
+   "doc": "What the web app's search box finds for one query, grouped by kind.\n\nEach list holds at most the limit asked for; the totals count every match.",
+   "fields": [
+    {
+     "name": "devices",
+     "type": "list[Device]",
+     "default": "[]"
+    },
+    {
+     "name": "software",
+     "type": "list[Software]",
+     "default": "[]"
+    },
+    {
+     "name": "tests",
+     "type": "list[Test]",
+     "default": "[]"
+    },
+    {
+     "name": "vendor_devices",
+     "type": "list[VendorDevice]",
+     "default": "[]"
+    },
+    {
+     "name": "devices_total",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "software_total",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "tests_total",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "vendor_devices_total",
+     "type": "int",
+     "default": "0"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'SearchResults'",
+     "doc": ""
+    }
+   ]
+  },
+  {
+   "slug": "identity",
+   "name": "Identity",
+   "doc": "Who the configured API key authenticates as, and what it may do.",
+   "fields": [
+    {
+     "name": "id",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "username",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "role",
+     "type": "str",
+     "default": "''"
+    },
+    {
+     "name": "email",
+     "type": "str | None",
+     "default": "None"
+    },
+    {
+     "name": "permissions",
+     "type": "frozenset[str]",
+     "default": "frozenset()"
+    },
+    {
+     "name": "raw",
+     "type": "dict",
+     "default": "{}"
+    }
+   ],
+   "members": [
+    {
+     "name": "from_dict",
+     "kind": "classmethod",
+     "signature": "(data: dict) -> 'Identity'",
+     "doc": ""
+    },
+    {
+     "name": "can",
+     "kind": "method",
+     "signature": "(permission: str) -> bool",
+     "doc": "Whether this key holds one permission, e.g. `can(TESTS_EDIT)`.\n\nWorth asking at the start of a run rather than discovering it as a 403\nhalfway through a suite."
+    },
+    {
+     "name": "can_write",
+     "kind": "property",
+     "signature": ": bool",
+     "doc": "Whether this key may record results and check devices out.\n\nThe two things a test framework does. A key that can do one and not the\nother is unusual but expressible, and this is deliberately the\nconjunction: a suite that can check a device out and then cannot write\ndown what happened has failed in the least useful way possible."
+    }
+   ]
+  }
+ ],
+ "errors": [
+  {
+   "name": "TestBenchError",
+   "base": "Exception",
+   "doc": "Base for everything this library raises.\n\nCatching this catches every failure the client can produce, including the\nones that never reached the API.",
+   "members": []
+  },
+  {
+   "name": "TransportError",
+   "base": "TestBenchError",
+   "doc": "The request never reached the API, or no response came back.\n\nNot named ConnectionError: that is a builtin, and shadowing it in a library\npeople will `from ... import *` is a trap.",
+   "members": []
+  },
+  {
+   "name": "AuthenticationError",
+   "base": "TestBenchError",
+   "doc": "401 — the API key is missing, malformed, expired or revoked.\n\nNever retried. A key does not become valid again on its own; something has\nto mint a new one.",
+   "members": []
+  },
+  {
+   "name": "PermissionDenied",
+   "base": "TestBenchError",
+   "doc": "403 — authenticated, but the key's role is too low for this call.\n\nA key's role is the lower of the role it was minted with and its owner's\ncurrent role, so this can appear without the key itself changing.",
+   "members": []
+  },
+  {
+   "name": "NotFound",
+   "base": "TestBenchError",
+   "doc": "404 — no such device, test or software.",
+   "members": []
+  },
+  {
+   "name": "Conflict",
+   "base": "TestBenchError",
+   "doc": "409 — the request collided with the current state.",
+   "members": []
+  },
+  {
+   "name": "ValidationError",
+   "base": "TestBenchError",
+   "doc": "400 or 422 — the request body or query was rejected.",
+   "members": []
+  },
+  {
+   "name": "ServerError",
+   "base": "TestBenchError",
+   "doc": "5xx — the API failed internally.",
+   "members": []
+  },
+  {
+   "name": "UnknownDevice",
+   "base": "NotFound",
+   "doc": "No device matched the identifier given.\n\n`suggestions` holds near misses from a search on the same string, which is\nusually enough to spot a typo from a CI log alone.",
+   "members": []
+  },
+  {
+   "name": "UnknownSoftware",
+   "base": "NotFound",
+   "doc": "No software matched the name (or the name matched, but not that version).",
+   "members": []
+  },
+  {
+   "name": "DeviceUnavailable",
+   "base": "Conflict",
+   "doc": "The device cannot be checked out: someone else holds it, or it is not\navailable (broken, missing, in inventory).\n\nRaised by this library, usually before the API is asked at all, so it\ncarries no HTTP status — except when the API's own 409 caught a device\nclaimed mid-checkout, which it passes on. `device` is the record as it was\nwhen the attempt was refused.",
+   "members": []
+  }
+ ],
+ "constants": [
+  {
+   "name": "DEVICE_STATUSES",
+   "value": "('available', 'checked_out', 'inventory', 'missing', 'broken')"
+  },
+  {
+   "name": "TEST_OUTCOMES",
+   "value": "('pass', 'fail', 'warn')"
+  },
+  {
+   "name": "TEST_TAGS",
+   "value": "('adhoc', 'acceptance', 'end-to-end', 'automated')"
+  },
+  {
+   "name": "VENDOR_SUPPORT_STATUSES",
+   "value": "('supported', 'partial', 'unsupported', 'planned')"
+  },
+  {
+   "name": "PASS",
+   "value": "'pass'"
+  },
+  {
+   "name": "FAIL",
+   "value": "'fail'"
+  },
+  {
+   "name": "WARN",
+   "value": "'warn'"
+  },
+  {
+   "name": "DEVICES_EDIT",
+   "value": "'devices.edit'"
+  },
+  {
+   "name": "SOFTWARE_EDIT",
+   "value": "'software.edit'"
+  },
+  {
+   "name": "TESTS_EDIT",
+   "value": "'tests.edit'"
+  },
+  {
+   "name": "VIEWS_SAVE",
+   "value": "'views.save'"
+  },
+  {
+   "name": "AUDIT_VIEW",
+   "value": "'audit.view'"
+  },
+  {
+   "name": "USERS_MANAGE",
+   "value": "'users.manage'"
+  },
+  {
+   "name": "SCHEMA_MANAGE",
+   "value": "'schema.manage'"
+  },
+  {
+   "name": "PLUGINS_MANAGE",
+   "value": "'plugins.manage'"
+  },
+  {
+   "name": "SETTINGS_MANAGE",
+   "value": "'settings.manage'"
+  }
+ ]
+}

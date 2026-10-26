@@ -9,3 +9,6 @@ Network scan plugin: enabled (one short-lived worker Job per run)
 {{- if .Values.plugins.deviceInfo.enabled }}
 Device info plugin: enabled using {{ .Values.plugins.deviceInfo.ai.url }}
 {{- end }}
+{{- if .Values.plugins.testSummary.enabled }}
+AI Test Summary plugin: enabled; "Summarize with AI" is available on every test run
+{{- end }}

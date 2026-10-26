@@ -8,7 +8,7 @@ from datetime import date
 from typing import Iterator
 from urllib.parse import quote
 
-from .errors import DeviceUnavailable, NotFound, UnknownDevice
+from .errors import Conflict, DeviceUnavailable, NotFound, UnknownDevice
 from .models import DEVICE_STATUSES, CompatibleSoftware, Device, to_api_date
 
 logger = logging.getLogger("testbench_client")
@@ -210,16 +210,18 @@ class Devices:
         Past `due` the device shows as overdue and whoever holds it is
         reminded daily — nothing takes it back automatically.
 
-        The API does not enforce exclusivity: `PATCH status=checked_out` on a
-        device someone else already holds is a no-op that returns 200, leaving
-        their name on it. So this checks first, and checks again afterwards —
-        if another run claimed it in between, the second check catches it and
-        raises rather than letting a suite proceed on hardware it does not own.
+        The API refuses (409) a checkout of a device someone else holds, and
+        this checks first as well, so the refusal comes back as
+        `DeviceUnavailable` naming the holder. `force=True` takes it over
+        instead — an admin's call only; anyone else gets `PermissionDenied`. If another run claimed it between
+        the check and the checkout, that 409 — or the re-read afterwards —
+        raises the same way, rather than letting a suite proceed on hardware it
+        does not own.
 
-        That is a guard, not a lock. Two clients calling this microseconds apart
-        can still both believe they won; the loser finds out on the re-read.
-        For genuinely contended hardware, serialise at a level that has a lock
-        to offer (a CI job queue, a resource plugin).
+        That is a guard, not a lock: two clients calling this at the same
+        instant can both pass the API's check. For genuinely contended
+        hardware, serialise at a level that has a lock to offer (a CI job
+        queue, a resource plugin).
 
         Already holding it is not an error — this is safe to call twice.
         """
@@ -256,13 +258,29 @@ class Devices:
             )
 
         if force and device.is_checked_out and device.checked_out_by_username != me:
-            # The stamp only moves when the status *changes*, so a takeover has
-            # to leave checked_out before re-entering it.
-            logger.warning("Taking %s from %s", device.unique_id,
+            # Only an admin may end someone else's checkout, so this is the
+            # API's take-over rather than a check-in and a checkout: one step,
+            # recorded as a take-over, with the holder told. Anyone else gets
+            # the API's 403 as PermissionDenied.
+            logger.warning("Taking %s over from %s", device.unique_id,
                            device.checked_out_by_username)
-            self.set_status(device.unique_id, "available")
+            body = self._dm.request(
+                "PATCH", f"/devices/{quote(device.id, safe='')}",
+                params={"take_over": "true"}, json={"status": "checked_out", **details},
+            )
+            return Device.from_dict(body)
 
-        updated = self.set_status(device.unique_id, "checked_out", **details)
+        try:
+            updated = self.set_status(device.unique_id, "checked_out", **details)
+        except Conflict as exc:
+            # Claimed by someone else since the read above; the API says so.
+            current = self.get(device.unique_id)
+            raise DeviceUnavailable(
+                f"{current.unique_id} was claimed by "
+                f"{current.checked_out_by_username or 'someone else'} while we were "
+                f"checking it out.",
+                device=current, status=exc.status, detail=exc.detail,
+            ) from exc
         if updated.checked_out_by_username != me:
             raise DeviceUnavailable(
                 f"{updated.unique_id} was claimed by "
@@ -278,6 +296,9 @@ class Devices:
         Idempotent: a device that is not checked out is left exactly as it is,
         including one someone deliberately marked `broken` — an automated
         release should not quietly undo that.
+
+        `only_if_mine=False` returns someone else's checkout, which the API
+        allows only an admin; anyone else gets `DeviceUnavailable`.
         """
         device = self.get(identifier)
         if not device.is_checked_out:
@@ -290,7 +311,17 @@ class Devices:
                 f"Pass only_if_mine=False to return it anyway.",
                 device=device,
             )
-        return self.set_status(device.unique_id, "available")
+        try:
+            return self.set_status(device.unique_id, "available")
+        except Conflict as exc:
+            # Someone else's checkout, and the API only lets its holder or an
+            # admin end it.
+            raise DeviceUnavailable(
+                f"{device.unique_id} is checked out by "
+                f"{device.checked_out_by_username or 'someone else'}; only they or an "
+                f"admin can check it in.",
+                device=device, status=exc.status, detail=exc.detail,
+            ) from exc
 
     @contextmanager
     def reserved(

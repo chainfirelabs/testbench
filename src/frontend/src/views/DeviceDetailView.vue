@@ -8,6 +8,7 @@ import DetailValue from '../components/DetailValue.vue'
 import { api } from '../api/client'
 import { daysFromToday, daysUntil, formatDate } from '../dates'
 import { describeScan } from '../scan'
+import { devicePatchPath, saveWithTakeOver } from '../checkoutTakeOver'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { optionLabel } from '../deviceColumns'
 import {
@@ -716,14 +717,21 @@ async function saveEdit() {
   }
   saving.value = true
   try {
-    const updated = await api<any>(`/devices/${detail.value.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        device_type_id: form.value.device_type_id || null,
-        data,
-        link_overrides: linkOverrides,
-      }),
+    const body = JSON.stringify({
+      device_type_id: form.value.device_type_id || null,
+      data,
+      link_overrides: linkOverrides,
     })
+    // Someone else's checkout is refused; an admin is offered the take-over,
+    // and declining it keeps the form open with nothing saved.
+    const updated = await saveWithTakeOver(
+      (takeOver) => api<any>(devicePatchPath(detail.value.id, takeOver), { method: 'PATCH', body }),
+      detail.value.unique_id,
+    )
+    if (!updated) {
+      toast.value = 'Not saved — the device is still checked out to its holder'
+      return
+    }
     Object.assign(detail.value, updated)
     editing.value = false
     invalidateCompat()

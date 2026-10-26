@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
 import { api } from './api/client'
 import { useIsMobile } from './breakpoints'
 import NavDrawer, { type NavLink } from './components/NavDrawer.vue'
@@ -61,6 +61,18 @@ watch(
   },
 )
 
+/*
+ * A device page is built for one device: it loads it when it mounts, and its
+ * tabs, counts and settings all belong to that device. Going from one device
+ * straight to another — a search result, a link in a test — would otherwise
+ * reuse the page, changing the URL while it kept showing the first device.
+ * Keying it by the device gives each one a fresh page. Every other view keeps
+ * being reused as before, and follows its route itself.
+ */
+function viewKey(shown: RouteLocationNormalizedLoaded): string | undefined {
+  return shown.name === 'device-detail' ? `device:${String(shown.params.id)}` : undefined
+}
+
 // ---------- navigation shell ----------
 // Below MOBILE the bar keeps only the brand and two buttons; the links, the
 // username and Log out move into the drawer. One list feeds both, so there is
@@ -68,7 +80,8 @@ watch(
 const isMobile = useIsMobile()
 const drawerOpen = ref(false)
 const searchSheetOpen = ref(false)
-const deviceMenuOpen = ref(false)
+// Which of the bar's dropdowns is open. One value, so opening one closes the other.
+const openMenu = ref<'devices' | 'admin' | null>(null)
 
 /*
  * Clicking Devices opens this submenu: All Devices and every enabled type.
@@ -93,16 +106,28 @@ const navLinks = computed<NavLink[]>(() => {
     { to: '/vendor-devices', label: 'Vendor Claims' },
     { to: '/tests', label: 'Tests' },
   ]
-  // One link per permission rather than one block for "admin": a role that
-  // can read the audit log and nothing else gets the Audit Log link and no
-  // others, which is the whole point of roles being definable.
+  return links
+})
+
+/*
+ * The Administration menu, alphabetical. One link per permission rather than
+ * one block for "admin": a role that can read the audit log and nothing else
+ * gets an Administration menu holding only Audit Log, which is the whole point
+ * of roles being definable. With no links at all the menu is not shown.
+ */
+const adminLinks = computed<NavLink[]>(() => {
+  const links: NavLink[] = []
   if (auth.can(PERMISSION.auditView)) links.push({ to: '/audit', label: 'Audit Log' })
   if (auth.can(PERMISSION.usersManage)) links.push({ to: '/users', label: 'Users' })
   if (auth.can(PERMISSION.settingsManage)) links.push({ to: '/settings/ai', label: 'AI Providers' })
   if (auth.can(PERMISSION.settingsManage)) links.push({ to: '/settings/replication', label: 'Replication' })
   if (auth.can(PERMISSION.schemaManage)) links.push({ to: '/settings/schema', label: 'Schema' })
-  return links
+  // The API reference is for whoever administers the installation.
+  if (auth.isAdmin) links.push({ to: '/docs', label: 'Docs' })
+  return links.sort((a, b) => a.label.localeCompare(b.label))
 })
+
+const adminActive = computed(() => adminLinks.value.some((link) => route.path.startsWith(link.to)))
 
 watch(
   () => auth.user?.id,
@@ -120,7 +145,7 @@ watch(
   () => route.path,
   () => {
     drawerOpen.value = false
-    deviceMenuOpen.value = false
+    openMenu.value = null
     closeSearchSheet()
   },
 )
@@ -259,7 +284,7 @@ function onSearchKeydown(e: KeyboardEvent) {
  * button is ignored by this and handled by the button.
  */
 function onDocumentClick(e: Event) {
-  if (!(e.target as HTMLElement)?.closest?.('.device-menu')) deviceMenuOpen.value = false
+  if (!(e.target as HTMLElement)?.closest?.('.device-menu')) openMenu.value = null
   // The sheet covers the screen and has its own close button; dismissing it
   // from a stray tap would fight the on-screen keyboard opening.
   if (!searchOpen.value || searchSheetOpen.value) return
@@ -304,16 +329,30 @@ onBeforeUnmount(() => {
             type="button"
             class="device-menu-trigger"
             :class="{ active: route.path.startsWith('/devices') }"
-            :aria-expanded="deviceMenuOpen"
-            @click="deviceMenuOpen = !deviceMenuOpen"
+            :aria-expanded="openMenu === 'devices'"
+            @click="openMenu = openMenu === 'devices' ? null : 'devices'"
           >
             Devices <span aria-hidden="true">▾</span>
           </button>
-          <div v-if="deviceMenuOpen" class="device-menu-panel">
+          <div v-if="openMenu === 'devices'" class="device-menu-panel">
             <router-link v-for="link in deviceLinks" :key="link.to" :to="link.to">{{ link.label }}</router-link>
           </div>
         </div>
         <router-link v-for="l in navLinks.filter((link) => link.to !== '/')" :key="l.to" :to="l.to">{{ l.label }}</router-link>
+        <div v-if="adminLinks.length" class="device-menu">
+          <button
+            type="button"
+            class="device-menu-trigger"
+            :class="{ active: adminActive }"
+            :aria-expanded="openMenu === 'admin'"
+            @click="openMenu = openMenu === 'admin' ? null : 'admin'"
+          >
+            Administration <span aria-hidden="true">▾</span>
+          </button>
+          <div v-if="openMenu === 'admin'" class="device-menu-panel device-menu-panel-end">
+            <router-link v-for="link in adminLinks" :key="link.to" :to="link.to">{{ link.label }}</router-link>
+          </div>
+        </div>
       </nav>
       <div class="spacer"></div>
       <button
@@ -471,7 +510,9 @@ onBeforeUnmount(() => {
          on the page would never close the panel. -->
     <div v-if="bellOpen" class="bell-backdrop" @click="bellOpen = false"></div>
     <div class="content">
-      <router-view />
+      <router-view v-slot="{ Component, route: shown }">
+        <component :is="Component" :key="viewKey(shown)" />
+      </router-view>
     </div>
     <!-- One interruption, for a device that has just gone late. Everything
          quieter than that waits in the bell. -->
@@ -482,6 +523,7 @@ onBeforeUnmount(() => {
       :open="drawerOpen"
       :links="navLinks"
       :device-links="deviceLinks"
+      :admin-links="adminLinks"
       :username="auth.user?.username"
       :role="auth.user?.role"
       :notification-count="notifications.unread"

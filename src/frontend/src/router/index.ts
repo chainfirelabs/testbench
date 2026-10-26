@@ -67,6 +67,15 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Test Run' },
   },
   {
+    // How to use the API and the Python client, with a reference read from
+    // this server. Hosted by the app so the backend's own /docs need not be
+    // exposed.
+    path: '/docs/:path(.*)?',
+    name: 'docs',
+    component: () => import('../views/DocsView.vue'),
+    meta: { title: 'Docs', admin: true },
+  },
+  {
     path: '/profile',
     name: 'profile',
     component: () => import('../views/ProfileView.vue'),
@@ -140,5 +149,6 @@ router.beforeEach(async (to) => {
   // and the API would let it through even when this did not.
   const permission = to.meta.permission as string | undefined
   if (permission && !auth.can(permission)) return { path: '/' }
+  if (to.meta.admin && !auth.isAdmin) return { path: '/' }
   return true
 })

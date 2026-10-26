@@ -25,8 +25,8 @@ pip install testbench-client   # once it is published
 
 One dependency: `httpx`. Python 3.10+.
 
-The client is versioned with TestBench: client 1.14.2 covers everything a
-1.14.2 server offers, and still works against older servers for whatever they
+The client is versioned with TestBench: client 1.15.0 covers everything a
+1.15.0 server offers, and still works against older servers for whatever they
 have.
 
 ## Authenticating
@@ -97,7 +97,7 @@ Every timestamp comes back timezone-aware in UTC, so comparing one to
 
 ```python
 tb.devices.check_out("dev-0042", purpose="Testing", due="2026-12-31")               # raises DeviceUnavailable if taken
-tb.devices.check_out("dev-0042", purpose="Testing", due="2026-12-31", force=True)   # take it anyway
+tb.devices.check_out("dev-0042", purpose="Testing", due="2026-12-31", force=True)   # admins: take it over
 tb.devices.check_in("dev-0042")
 tb.devices.set_status("dev-0042", "broken")    # any status, plus other fields
 
@@ -110,17 +110,20 @@ Every checkout requires a purpose and return date; choose a date appropriate to 
 Checking out a device you already hold is not an error, so retries and reruns
 are safe.
 
-**The API does not enforce exclusivity, and this client cannot invent it.**
-`PATCH status=checked_out` on a device someone else holds is a silent no-op that
-returns 200 with their name still on it. So `check_out()` reads the device
-first, refuses if it is taken, and *re-reads afterwards* — if another run
-claimed it in between, the second read catches it and raises rather than letting
-your suite proceed on hardware it does not own.
+**Someone else's checkout is theirs.** The API refuses (409) to check out a
+device another user holds. `check_out()` reads the device first and raises
+`DeviceUnavailable` naming the holder; if another run claims it between that
+read and the checkout, the API's refusal — or the re-read afterwards — raises
+the same way rather than letting your suite proceed on hardware it does not own.
+Only the holder or an admin can check it back in or change its status.
+`force=True` takes the device over, which only an admin may do: the checkout
+becomes yours in one step, the audit log records it as a take-over, and the
+previous holder is notified. Anyone else gets `PermissionDenied`.
 
-That is a guard, not a lock. Two clients calling it microseconds apart can still
-both believe they won. If the hardware is genuinely contended, serialise
-somewhere that has a real lock to offer — a CI job queue, a pytest resource
-plugin — and use this to record the outcome.
+That is a guard, not a lock. Two clients calling it at the same instant can
+still both pass the API's check. If the hardware is genuinely contended,
+serialise somewhere that has a real lock to offer — a CI job queue, a pytest
+resource plugin — and use this to record the outcome.
 
 `check_in()` leaves a device alone unless it is checked out *by you*, and
 `reserved()` leaves behind any other status the block set. A run that discovered
@@ -494,10 +497,18 @@ pip install -e '.[dev]'
 pytest
 ```
 
+The web app's **Docs** page shows this library's reference from a file
+generated from the code. After changing a public method, its docstring or this
+README, regenerate it — the suite fails until you do:
+
+```bash
+python scripts/build_docs.py
+```
+
 The suite runs against an in-process fake (`tests/conftest.py`), so it needs no
 server. The fake reproduces the server behaviours that matter, including the
-silent no-op on a redundant status change — which is what the mid-flight
-checkout test depends on.
+409 for a checkout someone else holds — which is what the mid-flight checkout
+test depends on.
 
 ## Not included
 

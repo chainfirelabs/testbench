@@ -233,11 +233,23 @@ let remoteRequest = 0
 const remoteLoading = ref(false)
 const pendingRequests = new Set<number>()
 
-function trackLoading(request: number, pending: boolean) {
-  if (pending) pendingRequests.add(request)
+/*
+ * A request for a block that is already on screen is a refresh, not a load:
+ * the rows it replaces stay painted until it lands, so there is nothing to
+ * cover. Raising the overlay for those blinked the whole table every time a
+ * scan poll re-read the fleet. Only requests for rows the grid has no data for
+ * — a first load, a purge, a page not seen yet — count as loading.
+ */
+function trackLoading(request: number, pending: boolean, quiet = false) {
+  if (pending && !quiet) pendingRequests.add(request)
   else pendingRequests.delete(request)
   remoteLoading.value = pendingRequests.size > 0
   gridApi.value?.setGridOption('loading', remoteLoading.value)
+}
+
+/** Does the grid already hold data for the row at this index? */
+function rowIsPainted(index: number): boolean {
+  return gridApi.value?.getDisplayedRowAtIndex(index)?.data != null
 }
 const gridApi = ref<GridApi | null>(null)
 const selectedCount = ref(0)
@@ -263,7 +275,7 @@ const remoteDatasource = {
   async getRows(params: any) {
     if (!props.remoteLoader) return
     const request = ++remoteRequest
-    trackLoading(request, true)
+    trackLoading(request, true, rowIsPainted(params.startRow))
     try {
       const result = await props.remoteLoader({
         startRow: params.startRow,
@@ -1304,6 +1316,36 @@ function refreshRows(ids: string[]) {
 }
 
 /**
+ * Repaint just some cells of rows whose objects were changed in place.
+ *
+ * The light sibling of `refreshRows`, for a stream of small updates — a scan
+ * flipping online dots every couple of seconds. It neither rebuilds the rows
+ * nor re-reads the list: each of those visibly blinks the table, and on a
+ * server-paged grid the re-read is a fetch of every block held. Sort and
+ * filter are left as they were; `reapplyView` brings them up to date when the
+ * caller is done, or sooner if `viewDependsOn` says the view reads these
+ * columns.
+ */
+function patchRows(ids: string[], columns: string[]) {
+  const api = gridApi.value
+  if (!api) return
+  const nodes = ids.map((id) => api.getRowNode(String(id))).filter(Boolean)
+  const cols = columns.filter((column) => api.getColumn(column))
+  if (nodes.length && cols.length) api.refreshCells({ rowNodes: nodes, columns: cols, force: true })
+  syncCards()
+}
+
+/** Is the grid sorted or filtered by any of these columns? */
+function viewDependsOn(columns: string[]): boolean {
+  const api = gridApi.value
+  if (!api) return false
+  const wanted = new Set(columns)
+  const sorted = (api.getColumnState?.() ?? []).some((c: any) => c.sort && wanted.has(c.colId))
+  const filtered = Object.keys(api.getFilterModel?.() || {}).some((column) => wanted.has(column))
+  return sorted || filtered
+}
+
+/**
  * Re-run filter and sort over data that changed underneath them.
  *
  * The row model decides what a filter matches and where a sort puts it once,
@@ -1370,6 +1412,8 @@ defineExpose({
   applyState,
   gridApi,
   refreshRows,
+  patchRows,
+  viewDependsOn,
   reapplyView,
   reload,
   clearSelection,

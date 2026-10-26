@@ -17,6 +17,7 @@ import { tableExportRequest } from '../tableExport'
 import { useImportProgress } from '../importProgress'
 import { invalidateSuggestions, makeFilterValues, useSuggestions } from '../suggestions'
 import { describeScan } from '../scan'
+import { devicePatchPath, saveWithTakeOver } from '../checkoutTakeOver'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { router } from '../router'
 import { deviceGridColumns, optionLabel } from '../deviceColumns'
@@ -591,10 +592,14 @@ async function saveEdit(values: Record<string, any>) {
   if (!row) return
   savingEdit.value = true
   try {
-    const updated = await api<any>(`/devices/${row.id}`, {
+    const payload = devicePayload(values)
+    // Someone else's checkout is refused; an admin is offered the take-over,
+    // and declining it leaves the dialog open with nothing saved.
+    const updated = await saveWithTakeOver((takeOver) => api<any>(devicePatchPath(row.id, takeOver), {
       method: 'PATCH',
-      body: JSON.stringify(devicePayload(values)),
-    })
+      body: JSON.stringify(payload),
+    }), row.unique_id)
+    if (!updated) return
     Object.assign(row, updated)
     // Checking a device out stamps who and when server-side, so a save can
     // change cells the user never touched; the grid has to be told.
@@ -637,10 +642,15 @@ async function saveRow(row: any) {
     }
   }
   try {
-    const updated = await api<any>(`/devices/${row.id}`, {
+    const updated = await saveWithTakeOver((takeOver) => api<any>(devicePatchPath(row.id, takeOver), {
       method: 'PATCH',
       body: JSON.stringify(payload),
-    })
+    }), row.unique_id)
+    if (!updated) {
+      // The edit stays on the row, unsaved, for the user to change or undo.
+      showToast(`${row.unique_id} was not saved — it is still checked out to its holder`, true)
+      return
+    }
     Object.assign(row, updated)
     // Same as the dialog: the response carries the checkout stamp the server
     // just applied, and those cells only repaint if the grid is told to.
@@ -761,10 +771,14 @@ async function saveBulkEdit(values: Record<string, any>) {
   const errors: string[] = []
   for (const row of selected.value) {
     try {
-      const result = await api<any>(`/devices/${row.id}`, {
+      const result = await saveWithTakeOver((takeOver) => api<any>(devicePatchPath(row.id, takeOver), {
         method: 'PATCH',
         body: JSON.stringify(toDevicePayload(values, commonBulkDeviceFields.value)),
-      })
+      }), row.unique_id)
+      if (!result) {
+        errors.push(`${row.unique_id}: left checked out to its holder`)
+        continue
+      }
       Object.assign(row, result)
       dirty.value.delete(row.id)
       updated++
@@ -835,7 +849,11 @@ function patchScanFields(row: any, values: Record<string, any>): void {
  * Pull the fleet's online state and paint the rows it changed.
  *
  * Rows the response does not mention (added since the page loaded, deleted
- * since) are left alone, and only rows that actually changed are repainted.
+ * since) are left alone, and only the scan cells of rows that actually changed
+ * are repainted. Rebuilding those rows and re-reading the list on every tick
+ * blinked the whole table for the length of a sweep, so the list is only
+ * re-read mid-scan when it is sorted or filtered by a scan column — otherwise
+ * once, when the scan ends (`settleScanView`).
  */
 async function patchOnlineState() {
   const states = await api<any[]>('/devices/scan/results')
@@ -853,7 +871,14 @@ async function patchOnlineState() {
       changed.push(row.id)
     }
   }
-  if (changed.length) table.value?.refreshRows(changed)
+  if (!changed.length) return
+  table.value?.patchRows(changed, [...SCAN_FIELDS])
+  if (table.value?.viewDependsOn([...SCAN_FIELDS])) table.value?.reapplyView()
+}
+
+/** Bring sort and filter up to date with everything a finished scan changed. */
+function settleScanView() {
+  table.value?.reapplyView()
 }
 
 /**
@@ -894,6 +919,7 @@ function pollScanStatus() {
         // Unskippable, unlike the per-tick refresh: this is the one that lands
         // the tail of the sweep, and there is no tick after it to retry.
         await patchOnlineState()
+        settleScanView()
         showToast(`Scan finished — ${s.scanned} device${s.scanned === 1 ? '' : 's'} scanned`)
       } else {
         await refreshOnlineState()
@@ -1072,6 +1098,8 @@ async function runPluginAction(action: PluginAction, row?: any) {
           break
         }
         if (status.state === 'cancelled') {
+          // A stopped scan still changed the dots it reached.
+          if (action.plugin_id === 'network-scan') settleScanView()
           showToast(`${action.label} stopped${row ? ` for ${row.unique_id}` : ''}`)
           break
         }

@@ -6,6 +6,7 @@ services/test_artifact_storage for the whole layout.
 """
 import logging
 import re
+from typing import BinaryIO
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
@@ -186,24 +187,36 @@ def list_run_artifacts(run_id: str, db: Session = Depends(get_db), user: User = 
 def upload_run_artifact(run_id: str, file: UploadFile, request: Request,
                         db: Session = Depends(get_db), user: User = Depends(require_tests_edit)):
     run = get_run(db, run_id, lock=True)
+    return add_run_file(db, run, file.filename, file.file, file.content_type, user, request)
+
+
+def add_run_file(db: Session, run: TestRun, filename: str | None, stream: BinaryIO,
+                 content_type: str | None, user: User | None, request: Request | None = None,
+                 audit: dict | None = None) -> TestRunArtifact:
+    """Store one shared file on a run and record it, as an upload does.
+
+    Also how the AI Test Summary plugin saves its reports, so a report is a
+    shared file like any other: listed, downloadable and deletable the same way.
+    """
     artifact_id = new_uuid()
-    filename = storage.artifact_filename(file.filename)
+    filename = storage.artifact_filename(filename)
     key = storage.run_artifact_key(run.storage_folder, artifact_id, filename)
-    content_type = file.content_type or 'application/octet-stream'
+    content_type = content_type or 'application/octet-stream'
     if len(content_type) > 255 or not re.fullmatch(r'[\w.+-]+/[\w.+-]+', content_type, flags=re.ASCII):
         content_type = 'application/octet-stream'
     bucket = settings.object_storage_bucket
     try:
-        size = storage.upload_artifact(bucket, key, file.file, content_type)
+        size = storage.upload_artifact(bucket, key, stream, content_type)
     except OutputError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
-    artifact = TestRunArtifact(id=artifact_id, test_run_id=run_id, filename=filename,
+    artifact = TestRunArtifact(id=artifact_id, test_run_id=run.id, filename=filename,
                                content_type=content_type, size_bytes=size, bucket=bucket,
-                               object_key=key, created_by=user.id)
+                               object_key=key, created_by=user.id if user else None)
     try:
         db.add(artifact)
-        log_action(db, user, 'test_run.artifact.upload', 'test_run', run_id,
-                   {'artifact_id': artifact_id, 'filename': filename, 'size_bytes': size}, request)
+        log_action(db, user, 'test_run.artifact.upload', 'test_run', run.id,
+                   {'artifact_id': artifact_id, 'filename': filename, 'size_bytes': size, **(audit or {})},
+                   request)
         db.commit()
     except Exception:
         db.rollback()

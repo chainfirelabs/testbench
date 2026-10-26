@@ -4,9 +4,9 @@
  *
  * Below MOBILE the top bar has no room for the nav pills, the username or the
  * log out button, so they move in here. A drawer rather than a bottom tab bar
- * because an admin has seven destinations — five links plus Profile and Log
- * out — and a tab bar holds about five before it needs an overflow slot of its
- * own.
+ * because there are more destinations than a tab bar holds — the main links,
+ * the Devices and Administration groups, Profile and Log out — and it would
+ * need an overflow slot of its own past about five.
  *
  * The links are passed in rather than declared here: App.vue owns the list and
  * renders the same one into the desktop bar, so there is a single source of
@@ -23,6 +23,8 @@ const props = defineProps<{
   open: boolean
   links: NavLink[]
   deviceLinks: NavLink[]
+  /** The Administration group; empty hides it. */
+  adminLinks: NavLink[]
   username?: string
   role?: string
   /** Unread notifications. The bell is in the top bar, which is not here. */
@@ -92,6 +94,16 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
           <router-link v-for="l in links.filter((link) => link.to !== '/')" :key="l.to" :to="l.to" class="drawer-link">
             {{ l.label }}
           </router-link>
+          <details
+            v-if="adminLinks.length"
+            class="drawer-group"
+            :open="adminLinks.some((link) => $route.path.startsWith(link.to))"
+          >
+            <summary class="drawer-link">Administration</summary>
+            <router-link v-for="l in adminLinks" :key="l.to" :to="l.to" class="drawer-link drawer-sublink">
+              {{ l.label }}
+            </router-link>
+          </details>
           <!-- The top bar collapses to the hamburger on a phone, and the bell
                collapses with it. Without this entry there is no way to reach a
                notification from a phone at all. -->

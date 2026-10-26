@@ -8,7 +8,7 @@ export interface PluginAction {
   scope: 'row' | 'collection'
   label: string
   title?: string
-  icon?: 'wifi' | 'info' | 'power'
+  icon?: 'wifi' | 'info' | 'power' | 'sparkles'
   /** read_only | normal | disruptive. Disruptive actions say so before they run. */
   risk?: 'read_only' | 'normal' | 'disruptive'
   requires_online?: boolean

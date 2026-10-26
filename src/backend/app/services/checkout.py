@@ -151,6 +151,47 @@ def _tell_holder_overdue(db: Session, device: Device, days_over: int, stamp: dat
     )
 
 
+def tell_holder_taken_over(db: Session, device: Device, previous_holder_id: str, actor: User) -> None:
+    """Tell whoever had the device that an admin took it from them.
+
+    A take-over happens to someone, not just to the device: they may still be
+    using it, and without this the first they hear of it is somebody else's
+    name on the row. One per take-over, so the key carries the moment.
+    """
+    _notify(
+        db,
+        user_id=previous_holder_id,
+        kind="checkout_taken_over",
+        title=f"{actor.username} took over {device.unique_id}",
+        body=(
+            f"It is now checked out to {actor.username}"
+            + (f" until {device.checkout_due}" if device.checkout_due else "")
+            + (f" for: {device.checkout_purpose}" if device.checkout_purpose else ".")
+        ),
+        dedupe_key=f"takeover:{device.id}:{previous_holder_id}:{utcnow().isoformat()}",
+        entity_type="device",
+        entity_id=device.id,
+    )
+
+
+def tell_holder_released(db: Session, device: Device, previous_holder_id: str, actor: User) -> None:
+    """Tell whoever had the device that an admin ended their checkout.
+
+    The same courtesy as a take-over: the device is no longer theirs, and they
+    should hear it from the app rather than from the fleet view.
+    """
+    _notify(
+        db,
+        user_id=previous_holder_id,
+        kind="checkout_released",
+        title=f"{actor.username} checked in {device.unique_id}",
+        body=f"Your checkout has ended; the device is now {device.status.replace('_', ' ')}.",
+        dedupe_key=f"released:{device.id}:{previous_holder_id}:{utcnow().isoformat()}",
+        entity_type="device",
+        entity_id=device.id,
+    )
+
+
 def _digest_admins(db: Session, overdue: list[Device], stamp: date) -> None:
     """One notification per admin per day, naming the whole list.
 

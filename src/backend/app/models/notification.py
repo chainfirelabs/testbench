@@ -26,6 +26,8 @@ NOTIFICATION_KINDS = (
     "checkout_due_soon",  # to the holder, once a day over the warning window
     "checkout_overdue",  # to the holder, once a day while it stays out
     "checkout_overdue_digest",  # to each admin, once a day, naming the whole list
+    "checkout_taken_over",  # to the previous holder, when an admin takes their device
+    "checkout_released",  # to the previous holder, when an admin ends their checkout
 )
 
 

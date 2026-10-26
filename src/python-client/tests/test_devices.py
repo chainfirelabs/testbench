@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import httpx
 import pytest
 
-from testbench_client import DeviceUnavailable, UnknownDevice
+from testbench_client import DeviceUnavailable, PermissionDenied, UnknownDevice
 
 
 def test_list_returns_devices(tb, api):
@@ -103,15 +103,28 @@ def test_check_out_refuses_a_broken_device(tb, api):
         tb.devices.check_out("dev-0001", **CHECKOUT)
 
 
-def test_force_takes_over_a_held_device(tb, api):
+def as_admin(api):
+    api.as_role("admin", api.me["permissions"])
+
+
+def test_force_takes_over_a_held_device_for_an_admin(tb, api):
+    as_admin(api)
     api.add_device("dev-0001", status="checked_out", checked_out_by_username="tester2")
     device = tb.devices.check_out("dev-0001", force=True, **CHECKOUT)
     assert device.checked_out_by_username == "tester1"
+    assert device.checkout_purpose == CHECKOUT["purpose"]
+
+
+def test_force_is_refused_for_anyone_but_an_admin(tb, api):
+    api.add_device("dev-0001", status="checked_out", checked_out_by_username="tester2")
+    with pytest.raises(PermissionDenied):
+        tb.devices.check_out("dev-0001", force=True, **CHECKOUT)
+    assert api.devices["dev-0001"]["checked_out_by_username"] == "tester2"
 
 
 def test_check_out_detects_a_device_claimed_mid_flight(tb, api):
-    # The API accepts a redundant status change silently, so losing this race
-    # would otherwise look like a successful checkout of someone else's device.
+    # Losing this race is a 409 from the API; the client reports it the same
+    # way as a device that was already taken when it looked.
     api.add_device("dev-0001")
 
     def steal(row):
@@ -136,6 +149,16 @@ def test_check_in_leaves_someone_elses_device_alone(tb, api):
     with pytest.raises(DeviceUnavailable):
         tb.devices.check_in("dev-0001")
     assert api.devices["dev-0001"]["status"] == "checked_out"
+
+
+def test_check_in_of_someone_elses_device_is_refused_unless_admin(tb, api):
+    api.add_device("dev-0001", status="checked_out", checked_out_by_username="tester2")
+    with pytest.raises(DeviceUnavailable, match="only they or an admin"):
+        tb.devices.check_in("dev-0001", only_if_mine=False)
+    assert api.devices["dev-0001"]["status"] == "checked_out"
+
+    as_admin(api)
+    assert tb.devices.check_in("dev-0001", only_if_mine=False).is_available
 
 
 def test_check_in_is_a_no_op_on_a_free_device(tb, api):

@@ -1,9 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .api import (
     audit,
@@ -31,12 +32,13 @@ from .api import (
 )
 from .config import settings
 from .core.security import hash_password
-from .db import Base, SessionLocal, engine
+from .db import Base, SessionLocal, engine, get_db
+from .api.deps import get_current_user
 from .models import User
 from .services.checkout import start_checkout_sweep_loop
 from .services.scan import start_interval_loop
 from .services.entity_fields import initialize_entity_fields
-from .services.permissions import seed_roles
+from .services.permissions import caller_permissions, satisfies_role, seed_roles
 from .services.device_schema import refresh_managed_indexes, seed_device_schema
 from .services.device_schema_yaml import reconcile_from_settings
 from .services.plugin_host import registry as plugin_registry, start_refresh_loop as start_plugin_refresh_loop
@@ -153,6 +155,16 @@ app.include_router(plugins.router, prefix=API_PREFIX)
 app.include_router(plugins.host_router, prefix=API_PREFIX)
 app.include_router(ai_providers.router, prefix=API_PREFIX)
 app.include_router(replication.router, prefix=API_PREFIX)
+
+
+@app.get("/api/v1/openapi.json", include_in_schema=False)
+def api_schema(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The OpenAPI document, under /api so the web app's Docs page can read it
+    through the same proxy as everything else, without the backend's own
+    /docs and /openapi.json being exposed. Admins only, like the Docs page."""
+    if not satisfies_role(db, caller_permissions(db, user), "admin"):
+        raise HTTPException(status_code=403, detail="The API documentation is for admins.")
+    return app.openapi()
 
 
 @app.get("/api/v1/health")

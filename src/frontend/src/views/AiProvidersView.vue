@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { api } from '../api/client'
 
 interface Profile {
@@ -16,12 +16,19 @@ interface PluginDefault {
 const profiles = ref<Profile[]>([])
 const defaults = ref<PluginDefault[]>([])
 const editing = ref<any | null>(null)
+const firstField = ref<HTMLInputElement | null>(null)
+// Focus starts in the dialog, so typing and Escape both reach it.
+watch(() => !!editing.value, async (open) => {
+  if (open) { await nextTick(); firstField.value?.focus() }
+})
 const busy = ref(false)
 const toast = ref('')
 const error = ref('')
 const labels: Record<string, string> = {
-  'device-info-agent': 'Device Info', 'device-reboot': 'AI Reboot',
+  'device-info-agent': 'Device Info', 'device-reboot': 'AI Reboot', 'test-summary': 'AI Test Summary',
 }
+// A repeat model is for replaying a saved recipe; a summary has none.
+const usesRepeatModel = (pluginId: string) => pluginId !== 'test-summary'
 const enabledProfiles = computed(() => profiles.value.filter((item) => item.enabled))
 const allDefaultsLocked = computed(() => defaults.value.length > 0 && defaults.value.every((item) => item.locked))
 const showGuiProviders = computed(() => profiles.value.length > 0 || !allDefaultsLocked.value)
@@ -88,14 +95,14 @@ onMounted(() => load().catch((e) => { error.value = e.message }))
         <div class="form-grid">
           <label>Endpoint<input :value="item.helm.url" disabled /></label>
           <label>Model<input :value="item.helm.model" disabled /></label>
-          <label>Repeat model<input :value="item.helm.repeat_model || item.helm.model" disabled /></label>
+          <label v-if="usesRepeatModel(item.plugin_id)">Repeat model<input :value="item.helm.repeat_model || item.helm.model" disabled /></label>
         </div>
       </template>
       <template v-else>
         <div class="form-grid">
           <label>Provider<select v-model="item.profile_id"><option value="">Select provider</option><option v-for="p in enabledProfiles" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
           <label>Model<input v-model="item.model" :list="`models-${item.plugin_id}`" /></label>
-          <label>Repeat model<input v-model="item.repeat_model" :list="`models-${item.plugin_id}`" placeholder="Defaults to model" /></label>
+          <label v-if="usesRepeatModel(item.plugin_id)">Repeat model<input v-model="item.repeat_model" :list="`models-${item.plugin_id}`" placeholder="Defaults to model" /></label>
           <datalist :id="`models-${item.plugin_id}`"><option v-for="model in modelsFor(item.profile_id)" :key="model" :value="model" /></datalist>
         </div>
         <button class="btn btn-primary" @click="saveDefault(item)">Save defaults</button>
@@ -112,9 +119,11 @@ onMounted(() => load().catch((e) => { error.value = e.message }))
       </div>
     </section>
 
-    <div v-if="editing" class="modal-backdrop"><div class="modal card"><h3>{{ editing.id ? 'Edit' : 'Add' }} AI provider</h3>
+    <div v-if="editing" class="modal-backdrop" @keydown.esc="editing = null">
+      <div class="modal-card modal-wide" role="dialog" aria-modal="true" aria-labelledby="ai-provider-title">
+      <h3 id="ai-provider-title" class="modal-title">{{ editing.id ? 'Edit' : 'Add' }} AI provider</h3>
       <div class="form-grid">
-        <label>Name<input v-model="editing.name" /></label>
+        <label>Name<input ref="firstField" v-model="editing.name" /></label>
         <label>Type<select v-model="editing.provider_type"><option value="openai">OpenAI</option><option value="openai-compatible">OpenAI-compatible</option><option value="azure-openai">Azure OpenAI</option><option value="ollama">Ollama</option><option value="litellm">LiteLLM/OpenRouter</option></select></label>
         <label>Base URL<input v-model="editing.base_url" placeholder="https://ai.example/v1" /></label>
         <label>API key<input v-model="editing.api_key" type="password" :placeholder="editing.credential_configured ? 'Leave blank to keep current key' : 'Optional'" /></label>
@@ -123,11 +132,13 @@ onMounted(() => load().catch((e) => { error.value = e.message }))
         <label class="check"><input v-model="editing.enabled" type="checkbox" /> Enabled</label>
         <label v-if="editing.credential_configured" class="check"><input v-model="editing.clear_api_key" type="checkbox" /> Remove stored API key</label>
       </div>
-      <div><button class="btn" @click="editing = null">Cancel</button> <button class="btn btn-primary" :disabled="busy" @click="saveProfile">Save</button></div>
-    </div></div>
+      <p v-if="error" class="login-error">{{ error }}</p>
+      <div class="modal-actions"><button class="btn" @click="editing = null">Cancel</button><button class="btn btn-primary" :disabled="busy" @click="saveProfile">Save</button></div>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.card{padding:18px;margin-bottom:16px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0}.form-grid label{display:flex;flex-direction:column;gap:6px}.plugin-card{padding:14px 0;border-top:1px solid var(--border)}.modal-backdrop{position:fixed;inset:0;background:#0009;display:grid;place-items:center;z-index:400}.modal{width:min(760px,92vw);max-height:90vh;overflow:auto}.check{flex-direction:row!important;align-items:center}.toast{color:var(--accent)}
+.card{padding:18px;margin-bottom:16px}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:12px 0}.form-grid label{display:flex;flex-direction:column;gap:6px}.plugin-card{padding:14px 0;border-top:1px solid var(--border)}.form-grid textarea{min-height:84px;resize:vertical}.check{flex-direction:row!important;align-items:center}.toast{color:var(--accent)}
 </style>

@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, NamedTuple, NoReturn
 
 import json
 from datetime import timedelta
@@ -35,7 +35,7 @@ from ..schemas import (
 )
 from ..services.audit import field_diff, log_action
 from ..services.changelog import changelog_entries
-from ..services.checkout import overdue_clause, today
+from ..services.checkout import overdue_clause, tell_holder_released, tell_holder_taken_over, today
 from ..services.compat import compatible_software
 from ..services.hooks import emit_status_change
 from ..services.io import ExportRequest, database_export_rows, download_response, streaming_export_response, parse_import, strip_nulls, template_csv
@@ -60,7 +60,7 @@ from ..services.device_schema import (
 )
 from .vendor_devices import _effective_fields as effective_claim_fields, _with_inventory
 from ..services.scan import manager, scan_device
-from ..services.permissions import AUDIT_VIEW
+from ..services.permissions import AUDIT_VIEW, caller_permissions, satisfies_role
 from .deps import get_current_user, holds, require_devices_edit
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -407,6 +407,115 @@ def _apply_status_transition(db: Session, device: Device, new_status: str | None
         device.checkout_due = None
     device.status = new_status
     return emit_status_change(db, device, old, new_status, actor)
+
+
+def _checkout_before(device: Device) -> dict:
+    """The checkout as it stood before a write, for `_guard_someone_elses_checkout`."""
+    return {
+        "status": device.status,
+        "holder": device.checked_out_by,
+        "purpose": device.checkout_purpose,
+        "due": device.checkout_due,
+    }
+
+
+class CheckoutGuardResult(NamedTuple):
+    """What `_guard_someone_elses_checkout` let through on an admin's say-so."""
+
+    taken_over_from: str | None = None  # an admin took the checkout over
+    released_from: str | None = None  # an admin ended someone else's checkout
+
+
+def _guard_someone_elses_checkout(
+    db: Session, device: Device, before: dict, new_status: str | None, user: User, take_over: bool,
+) -> CheckoutGuardResult:
+    """A checkout belongs to whoever holds it.
+
+    Checking out a device somebody else holds used to return 200 and do half of
+    it: their name stayed on the device while the purpose and return date were
+    replaced with the newcomer's — two people on one device, and the record
+    agreeing with neither. So a write that would re-state someone else's
+    checkout (a new purpose or return date while it stays checked out) is
+    refused, naming who has it.
+
+    So is ending it. If anyone could check someone else's device in, the
+    refusal above would be one extra click from meaningless — check it in,
+    then check it out — so changing the status of a checkout is for its holder
+    and for admins.
+
+    An admin may do either: end the checkout outright, or ask for a take-over,
+    which makes the checkout theirs — holder, day and details — exactly as if
+    it had been checked in and out again. Either way the previous holder is
+    returned so the caller can tell them.
+
+    Other fields of a checked-out device stay open to anyone who may edit
+    devices.
+    """
+    held_by_other = (
+        before["status"] == "checked_out" and before["holder"] and before["holder"] != user.id
+    )
+    if not held_by_other:
+        return CheckoutGuardResult()
+    ending = new_status not in (None, "checked_out")
+    restated = device.checkout_purpose != before["purpose"] or device.checkout_due != before["due"]
+    if not ending and not restated and not take_over:
+        return CheckoutGuardResult()
+    is_admin = satisfies_role(db, caller_permissions(db, user), "admin")
+    if ending:
+        if is_admin:
+            return CheckoutGuardResult(released_from=before["holder"])
+        _refuse_someone_elses_checkout(
+            db, device, before, "Only they or an admin can check it in or change its status.", False,
+        )
+    if not take_over:
+        _refuse_someone_elses_checkout(
+            db, device, before,
+            "Only they can change this checkout"
+            + ("; you can take it over." if is_admin else "; an admin can take it over."),
+            is_admin,
+        )
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Only an admin can take over someone else's checkout.")
+    _require_checkout_details(device)
+    device.checked_out_by = user.id
+    device.checked_out_at = today()
+    return CheckoutGuardResult(taken_over_from=before["holder"])
+
+
+def _refuse_someone_elses_checkout(
+    db: Session, device: Device, before: dict, rule: str, can_take_over: bool,
+) -> NoReturn:
+    """The 409 naming who holds the device, and what the caller may do about it."""
+    holder = db.get(User, before["holder"])
+    name = holder.username if holder else "someone else"
+    raise HTTPException(status_code=409, detail={
+        "code": "checked_out_by_other",
+        "message": (
+            f"{device.unique_id} is already checked out by {name}"
+            + (f" until {before['due']}" if before["due"] else "")
+            + f". {rule}"
+        ),
+        "holder": name,
+        "checkout_due": before["due"].isoformat() if before["due"] else None,
+        "checkout_purpose": before["purpose"],
+        "can_take_over": can_take_over,
+    })
+
+
+def _tell_previous_holder(db: Session, device: Device, guarded: CheckoutGuardResult, user: User,
+                          detail: dict) -> None:
+    """Note an admin's override in the audit entry and tell whoever it happened to."""
+    previous_id = guarded.taken_over_from or guarded.released_from
+    if not previous_id:
+        return
+    previous = db.get(User, previous_id)
+    name = previous.username if previous else previous_id
+    if guarded.taken_over_from:
+        detail["taken_over_from"] = name
+        tell_holder_taken_over(db, device, previous_id, user)
+    else:
+        detail["released_from"] = name
+        tell_holder_released(db, device, previous_id, user)
 
 
 # Columns filterable by substring, case-insensitively. These are free text —
@@ -1193,12 +1302,16 @@ def update_device(
     device_id: str,
     body: DeviceUpdate,
     request: Request,
+    take_over: bool = Query(
+        False, description="Admins only: take over a checkout someone else holds, making it yours.",
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(require_devices_edit),
 ):
     device = _get_device(db, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="Device not found")
+    checkout_before = _checkout_before(device)
     old = {"unique_id": device.unique_id, "device_type": device.device_type_key, **device.data}
     old_links = dict(device.link_overrides or {})
     document, type_value, type_supplied = _envelope(body)
@@ -1237,6 +1350,9 @@ def update_device(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     device.updated_by = user.id
     device.updated_at = utcnow()
+    guarded = _guard_someone_elses_checkout(
+        db, device, checkout_before, applied["status"], user, take_over,
+    )
     hook_failures = _apply_status_transition(db, device, applied["status"], user)
     _reject_checkout_details_off_checkout(device, applied["document"], old)
     new = {"unique_id": device.unique_id, "device_type": device.device_type_key, **device.data}
@@ -1252,6 +1368,7 @@ def update_device(
         detail["link_diff"] = link_diff
     if hook_failures:
         detail["hook_failures"] = hook_failures
+    _tell_previous_holder(db, device, guarded, user, detail)
     log_action(db, user, "device.update", "device", device.id, detail, request)
     db.commit()
     db.refresh(device)
@@ -1366,6 +1483,7 @@ def _upsert_row(db: Session, row: dict, user: User) -> str:
         previous: dict = {}
     else:
         previous = {"unique_id": device.unique_id, **device.data}
+        checkout_before = _checkout_before(device)
         if unique_id and unique_id != device.unique_id:
             clash = db.scalar(select(Device.id).where(
                 Device.unique_id == unique_id, Device.id != device.id))
@@ -1395,9 +1513,20 @@ def _upsert_row(db: Session, row: dict, user: User) -> str:
     else:
         if type_supplied:
             device.device_type = requested_type
+        # The same rule as a PATCH: a row cannot end or re-state someone
+        # else's checkout. There is no take-over by import; that is a decision
+        # to make about one device, not a column in a file.
+        try:
+            guarded = _guard_someone_elses_checkout(
+                db, device, checkout_before, applied["status"], user, take_over=False,
+            )
+        except HTTPException as exc:
+            message = exc.detail["message"] if isinstance(exc.detail, dict) else exc.detail
+            raise ValueError(message) from exc
         # Status last: the transition must see the old value in order to stamp
         # or clear a checkout.
         _apply_status_transition(db, device, applied["status"], user)
+        _tell_previous_holder(db, device, guarded, user, {})
         device.updated_by = user.id
         device.updated_at = utcnow()
     _reject_checkout_details_off_checkout(device, applied["document"], previous)

@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import FormModal from '../components/FormModal.vue'
+import PluginRunModal from '../components/PluginRunModal.vue'
 import TestsView from './TestsView.vue'
 import { api } from '../api/client'
 import { useDownload } from '../downloads'
+import { invokePluginAction, usePluginActions, type PluginAction } from '../pluginActions'
 import { router } from '../router'
 import { PERMISSION, useAuthStore } from '../stores/auth'
 import { fileSizeLabel } from '../testArtifacts'
@@ -57,7 +59,106 @@ async function loadFiles() {
   }
 }
 
-watch(runId, () => { run.value = null; loadRun(); loadFiles() }, { immediate: true })
+/*
+ * Plugin actions on test runs (AI Test Summary's "Summarize with AI"). Not tied
+ * to device types: a deployed plugin's action is offered on every run.
+ */
+const { actions: runActions, loadPluginActions } = usePluginActions('test_runs')
+type RunView = { title: string; action: PluginAction; status: Record<string, any> }
+const activeRun = ref<RunView | null>(null)
+const showRun = ref(false)
+const TERMINAL = ['completed', 'failed', 'cancelled', 'interrupted']
+const SUMMARY_NOTE = "Written by an AI model from this run's tests, devices, outputs and files. Text that looked like a credential was removed before sending. Check important details against the results."
+// Bumped when the page moves to another run or closes, so an old poll stops.
+let watchGeneration = 0
+
+const running = (action: PluginAction) =>
+  activeRun.value?.action.id === action.id && activeRun.value?.action.plugin_id === action.plugin_id
+  && !TERMINAL.includes(activeRun.value.status.state)
+
+async function followRun(view: RunView, generation: number) {
+  const { action } = view
+  const deadline = Date.now() + 30 * 60 * 1000
+  try {
+    while (Date.now() < deadline && generation === watchGeneration) {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      if (generation !== watchGeneration) return
+      const status = await api<any>(`/plugins/${encodeURIComponent(action.plugin_id)}/runs/${encodeURIComponent(view.status.run_id)}`)
+      if (generation !== watchGeneration) return
+      activeRun.value = { ...view, status }
+      if (status.state === 'completed') {
+        await loadFiles()
+        showToast(status.result?.file ? `${action.label}: report saved as ${status.result.file.filename}` : `${action.label} finished`)
+        return
+      }
+      if (status.state === 'failed') throw new Error(status.error || `${action.label} failed`)
+      if (status.state === 'interrupted') throw new Error(`${action.label} was interrupted when its plugin restarted`)
+      if (status.state === 'cancelled') return
+    }
+  } catch (e: any) {
+    if (generation === watchGeneration) showToast(e.message, true)
+  }
+}
+
+async function runAction(action: PluginAction) {
+  if (running(action)) {
+    showRun.value = true
+    return
+  }
+  try {
+    const result: Record<string, any> = await invokePluginAction(action, { entity_id: runId.value })
+    const view: RunView = { title: `${action.label} — ${run.value?.name || 'test run'}`, action,
+                            status: { ...result, state: result.state || 'starting', output: result.output || '' } }
+    activeRun.value = view
+    showRun.value = true
+    void followRun(view, watchGeneration)
+  } catch (e: any) {
+    showToast(e.message, true)
+  }
+}
+
+async function cancelRun() {
+  const view = activeRun.value
+  if (!view || !confirm(`Stop ${view.title}? Nothing will be saved.`)) return
+  try {
+    const status = await api<any>(`/plugins/${encodeURIComponent(view.action.plugin_id)}/runs/${encodeURIComponent(view.status.run_id)}`, { method: 'DELETE' })
+    activeRun.value = { ...view, status }
+  } catch (e: any) {
+    showToast(e.message, true)
+  }
+}
+
+/** Pick up a summary still being written for this run, after a reload or a visit elsewhere. */
+async function restoreActiveRun(generation: number) {
+  try {
+    const runs = await api<any[]>('/plugins/runs/active')
+    if (generation !== watchGeneration) return
+    for (const item of runs) {
+      const action = runActions.value.find((candidate) =>
+        candidate.plugin_id === item.plugin_id && candidate.id === item.action_id)
+      if (!action || !(item.entity_ids || []).map(String).includes(runId.value)) continue
+      const view: RunView = { title: `${action.label} — ${run.value?.name || 'test run'}`, action, status: item }
+      activeRun.value = view
+      void followRun(view, generation)
+      return
+    }
+  } catch {
+    // A plugin that is briefly unavailable just means nothing to reattach.
+  }
+}
+
+watch(runId, async () => {
+  watchGeneration += 1
+  const generation = watchGeneration
+  run.value = null
+  activeRun.value = null
+  showRun.value = false
+  loadRun()
+  loadFiles()
+  await loadPluginActions()
+  if (generation === watchGeneration && runActions.value.length) void restoreActiveRun(generation)
+}, { immediate: true })
+onBeforeUnmount(() => { watchGeneration += 1 })
 
 async function upload(event: Event) {
   const input = event.target as HTMLInputElement
@@ -138,6 +239,11 @@ async function deleteRun() {
       <div class="page-header">
         <h2>{{ run.name }}</h2>
         <div class="toolbar">
+          <button v-for="action in runActions" :key="`${action.plugin_id}:${action.id}`" class="btn btn-primary"
+            :disabled="!!action.unavailable_reason" :title="action.unavailable_reason || action.title || action.label"
+            @click="runAction(action)">
+            {{ running(action) ? `${action.label}…` : action.label }}
+          </button>
           <a v-if="run.url" class="btn" :href="run.url" target="_blank" rel="noopener noreferrer">Pipeline ↗</a>
           <template v-if="canEdit">
             <button class="btn" @click="editing = true">Edit</button>
@@ -188,6 +294,15 @@ async function deleteRun() {
       </section>
 
       <TestsView :key="run.id" :test-run-id="run.id" @changed="loadRun(); loadFiles()" />
+
+      <PluginRunModal
+        v-if="activeRun && showRun"
+        :title="activeRun.title"
+        :run="activeRun.status"
+        :note="SUMMARY_NOTE"
+        @close="showRun = false"
+        @cancel="cancelRun"
+      />
 
       <FormModal
         v-if="editing"

@@ -269,6 +269,8 @@ h3 {
   box-shadow: var(--shadow-lg);
 }
 .device-menu-panel a { border-radius: var(--r-md); }
+/* The last menu in the bar opens leftwards, so it never runs off the right edge. */
+.device-menu-panel-end { left: auto; right: 0; }
 
 @media (hover: hover) {
   .nav a:hover,

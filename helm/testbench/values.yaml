@@ -39,7 +39,7 @@ frontend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/frontend
-    tag: "1.14.2"
+    tag: "1.15.0"
     digest: "" # Example: sha256:...
     pullPolicy: "" # Empty inherits global.imagePullPolicy; or Always, IfNotPresent, Never.
   service:
@@ -76,7 +76,7 @@ backend:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/backend
-    tag: "1.14.2"
+    tag: "1.15.0"
     digest: ""
     pullPolicy: ""
   # Scheduler requests and container limits for each backend Pod.
@@ -93,7 +93,7 @@ mcp:
     # registry: registry.example.com:5000 # Overrides the global registry.
     # registry: "" # Alternative: use repository exactly as written.
     repository: chainfirelabs/testbench/mcp
-    tag: "1.14.2"
+    tag: "1.15.0"
     digest: ""
     pullPolicy: ""
   service:
@@ -281,7 +281,7 @@ replication:
     key: token
   image:
     repository: chainfirelabs/testbench/replication
-    tag: "1.14.2"
+    tag: "1.15.0"
     digest: ""
     pullPolicy: ""
 
@@ -305,7 +305,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/network-scan
-      tag: "1.14.2"
+      tag: "1.15.0"
       digest: "" # Optional immutable digest; overrides tag.
       pullPolicy: ""
     # Per-port TCP connection timeout.
@@ -349,7 +349,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/device-info
-      tag: "1.14.2"
+      tag: "1.15.0"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -428,7 +428,7 @@ plugins:
       # registry: registry.example.com:5000 # Overrides the global registry.
       # registry: "" # Alternative: use repository exactly as written.
       repository: chainfirelabs/testbench/reboot
-      tag: "1.14.2"
+      tag: "1.15.0"
       digest: ""
       pullPolicy: ""
     researchImage:
@@ -494,3 +494,43 @@ plugins:
       # imagePullSecrets: [browser-registry] # Names only; unlike global entries.
     # Reserved for future NetworkPolicy rendering; currently has no effect.
     allowedEgressCidrs: []
+
+  testSummary:
+    # Add "Summarize with AI" to every test run: an AI-written report on the
+    # run's devices, results, test outputs and files, saved to the run's shared
+    # files (every version is kept). Global: it is not enabled per device type,
+    # so a run spanning several device types is covered. Saving reports needs
+    # object storage; without it the report is shown but not kept.
+    enabled: false
+    image:
+      # Optional override: omit to inherit global.imageRegistry.
+      # registry: registry.example.com:5000 # Overrides the global registry.
+      # registry: "" # Alternative: use repository exactly as written.
+      repository: chainfirelabs/testbench/test-summary
+      tag: "1.15.0"
+      digest: ""
+      pullPolicy: ""
+    # How to write the report. Empty uses the built-in prompt (summary,
+    # failures and warnings, devices and software, artifacts, follow-ups).
+    # Rules that keep the model to the run's data are always appended, and the
+    # exact result tables are always added after the model's text.
+    prompt: ""
+    ai:
+      # Any OpenAI-compatible endpoint, including a LiteLLM proxy. Leave url and
+      # model empty to choose the provider and model on the AI Providers page.
+      url: "" # e.g. https://ai.example.com/v1
+      model: "" # Set url+model to lock settings to Helm; leave both empty for GUI management.
+      # Existing release-namespace Secret holding the API key, required only
+      # when url+model are set. Mounted into the plugin; never sent through the
+      # backend.
+      existingSecret: "" # e.g. testbench-ai
+      apiKeySecretKey: OPENAI_API_KEY
+    # Reports written at once; further requests are refused until one ends.
+    maxConcurrentRuns: 3
+    # Characters of run data sent in one model request. Larger runs are read in
+    # parts, one request per part, then combined.
+    maxInputChars: 100000
+    # Most model requests one report may make, parts included.
+    maxAiCalls: 12
+    # Seconds to wait for one model answer.
+    requestTimeoutSeconds: 300

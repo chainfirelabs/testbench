@@ -49,7 +49,7 @@ spec:
             - name: TB_REPLICATION_TOKEN
               valueFrom: {secretKeyRef: {name: {{ required "replication.token.existingSecret is required" .Values.replication.token.existingSecret }}, key: {{ .Values.replication.token.key }}}}
             {{- end }}
-            {{- if or .Values.plugins.networkScan.enabled .Values.plugins.deviceInfo.enabled .Values.plugins.reboot.enabled }}
+            {{- if or .Values.plugins.networkScan.enabled .Values.plugins.deviceInfo.enabled .Values.plugins.reboot.enabled .Values.plugins.testSummary.enabled }}
             - name: TB_PLUGIN_SHARED_SECRET
               valueFrom: {secretKeyRef: {name: {{ required "plugins.sharedSecret.existingSecret is required when a plugin is enabled" .Values.plugins.sharedSecret.existingSecret }}, key: {{ .Values.plugins.sharedSecret.key }}}}
             {{- end }}

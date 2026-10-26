@@ -400,6 +400,9 @@ def _detail(response: httpx.Response) -> str:
     detail = body.get("detail", body)
     if isinstance(detail, str):
         return detail
+    if isinstance(detail, dict) and isinstance(detail.get("message"), str):
+        # A structured refusal (a checkout someone else holds) says it in words too.
+        return detail["message"]
     if isinstance(detail, list):
         # 422 bodies are a list of pydantic errors; one line each.
         return "; ".join(

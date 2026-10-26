@@ -1,5 +1,81 @@
 # Release notes
 
+## 1.15.0
+
+- **Administration menu.** Audit Log, Users, AI Providers, Replication, Schema
+  and Docs moved from the top bar into one **Administration** dropdown, listed
+  alphabetically; on a phone they are a collapsible group in the menu drawer.
+  Each link still appears only for users with its permission, and the menu is
+  hidden when there are none. The top bar no longer overflows a 1400px window
+  for admins.
+- **AI provider dialog.** Adding or editing an AI provider now opens in a
+  proper dialog box. Escape cancels it, and save errors show inside it.
+- **AI Test Summary plugin.** A new optional plugin
+  (`plugins.testSummary.enabled`) adds **Summarize with AI** to every test run.
+  It sends the model the whole run: every test with all of its fields, notes
+  and output, every tested device across all device types in the run (without
+  sensitive fields), and the text of the run's shared files and test artifacts.
+  Text that looks like a credential is removed first. The model writes the
+  summary, failures and warnings, device and software differences, notable
+  artifacts and follow-ups; the result tables (outcomes, and results by device,
+  software, component and tag) are computed exactly by the plugin. Large runs
+  are read in parts, failures first. Each report is saved as a new
+  `ai-summary-<time>.md` shared file on the run, so every version is kept. It
+  is global rather than enabled per device type, and anyone who can record
+  tests can run it. Its provider and model are chosen on the **AI Providers**
+  page or set in Helm (`plugins.testSummary.ai`), and `plugins.testSummary.prompt`
+  replaces the default instructions. New image:
+  `chainfirelabs/testbench/test-summary`.
+- **Plugins can act on test runs.** `GET /plugins/actions?entity=test_runs`
+  lists them and `POST /plugins/{id}/actions/{action}/invoke` accepts
+  `entity: "test_runs"`; both require permission to record tests. Stopping a
+  plugin run now takes the permission that starting it did.
+- **Fixed:** a `\|` inside a markdown table cell on the Docs page split the
+  cell; the plugin run dialog's state badge wrapped and overflowed on phones.
+
+## 1.14.3
+
+- **Docs page.** **Docs** in the top bar opens API and Python client
+  documentation inside TestBench, laid out like Read the Docs: guides to
+  authentication, filters, import/export and files; a reference of every API
+  endpoint read live from the server, each with a **Try it** panel; and the
+  Python client's guide and every function, option, model and error. Nothing
+  on the backend needs to be exposed — the page reads the API description from
+  `/api/v1/openapi.json`. The link, the page and that description are for
+  admins only.
+- **Fixed: opening a device from another device's page stayed on the first
+  device.** A global search result (or any link) to a device, followed while
+  already on a device page, changed the address but kept showing the previous
+  device. Each device now opens on a fresh page.
+- **Fixed: the devices table blinked during a scan.** Every time a scan
+  changed a device's online state, the whole table flashed its loading overlay,
+  rebuilt the changed rows and re-read the list from the server — every couple
+  of seconds for the length of a sweep. The online dots now update in place;
+  the list is re-read once when the scan ends, or during it only when the
+  table is sorted or filtered by a scan column, and a refresh of rows already
+  on screen no longer raises the loading overlay.
+- **Fixed: a device someone else had checked out could be "checked out"
+  again.** The save went through, the first person stayed the holder, and
+  their purpose and return date were replaced with the newcomer's. Now it is
+  refused, naming who has the device and until when. So is checking it in or
+  setting any other status — otherwise the refusal could be sidestepped by
+  checking it in first — through the app, the API or an import: only the
+  holder or an admin can end a checkout. Other fields of the device stay
+  editable by anyone who edits devices.
+- **Admins can take over a checkout.** An admin who tries the same is asked
+  whether to take the device over instead. Taking over makes the checkout
+  theirs (holder, date, purpose and return date), records it in the audit
+  log, and notifies the previous holder. Through the API this is
+  `PATCH /devices/{id}?take_over=true`. An admin who checks someone else's
+  device in notifies them too, and the audit entry records whose checkout it
+  was.
+- **Python client:** `check_out()` now reports the API's refusal as
+  `DeviceUnavailable`, the same as a device it found taken before asking.
+  `check_out(force=True)` takes the device over in one step, which only an
+  admin may do — anyone else gets `PermissionDenied`.
+  `check_in(only_if_mine=False)` on someone else's device raises
+  `DeviceUnavailable` unless you are an admin.
+
 ## 1.14.2
 
 - **Export a software version's tests with their devices.** Software →
