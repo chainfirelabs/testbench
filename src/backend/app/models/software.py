@@ -48,8 +48,11 @@ class Software(TimestampMixin, Base):
     def misc_data(self, value: dict | None):
         incoming = dict(value or {})
         marked = set((self._data or {}).get(EXTRA_FIELDS_KEY, [])) | set(incoming.pop(EXTRA_FIELDS_KEY, []))
-        extra_values = dict((self._data or {}).get(EXTRA_VALUES_KEY, {}))
-        extra_values.update(incoming.pop(EXTRA_VALUES_KEY, {}))
+        # Misc data is a replacement, including imported values whose names
+        # overlap built-in fields. Old markers only identify incoming keys;
+        # retaining omitted values or markers would make removed keys reappear.
+        extra_values = dict(incoming.pop(EXTRA_VALUES_KEY, {}))
+        marked &= incoming.keys() | extra_values.keys()
         for key in marked & SOFTWARE_SYSTEM_KEYS:
             if key in incoming:
                 extra_values[key] = incoming.pop(key)

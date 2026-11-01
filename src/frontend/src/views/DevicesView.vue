@@ -12,6 +12,7 @@ import CheckoutDialog from '../components/CheckoutDialog.vue'
 import PluginRunModal from '../components/PluginRunModal.vue'
 import { daysFromToday, daysUntil } from '../dates'
 import { api } from '../api/client'
+import { applyMiscData } from '../miscData'
 import { useDownload } from '../downloads'
 import { tableExportRequest } from '../tableExport'
 import { useImportProgress } from '../importProgress'
@@ -593,6 +594,7 @@ async function saveEdit(values: Record<string, any>) {
   savingEdit.value = true
   try {
     const payload = devicePayload(values)
+    applyMiscData(payload.data, values.misc_data, row.misc_data || {})
     // Someone else's checkout is refused; an admin is offered the take-over,
     // and declining it leaves the dialog open with nothing saved.
     const updated = await saveWithTakeOver((takeOver) => api<any>(devicePatchPath(row.id, takeOver), {

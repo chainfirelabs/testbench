@@ -293,5 +293,62 @@ class JsonDocumentModelTests(unittest.TestCase):
         self.assertEqual(test.misc_data, {"tag": "vendor-specific"})
 
 
+class ImportedMiscReplacementTests(unittest.TestCase):
+    def cases(self):
+        return (
+            (Software, {"name": "scanner", "version": "6.0.0"}, "version"),
+            (Test, {"outcome": "pass", "notes": "Built-in notes"}, "notes"),
+        )
+
+    def imported(self, model, core, key):
+        row = model(**core)
+        row.misc_data = merge_extra_columns(
+            {key: "imported", "ordinary": "old"}, {"misc_data"}, "misc_data",
+        )["misc_data"]
+        self.assertEqual(row.misc_data, {key: "imported", "ordinary": "old"})
+        return row
+
+    def test_removed_imported_collision_does_not_return_or_expose_core_value(self):
+        for model, core, key in self.cases():
+            with self.subTest(model=model.__name__):
+                row = self.imported(model, core, key)
+                row.misc_data = {"ordinary": "updated"}
+                self.assertEqual(row.misc_data, {"ordinary": "updated"})
+                self.assertEqual(getattr(row, key), core[key])
+                self.assertNotIn("__extra_values", row._data)
+                self.assertNotIn(key, row._data.get("__extra_fields", []))
+                # A later edit must not resurrect stale import metadata.
+                row.misc_data = {"new": "value"}
+                self.assertEqual(row.misc_data, {"new": "value"})
+
+    def test_clearing_misc_preserves_all_builtin_values(self):
+        for model, core, key in self.cases():
+            for empty in ({}, None):
+                with self.subTest(model=model.__name__, empty=empty):
+                    row = self.imported(model, core, key)
+                    row.misc_data = empty
+                    self.assertEqual(row.misc_data, {})
+                    self.assertEqual(row._data, core)
+
+    def test_retained_collision_can_be_edited_without_overwriting_builtin(self):
+        for model, core, key in self.cases():
+            with self.subTest(model=model.__name__):
+                row = self.imported(model, core, key)
+                row.misc_data = {key: "edited"}
+                self.assertEqual(row.misc_data, {key: "edited"})
+                self.assertEqual(getattr(row, key), core[key])
+
+    def test_explicit_import_storage_replaces_previous_imported_values(self):
+        for model, core, key in self.cases():
+            with self.subTest(model=model.__name__):
+                row = self.imported(model, core, key)
+                row.misc_data = {"__extra_values": {key: "replacement"}}
+                self.assertEqual(row.misc_data, {key: "replacement"})
+                self.assertEqual(getattr(row, key), core[key])
+                row.misc_data = {"__extra_values": {}}
+                self.assertEqual(row.misc_data, {})
+                self.assertEqual(row._data, core)
+
+
 if __name__ == "__main__":
     unittest.main()

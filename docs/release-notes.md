@@ -1,5 +1,12 @@
 # Release notes
 
+## 1.15.1
+
+- **Fixed:** removing or clearing device misc-data fields now deletes the old
+  values while preserving fields exposed by the current layout.
+- **Fixed:** replacing software or test misc data removes omitted imported
+  fields without resurrecting old values or overwriting built-in fields.
+
 ## 1.15.0
 
 - **Administration menu.** Audit Log, Users, AI Providers, Replication, Schema

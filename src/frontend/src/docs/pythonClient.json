@@ -1,5 +1,5 @@
 {
- "version": "1.15.0",
+ "version": "1.15.1",
  "guide": [
   {
    "slug": "overview",
@@ -9,7 +9,7 @@
   {
    "slug": "install",
    "title": "Install",
-   "markdown": "```bash\npip install -e src/python-client        # from a checkout\npip install testbench-client   # once it is published\n```\n\nOne dependency: `httpx`. Python 3.10+.\n\nThe client is versioned with TestBench: client 1.15.0 covers everything a\n1.15.0 server offers, and still works against older servers for whatever they\nhave."
+   "markdown": "```bash\npip install -e src/python-client        # from a checkout\npip install testbench-client   # once it is published\n```\n\nOne dependency: `httpx`. Python 3.10+.\n\nThe client is versioned with TestBench: client 1.15.1 covers everything a\n1.15.1 server offers, and still works against older servers for whatever they\nhave."
   },
   {
    "slug": "authenticating",

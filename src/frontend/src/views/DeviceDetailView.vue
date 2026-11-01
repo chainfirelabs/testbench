@@ -6,6 +6,7 @@ import TestArtifactsModal from '../components/TestArtifactsModal.vue'
 import TestOutputModal from '../components/TestOutputModal.vue'
 import DetailValue from '../components/DetailValue.vue'
 import { api } from '../api/client'
+import { applyMiscData } from '../miscData'
 import { daysFromToday, daysUntil, formatDate } from '../dates'
 import { describeScan } from '../scan'
 import { devicePatchPath, saveWithTakeOver } from '../checkoutTakeOver'
@@ -677,7 +678,7 @@ async function saveEdit() {
   // whose field this type does not show stays exactly where it is.
   if (typeof form.value.misc_data === 'string') {
     try {
-      Object.assign(data, JSON.parse(form.value.misc_data || '{}'))
+      applyMiscData(data, form.value.misc_data, detail.value.misc_data || {})
     } catch {
       toast.value = 'Misc data must be a JSON object'
       setTimeout(() => (toast.value = ''), 4000)
