@@ -95,6 +95,8 @@ server, and every response echoes back what it resolved to.
 | `find_devices(search?, device_type?, status?, location?, limit?)` | Which devices match this? |
 | `find_due_devices(due_within_days=3, include_overdue=true, ...)` | What is overdue or due back soon? |
 | `get_device(identifier)` | Everything about one device, plus its recent tests |
+| `get_device_history(identifier, offset?, limit?)` | Who changed what on this device, and when? (readonly keys too) |
+| `get_fleet_summary()` | How many devices, how many online/offline, how many in each status |
 | `list_device_actions(identifier)` | What automation can run against it, and why the rest cannot |
 | `find_software(search?, latest_only?, limit?)` | Which software matches this? |
 | `get_software(identifier, version?)` | Everything about one piece of software |
@@ -103,10 +105,16 @@ server, and every response echoes back what it resolved to.
 | `list_vendor_supported_devices(software, version?, ...)` | What does the **vendor claim** about this software? |
 | `find_vendor_devices(search?, software?, make?, model?, support_status?, ...)` | **Who claims** to support this hardware? |
 | `list_software_tested_on(device, limit?)` | What has been run **against this device**? |
+| `list_vendor_claims_for_device(identifier)` | What software **claims** to support this device? |
+| `list_owned_devices_matching_claim(claim_id, software_id, ...)` | Which devices **we own** match this vendor claim? |
 | `list_software_tests(software, version?, outcome?, devices?, offset?, limit?)` | **Every test** of a version, each with its device's details |
-| `find_tests(device?, software?, outcome?, tag?, since?, until?, ...)` | Individual test runs |
-| `get_test_output(test_id, tail?)` | What did this run log? (its text output) |
-| `list_test_artifacts(test_id)` | Which files are attached to this run? (names and sizes only) |
+| `find_tests(device?, software?, outcome?, tag?, since?, until?, ...)` | Individual test results |
+| `find_test_runs(search?, software?, software_version?, device?, failing?, since?, until?, limit?)` | Which **test runs** (pipeline or suite executions) match? Newest first |
+| `get_test_run(run, outcome?, offset?, limit?)` | One run: its details, shared files and every test case in it |
+| `get_test(test_id)` | One test case in full, with its run and the files on it and its run |
+| `get_test_output(test_id, tail?)` | What did this test log? (its stdout/text output) |
+| `list_test_artifacts(test_id)` | Which files are attached to this test, and which its run shares? |
+| `read_artifact(artifact_id, test_id? \| run_id?, tail?)` | Read a text file (report, JSON, XML, log) on a test or run |
 | `search_audit(user?, action?, entity?, since?, until?, ...)` | Who changed what (admin only) |
 
 ### The distinction the tool names are protecting
@@ -184,6 +192,7 @@ All environment variables are prefixed `TB_MCP_`:
 | `TB_MCP_MOUNT_PATH` | `/mcp` | Path the endpoint is served under |
 | `TB_MCP_DEFAULT_LIMIT` / `TB_MCP_MAX_LIMIT` | `50` / `500` | Rows per result, and the ceiling `limit` is clamped to |
 | `TB_MCP_MAX_RESPONSE_BYTES` | `131072` | Byte budget per response. Keep it above one full `MAX_LIMIT` page |
+| `TB_MCP_MAX_ARTIFACT_SCAN_BYTES` | `67108864` | How much of one file `read_artifact` streams looking for its end |
 | `TB_MCP_ALLOWED_HOSTS` / `TB_MCP_ALLOWED_ORIGINS` | empty | Comma-separated allow-lists. Set both to enable DNS-rebinding protection |
 
 ### Which key should it read as?
@@ -220,3 +229,10 @@ Reads are not audited by the backend; mutations and exports are audited.
   detail endpoint.
 - `find_tests(since=, until=)` applies date filtering client-side over a bounded
   scan (`TB_MCP_MAX_SCAN_ROWS`, default 2000) and reports when that limit is hit.
+  `find_test_runs(failing=, since=, until=)` does the same over test runs.
+- `get_test_run(run=<name>)` picks the newest run with exactly that name and
+  says so when there are others. A partial name returns suggestions instead;
+  `find_test_runs(search=..., limit=1)` finds the latest run by partial name.
+- `read_artifact` reads text only and returns at most one response budget of
+  it, from the start or (`tail=true`) the end. Binary files are described, not
+  read.

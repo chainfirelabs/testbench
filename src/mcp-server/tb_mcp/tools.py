@@ -7,6 +7,7 @@ well. Nothing here writes — no `set_`, `record_` or `import_` tool exists yet.
 
 from __future__ import annotations
 
+import codecs
 import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -26,15 +27,21 @@ from .enums import (
     check,
 )
 from .format import (
+    artifact_brief,
     audit_brief,
+    changelog_brief,
     clamp_limit,
     device_brief,
     device_full,
     drop_empty,
     envelope,
+    no_match,
     software_brief,
     software_full,
     test_brief,
+    test_full,
+    test_run_brief,
+    test_run_full,
     test_with_device,
     vendor_device_brief,
 )
@@ -87,6 +94,19 @@ def _outcome_counts(tests: list[dict]) -> dict[str, int]:
     for t in tests:
         counts[t["outcome"]] = counts.get(t["outcome"], 0) + 1
     return counts
+
+
+async def _fetch_window(client, path: str, params: dict, offset: int, limit: int) -> dict:
+    """Rows `offset`..`offset + limit` of a page-numbered list, in at most two
+    requests, so a chunked tool can resume at any row the byte budget left off."""
+    first = offset // limit + 1
+    skip = offset % limit
+    page = await client.get(path, params={**params, "page": first, "page_size": limit})
+    rows = page["items"]
+    if skip and len(rows) == limit:
+        more = await client.get(path, params={**params, "page": first + 1, "page_size": limit})
+        rows = rows + more["items"]
+    return {"items": rows[skip:skip + limit], "total": page["total"]}
 
 
 # -- devices --------------------------------------------------------------
@@ -261,6 +281,62 @@ async def get_device(identifier: str) -> dict:
             f"`find_tests(device=...)` for more rows."
         )
     return out
+
+
+@server.tool()
+async def get_device_history(identifier: str, offset: int = 0, limit: int | None = None) -> dict:
+    """What has happened to one device, newest first: who changed what, and when.
+
+    The tool for "who changed router-1's firmware?" or "what happened to this
+    device last week?". Each entry says who, when and what in a sentence, and
+    lists field changes as old → new under the device type's current labels.
+    Secret fields are masked. Readable with any key that can read the device;
+    `search_audit`, which needs an admin key, is for questions across devices.
+
+    `identifier` is a unique_id or UUID. Long histories come in chunks: when
+    `next_offset` is present, call again with it to continue.
+    """
+    limit = clamp_limit(limit)
+    offset = max(0, int(offset or 0))
+    client = api()
+    try:
+        record = await resolve_device(client, identifier)
+    except Unresolved as miss:
+        return miss.payload
+    page = await _fetch_window(client, f"/devices/{quote(record['id'], safe='')}/changelog", {}, offset, limit)
+    return envelope([changelog_brief(e) for e in page["items"]], page["total"], offset,
+                    device=describe_device(record))
+
+
+@server.tool()
+async def get_fleet_summary() -> dict:
+    """The fleet at a glance: how many devices there are, how many are online,
+    offline or never scanned (the latest network scan), and how many are in
+    each status (available, checked_out, inventory, missing, broken).
+
+    Counted by the API without listing devices. For which devices, use
+    `find_devices`; for overdue checkouts, `find_due_devices`.
+    """
+    client = api()
+    scan = await client.get("/dashboard/fleet-summary")
+    statuses = {}
+    for status in DEVICE_STATUSES:
+        page = await client.get("/devices", params={"status": status, "page_size": 1})
+        statuses[status] = page.get("total", 0)
+    return {
+        "devices": scan.get("total", 0),
+        "scan": {
+            "online": scan.get("online", 0),
+            "offline": scan.get("offline", 0),
+            "never_scanned": scan.get("never_scanned", 0),
+        },
+        "status": statuses,
+        "as_of": _minute_stamp(scan.get("as_of")),
+    }
+
+
+def _minute_stamp(value: str | None) -> str | None:
+    return value[:16].replace("T", " ") if value else None
 
 
 # -- software -------------------------------------------------------------
@@ -580,6 +656,82 @@ async def list_software_tested_on(device: str, limit: int | None = None) -> dict
     )
 
 
+@server.tool()
+async def list_vendor_claims_for_device(identifier: str) -> dict:
+    """Software whose VENDOR CLAIMS to support this device, best claim first.
+
+    The device-first view of the vendor compatibility lists: "what software
+    says it supports router-1?". Each row is one software version with the
+    vendor's `support_status` for this device, `matched_on` (the device fields
+    the claim pinned down: a short list means a broad claim such as "any
+    Cisco", not a weak one) and the matching claims themselves.
+
+    Claims, not evidence: for what has actually been run on the device, call
+    `list_software_tested_on`. A claim on a superseded version is still listed,
+    marked `software_is_latest: false`.
+    """
+    client = api()
+    try:
+        record = await resolve_device(client, identifier)
+    except Unresolved as miss:
+        return miss.payload
+    result = await client.get(f"/devices/{quote(record['id'], safe='')}/compatible-software")
+    items = []
+    for item in result.get("items", []):
+        software = item.get("software") or {}
+        # Only the fields this version shows, and never a secret one: the
+        # claims' own custom values are filtered against the version's layout.
+        shown = {field["key"] for field in item.get("fields") or []
+                 if not field.get("sensitive")}
+        claims = []
+        for claim in item.get("vendor_devices") or []:
+            safe = dict(claim)
+            safe["misc_data"] = {k: v for k, v in (claim.get("misc_data") or {}).items() if k in shown}
+            claims.append({k: v for k, v in vendor_device_brief(safe).items() if k != "software_id"})
+        items.append(drop_empty({
+            "software": software.get("name"),
+            "software_version": software.get("version") or None,
+            "software_id": software.get("id"),
+            "software_is_latest": software.get("is_latest", True),
+            "support_status": item.get("support_status"),
+            "matched_on": item.get("matched_on"),
+            "claims": claims,
+        }))
+    return envelope(items, device=describe_device(record),
+                    sense="vendor compatibility claims — not evidence")
+
+
+@server.tool()
+async def list_owned_devices_matching_claim(
+    claim_id: str, software_id: str, offset: int = 0, limit: int | None = None,
+) -> dict:
+    """The devices in this fleet that one vendor claim describes.
+
+    "The vendor says nmap supports a Cisco ISR 4331; do we own one?" Take
+    `claim_id` (a claim row's `id`) and `software_id` from a
+    `list_vendor_supported_devices`, `find_vendor_devices` or
+    `list_vendor_claims_for_device` row; rows already show `owned_matches` and
+    the first few unique_ids, so call this when there are more.
+
+    Owning matching hardware is not test evidence: for whether it was run,
+    call `list_devices_tested_with`. Rows are unique_ids; `get_device` gives
+    the rest.
+    """
+    # The API pages this list at 100 at most.
+    limit = min(clamp_limit(limit), 100)
+    offset = max(0, int(offset or 0))
+    path = (f"/software/{quote(software_id, safe='')}/vendor-devices/"
+            f"{quote(claim_id, safe='')}/inventory-matches")
+    try:
+        page = await _fetch_window(api(), path, {}, offset, limit)
+    except NotFound as exc:
+        return {"claim_id": claim_id, "found": False,
+                "note": f"{exc}. Take `id` and `software_id` from a vendor claim row."}
+    return envelope([{"unique_id": row["unique_id"]} for row in page["items"]],
+                    page["total"], offset, claim_id=claim_id,
+                    sense="owned hardware matching the claim — not test evidence")
+
+
 # -- tests ----------------------------------------------------------------
 
 
@@ -606,6 +758,10 @@ async def find_tests(
 
     `fields` filters installation-specific test fields by key. Read
     `testbench://schema` before using it.
+
+    Tests recorded by one pipeline or suite execution belong to a test run:
+    rows show it under `test_run`, and `find_test_runs` / `get_test_run` work
+    with whole runs.
 
     For a summary rather than individual runs, use `list_devices_tested_with` or
     `list_software_tested_on` — they aggregate in the database instead. For
@@ -720,23 +876,208 @@ def _in_window(test: dict, start: datetime | None, end: datetime | None) -> bool
     return not ((start and stamp < start) or (end and stamp >= end))
 
 
-# -- test files -----------------------------------------------------------
+# -- test runs ----------------------------------------------------------
+
+UUID_LENGTH = 36
+
+
+async def _resolve_run(client, identifier: str) -> tuple[dict, str | None]:
+    """A test run by id, external id (a CI pipeline id, say) or exact name.
+
+    A name can belong to many runs — "Nightly" every night — so it means the
+    newest run of that name, and the returned note says so. A partial name is
+    not guessed at: the near misses come back instead.
+    """
+    identifier = (identifier or "").strip()
+    if not identifier:
+        raise Unresolved(no_match("test run", identifier, []))
+    if len(identifier) == UUID_LENGTH:
+        try:
+            return await client.get(f"/test-runs/{quote(identifier, safe='')}"), None
+        except NotFound:
+            pass
+    page = await client.get("/test-runs", params={
+        "search": identifier, "sort": "started_at", "order": "desc", "page_size": 200})
+    runs = page["items"]
+    wanted = identifier.lower()
+    for run in runs:
+        if (run.get("external_id") or "").lower() == wanted:
+            return run, None
+    named = [run for run in runs if (run.get("name") or "").lower() == wanted]
+    if named:
+        note = None
+        if len(named) > 1:
+            note = (f"{len(named)} runs are named '{named[0]['name']}'; this is the newest. "
+                    f"Use `find_test_runs` to see the others, and pass a run's `id` to choose one.")
+        return named[0], note
+    suggestions = list(dict.fromkeys(run["name"] for run in runs))[:8]
+    raise Unresolved(no_match("test run", identifier, suggestions))
+
+
+@server.tool()
+async def find_test_runs(
+    search: str | None = None,
+    software: str | None = None,
+    software_version: str | None = None,
+    device: str | None = None,
+    failing: bool = False,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+) -> dict:
+    """Find test runs (pipeline or suite executions), newest first.
+
+    The tool for "show me the latest test run for nmap", "the last Nightly
+    run" (`search="Nightly", limit=1`) or "recent runs with failures". Each row
+    is a whole run: its name, start and finish times, test count, pass/fail/warn
+    counts, number of shared files and CI link.
+
+    `search` matches the run's name and external id (a CI pipeline id) in part.
+    `software` is a name and finds runs that tested ANY version of it, unless
+    `software_version` pins one. `device` is a unique_id. `failing=true` keeps
+    runs with at least one failed test. `since`/`until` are ISO dates or
+    datetimes on the run's start, inclusive of whole days when given as dates.
+
+    Pass a row's `id` to `get_test_run` for the run's files and its individual
+    test cases.
+    """
+    limit = clamp_limit(limit)
+    client = api()
+    resolved: dict[str, str] = {}
+    params: dict[str, Any] = {"search": search, "sort": "started_at", "order": "desc"}
+    try:
+        if software:
+            record = await resolve_software(client, software, software_version)
+            # A pinned version, or a software id (which names one version).
+            if software_version or record["id"] == software.strip():
+                params["software_id"] = record["id"]
+                resolved["software"] = describe_software(record)
+            else:
+                params["software_name"] = record["name"]
+                resolved["software"] = f"{record['name']} (any version)"
+        if device:
+            record = await resolve_device(client, device)
+            params["device_id"] = record["id"]
+            resolved["device"] = describe_device(record)
+        start = _bound(since, end=False)
+        end = _bound(until, end=True)
+    except Unresolved as miss:
+        return miss.payload
+
+    if start is None and end is None and not failing:
+        page = await client.get("/test-runs", params={**params, "page_size": limit})
+        rows, total = page["items"], page["total"]
+    else:
+        # The runs endpoint filters neither by date nor by outcome, so both are
+        # applied here over a bounded scan of the newest matching runs.
+        scanned = await fetch_pages(client, "/test-runs", params, settings.max_scan_rows)
+        rows = [
+            run for run in scanned
+            if (not failing or (run.get("fail_count") or 0) > 0)
+            and _in_window({"run_at": run.get("started_at") or run.get("created_at")}, start, end)
+        ]
+        total = len(rows)
+        if len(scanned) >= settings.max_scan_rows:
+            resolved["scan_note"] = (
+                f"Only the {settings.max_scan_rows} most recent matching runs were "
+                f"searched; add filters to be sure of completeness."
+            )
+        rows = rows[:limit]
+    return envelope([test_run_brief(run) for run in rows], total, **resolved)
+
+
+@server.tool()
+async def get_test_run(
+    run: str,
+    outcome: str | None = None,
+    offset: int = 0,
+    limit: int | None = None,
+) -> dict:
+    """Everything about one test run: its details, the files it shares with all
+    of its tests (a pytest or JUnit report, say), and its individual test cases.
+
+    `run` is a run's `id` from `find_test_runs`, its external id, or its exact
+    name — a name means the NEWEST run of that name, so check the echoed `run`
+    (and any `note`) before reporting. For "the latest run of X" where X is only
+    part of a name, use `find_test_runs(search=X, limit=1)` first.
+
+    `outcome` (pass, fail or warn) narrows the test cases, e.g. to see only what
+    failed. Each test case's `id` works with `get_test`, `get_test_output` (its
+    stdout/log) and `list_test_artifacts`; a shared file's `id` works with
+    `read_artifact(artifact_id, run_id=...)`. A large run's test cases come in
+    chunks: when `next_offset` is present, call again with it to continue.
+    """
+    limit = clamp_limit(limit)
+    offset = max(0, int(offset or 0))
+    client = api()
+    try:
+        record, note = await _resolve_run(client, run)
+    except Unresolved as miss:
+        return miss.payload
+    run_id = quote(record["id"], safe="")
+    files = await client.get(f"/test-runs/{run_id}/artifacts")
+    page = await _fetch_window(client, "/tests", {
+        "test_run_id": record["id"], "outcome": check(outcome, "test outcome", TEST_OUTCOMES),
+    }, offset, limit)
+    # The run is the same on every row, so it is said once, above them.
+    tests = [{k: v for k, v in test_brief(t).items() if k not in {"test_run", "test_run_id"}}
+             for t in page["items"]]
+    extra: dict[str, Any] = {
+        "run": test_run_full(record),
+        "shared_files": [artifact_brief(item) for item in files.get("items", [])],
+    }
+    if note:
+        extra["note_on_run"] = note
+    return envelope(tests, page["total"], offset, **extra)
+
+
+# -- test cases and their files ---------------------------------------------
+
+
+@server.tool()
+async def get_test(test_id: str) -> dict:
+    """One test case in full: device, software, outcome, notes, its own fields,
+    the run it belongs to, and the files attached to it and its run.
+
+    `test_id` is the `id` from a `find_tests`, `get_test_run` or `get_device`
+    row. For the text it logged, use `get_test_output`; to read one of the
+    files, `read_artifact`.
+    """
+    client = api()
+    path = quote(test_id, safe="")
+    try:
+        test = await client.get(f"/tests/{path}")
+    except NotFound:
+        return {"test_id": test_id, "found": False,
+                "note": "No test has this id. Take `id` from a find_tests or get_test_run row."}
+    out = test_full(test)
+    if test.get("artifact_count") or test.get("test_run_artifact_count"):
+        files = await client.get(f"/tests/{path}/artifacts")
+        out.update(_files(files))
+    return drop_empty(out)
+
+
+def _files(listing: dict) -> dict:
+    return {
+        "files": [artifact_brief(item) for item in listing.get("items", [])],
+        "run_files": [artifact_brief(item) for item in listing.get("test_run_items", [])],
+    }
 
 
 @server.tool()
 async def get_test_output(test_id: str, tail: bool = False) -> dict:
-    """The text output (log) recorded for one test run.
+    """The text output (stdout/log) recorded for one test case.
 
-    `test_id` is the `id` from a `find_tests` or `get_device` row; rows whose
-    run has output show its filename under `output`. Long output is cut to fit
-    the response: by default the beginning is kept; pass `tail=true` for the
-    end, which is usually where a failure is reported.
+    `test_id` is the `id` from a `find_tests`, `get_test_run` or `get_device`
+    row; rows whose test has output show its filename under `output`. Long
+    output is cut to fit the response: by default the beginning is kept; pass
+    `tail=true` for the end, which is usually where a failure is reported.
     """
     try:
         result = await api().get(f"/tests/{quote(test_id, safe='')}/output")
     except NotFound:
         return {"test_id": test_id, "found": False,
-                "note": "No test run has this id. Take `id` from a find_tests row."}
+                "note": "No test has this id. Take `id` from a find_tests or get_test_run row."}
     meta = result.get("output")
     if not meta:
         return {"test_id": test_id, "has_output": False}
@@ -748,8 +1089,7 @@ async def get_test_output(test_id: str, tail: bool = False) -> dict:
         out["error"] = result["error"]
         return out
     text = result.get("text") or ""
-    # Leave headroom under the byte budget for the fields around the text.
-    budget = max(1024, settings.max_response_bytes - 2048)
+    budget = _text_budget()
     if len(text) > budget:
         out["truncated"] = True
         out["note"] = (
@@ -761,29 +1101,144 @@ async def get_test_output(test_id: str, tail: bool = False) -> dict:
     return out
 
 
+def _text_budget() -> int:
+    # Leave headroom under the byte budget for the fields around the text.
+    return max(1024, settings.max_response_bytes - 2048)
+
+
 @server.tool()
 async def list_test_artifacts(test_id: str) -> dict:
-    """The files (reports, captures, screenshots) attached to one test run.
+    """The files (reports, captures, screenshots) attached to one test case,
+    and under `run_files` the ones its test run shares with all of its tests.
 
-    `test_id` is the `id` from a `find_tests` or `get_device` row. Lists names,
-    types and sizes only: the files themselves are downloaded in the TestBench
-    UI or with its API clients.
+    `test_id` is the `id` from a `find_tests`, `get_test_run` or `get_device`
+    row. Lists names, types and sizes; pass a file's `id` with this `test_id`
+    to `read_artifact` to read a text file. Binary files are downloaded in the
+    TestBench UI or with its API clients.
     """
     try:
         result = await api().get(f"/tests/{quote(test_id, safe='')}/artifacts")
     except NotFound:
         return {"test_id": test_id, "found": False,
-                "note": "No test run has this id. Take `id` from a find_tests row."}
-    items = [
-        drop_empty({
-            "filename": item.get("filename"),
-            "content_type": item.get("content_type"),
-            "size_bytes": item.get("size_bytes"),
-            "uploaded": (item.get("created_at") or "").split("T")[0] or None,
-        })
-        for item in result.get("items", [])
-    ]
-    return envelope(items, test_id=test_id)
+                "note": "No test has this id. Take `id` from a find_tests or get_test_run row."}
+    files = _files(result)
+    extra: dict[str, Any] = {"test_id": test_id}
+    if result.get("test_run"):
+        extra["test_run"] = result["test_run"]
+    if files["run_files"]:
+        extra["run_files"] = files["run_files"]
+    return envelope(files["files"], **extra)
+
+
+BINARY_TYPES = ("image/", "video/", "audio/", "font/")
+BINARY_SUBTYPES = {
+    "application/zip", "application/gzip", "application/x-gzip", "application/x-tar",
+    "application/x-7z-compressed", "application/pdf", "application/vnd.tcpdump.pcap",
+    "application/x-bzip2", "application/x-xz", "application/x-pcapng",
+}
+SNIFF_BYTES = 8192
+
+
+def _decode(data: bytes, *, cut_start: bool, cut_end: bool) -> str | None:
+    """`data` as text, or None when it looks binary. Where the file was cut, a
+    UTF-8 character may be split; only a cut edge may be incomplete."""
+    if b"\x00" in data[:SNIFF_BYTES] or b"\x00" in data[-SNIFF_BYTES:]:
+        return None
+    if cut_start:
+        # Drop the continuation bytes of a character whose start was cut off.
+        start = 0
+        while start < min(3, len(data)) and data[start] & 0xC0 == 0x80:
+            start += 1
+        data = data[start:]
+    try:
+        # Not final at a cut: a character split there is dropped, not an error.
+        return codecs.getincrementaldecoder("utf-8")().decode(data, final=not cut_end)
+    except UnicodeDecodeError:
+        pass
+    # Not UTF-8 but free of NULs: a Latin-1 log, unless it is full of control bytes.
+    text = data.decode("latin-1")
+    sample = text[:SNIFF_BYTES]
+    controls = sum(1 for ch in sample if ord(ch) < 32 and ch not in "\t\n\r\f\x1b")
+    return None if controls > len(sample) // 100 else text
+
+
+@server.tool()
+async def read_artifact(
+    artifact_id: str,
+    test_id: str | None = None,
+    run_id: str | None = None,
+    tail: bool = False,
+) -> dict:
+    """Read a text file attached to a test case or a test run: a JUnit/pytest
+    report, a JSON or XML result, a log.
+
+    Give `artifact_id` and the `test_id` or `run_id` it was listed under — from
+    `get_test`, `list_test_artifacts` or `get_test_run`. A test's `test_id` also
+    reaches its run's shared files. Long files are cut to fit: the beginning by
+    default, `tail=true` for the end. Binary files (archives, images, packet
+    captures) are not read; the reply says so and gives their name and size.
+    """
+    if bool(test_id) == bool(run_id):
+        raise ToolError("Give exactly one of `test_id` or `run_id`: the one the file was listed under.")
+    client = api()
+    try:
+        if test_id:
+            listing = await client.get(f"/tests/{quote(test_id, safe='')}/artifacts")
+            own = {item["id"]: item for item in listing.get("items", [])}
+            shared = {item["id"]: item for item in listing.get("test_run_items", [])}
+            if artifact_id in own:
+                meta = own[artifact_id]
+                path = f"/tests/{quote(test_id, safe='')}/artifacts/{quote(artifact_id, safe='')}/download"
+            elif artifact_id in shared:
+                meta = shared[artifact_id]
+                run = quote(listing["test_run"]["id"], safe="")
+                path = f"/test-runs/{run}/artifacts/{quote(artifact_id, safe='')}/download"
+            else:
+                meta = None
+            choices = list(own.values()) + list(shared.values())
+        else:
+            listing = await client.get(f"/test-runs/{quote(run_id, safe='')}/artifacts")
+            choices = listing.get("items", [])
+            meta = next((item for item in choices if item["id"] == artifact_id), None)
+            path = f"/test-runs/{quote(run_id, safe='')}/artifacts/{quote(artifact_id, safe='')}/download"
+    except NotFound:
+        owner = f"test {test_id}" if test_id else f"test run {run_id}"
+        return {"artifact_id": artifact_id, "found": False, "note": f"No {owner} exists."}
+    if meta is None:
+        return {"artifact_id": artifact_id, "found": False,
+                "note": "That file is not attached here.",
+                "files": [artifact_brief(item) for item in choices]}
+
+    out: dict[str, Any] = {**artifact_brief(meta)}
+    content_type = (meta.get("content_type") or "").split(";")[0].strip().lower()
+    if content_type.startswith(BINARY_TYPES) or content_type in BINARY_SUBTYPES:
+        out["readable"] = False
+        out["note"] = "A binary file; download it in the TestBench UI to open it."
+        return out
+    budget = _text_budget()
+    data, read, stopped = await client.read_bytes(
+        path, keep=budget, tail=tail, max_bytes=settings.max_artifact_scan_bytes)
+    size = meta.get("size_bytes") or read
+    cut = size > len(data)
+    text = _decode(data, cut_start=tail and cut, cut_end=cut and (not tail or stopped))
+    if text is None:
+        out["readable"] = False
+        out["note"] = "This file is not text; download it in the TestBench UI to open it."
+        return out
+    if stopped and tail:
+        out["truncated"] = True
+        out["note"] = (
+            f"The file is larger than the {settings.max_artifact_scan_bytes} bytes this "
+            f"server reads, so its end could not be reached. Showing bytes up to that point."
+        )
+    elif size > len(data):
+        out["truncated"] = True
+        out["note"] = (
+            f"Showing the {'last' if tail else 'first'} {len(data)} of {size} bytes. "
+            f"Call again with tail={'false' if tail else 'true'} for the other end."
+        )
+    out["text"] = text
+    return out
 
 
 # -- audit ----------------------------------------------------------------

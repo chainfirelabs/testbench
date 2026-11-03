@@ -92,6 +92,33 @@ class ApiClient:
             return resp.json()
         raise _to_error(resp, path)
 
+    async def read_bytes(self, path: str, *, keep: int, tail: bool, max_bytes: int) -> tuple[bytes, int, bool]:
+        """Stream a download, keeping only `keep` bytes from its start or end.
+
+        Returns (kept bytes, total bytes read, whether the read stopped at
+        `max_bytes` before the end). Only the kept part is ever held, so a
+        large log can be tailed without holding all of it in memory.
+        """
+        async with self._client.stream("GET", path) as resp:
+            if not resp.is_success:
+                await resp.aread()
+                raise _to_error(resp, path)
+            kept = bytearray()
+            total = 0
+            async for chunk in resp.aiter_bytes():
+                total += len(chunk)
+                if tail:
+                    kept += chunk
+                    del kept[:-keep]
+                elif len(kept) < keep:
+                    kept += chunk[: keep - len(kept)]
+                if total >= max_bytes:
+                    return bytes(kept), total, True
+                if not tail and len(kept) >= keep:
+                    # The beginning is all a head read wants; the rest stays unread.
+                    return bytes(kept), total, False
+            return bytes(kept), total, False
+
 
 def _detail(resp: httpx.Response) -> str:
     """The API's `detail` string, or something honest if the body isn't JSON."""

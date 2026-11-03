@@ -64,12 +64,13 @@ def test_missing_and_unreadable_output_are_reported_not_raised(stub):
     assert run(tools.get_test_output("nope"))["found"] is False
 
 
-def test_artifacts_are_listed_without_storage_details(stub):
+def test_artifacts_are_listed_with_their_ids_and_no_storage_details(stub):
     stub({"/tests/t1/artifacts": {"items": [
         {"id": "a1", "filename": "report.zip", "content_type": "application/zip",
          "size_bytes": 3, "created_at": "2026-10-01T12:00:00"}], "storage_enabled": True}})
     out = run(tools.list_test_artifacts("t1"))
-    assert out["items"] == [{"filename": "report.zip", "content_type": "application/zip",
+    # The id is what `read_artifact` takes; bucket and object key never appear.
+    assert out["items"] == [{"id": "a1", "filename": "report.zip", "content_type": "application/zip",
                              "size_bytes": 3, "uploaded": "2026-10-01"}]
     assert out["total"] == 1
     assert run(tools.list_test_artifacts("nope"))["found"] is False

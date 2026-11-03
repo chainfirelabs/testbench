@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # (only `find_tests` date filters need this — the API has no date range).
     max_scan_rows: int = 2000
 
+    # How much of one file `read_artifact` will stream looking for its end.
+    # Only the part it returns is held in memory; this bounds the time spent.
+    max_artifact_scan_bytes: int = 64 * 1024 * 1024
+
     @property
     def token_is_api_key(self) -> bool:
         """Whether the configured token has the shape of an API key."""

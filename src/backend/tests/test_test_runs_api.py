@@ -218,3 +218,36 @@ class TestRunsApiTests(SchemaCase):
         fields = {field['key']: field for field in self.get('/api/v1/entity-fields/tests').json()}
         self.assertTrue(fields['test_run_name']['visible'])
         self.assertFalse(fields['test_run_name']['writable'])
+
+    def test_runs_are_found_by_the_software_and_device_their_tests_cover(self):
+        other = self.post('/api/v1/software', {'name': 'Run Software Other', 'version': '1.0'}).json()
+        mine = self.post('/api/v1/test-runs', {'name': 'Covers software'}).json()
+        theirs = self.post('/api/v1/test-runs', {'name': 'Covers other software'}).json()
+        self.record('pass', mine, self.other_device)
+        self.record('pass', mine, self.other_device)
+        response = self.post('/api/v1/tests', {'device_id': self.device['id'], 'software_id': other['id'],
+                                               'outcome': 'pass', 'test_run_id': theirs['id']})
+        self.assertEqual(response.status_code, 201, response.text)
+
+        def ids(query):
+            body = self.get(f'/api/v1/test-runs?page_size=1000&{query}').json()
+            return {item['id'] for item in body['items']}
+
+        by_software = ids(f"software_id={other['id']}")
+        self.assertIn(theirs['id'], by_software)
+        self.assertNotIn(mine['id'], by_software)
+        # Once per run, however many of its tests match.
+        body = self.get(f"/api/v1/test-runs?software_id={self.software['id']}&device_id={self.other_device['id']}"
+                        f"&search=Covers").json()
+        self.assertEqual([item['id'] for item in body['items']], [mine['id']])
+        self.assertEqual(body['total'], 1)
+
+        # By name, a run of any version counts.
+        newer = self.post(f"/api/v1/software/{other['id']}/versions", {'version': '2.0'}).json()
+        later = self.post('/api/v1/test-runs', {'name': 'Covers the newer version'}).json()
+        response = self.post('/api/v1/tests', {'device_id': self.device['id'], 'software_id': newer['id'],
+                                               'outcome': 'fail', 'test_run_id': later['id']})
+        self.assertEqual(response.status_code, 201, response.text)
+        by_name = ids('software_name=run%20software%20OTHER')
+        self.assertEqual(by_name & {mine['id'], theirs['id'], later['id']}, {theirs['id'], later['id']})
+        self.assertNotIn(later['id'], ids(f"software_id={other['id']}"))

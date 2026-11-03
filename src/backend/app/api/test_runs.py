@@ -18,7 +18,7 @@ from starlette.background import BackgroundTask
 
 from ..config import settings
 from ..db import get_db, new_uuid, utcnow
-from ..models import Test, TestRun, TestRunArtifact, User
+from ..models import Software, Test, TestRun, TestRunArtifact, User
 from ..schemas import Page, TestRunArtifactOut, TestRunCreate, TestRunOut, TestRunUpdate
 from ..services.audit import field_diff, log_action
 from ..services.object_storage import OutputError
@@ -55,6 +55,9 @@ def _blank_to_none(value: str | None) -> str | None:
 @router.get('', response_model=Page[TestRunOut])
 def list_runs(
     search: str | None = None,
+    software_id: str | None = None,
+    software_name: str | None = None,
+    device_id: str | None = None,
     sort: str = 'created_at',
     order: str = 'desc',
     page: int = Query(1, ge=1),
@@ -66,6 +69,19 @@ def list_runs(
     if search:
         like = f'%{search}%'
         query = query.where(or_(TestRun.name.ilike(like), TestRun.external_id.ilike(like)))
+    # A run has no software or device of its own: it covers whatever its tests
+    # covered, so these keep the runs holding at least one matching test.
+    # `software_name` spans every version of the software; `software_id` is one.
+    if software_id or software_name or device_id:
+        tests = select(Test.test_run_id).where(Test.test_run_id.is_not(None))
+        if software_id:
+            tests = tests.where(Test.software_id == software_id)
+        if software_name:
+            tests = tests.where(Test.software_id.in_(
+                select(Software.id).where(func.lower(Software.name) == software_name.strip().lower())))
+        if device_id:
+            tests = tests.where(Test.device_id == device_id)
+        query = query.where(TestRun.id.in_(tests))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     expression = SORTS.get(sort, SORTS['created_at'])()
     query = query.order_by(expression.desc().nullslast() if order == 'desc' else expression.asc().nullsfirst(),

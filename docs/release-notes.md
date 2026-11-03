@@ -1,5 +1,37 @@
 # Release notes
 
+## 1.15.2
+
+- **MCP server: test runs.** New tools let an assistant answer "show me the
+  latest Nightly run", "recent runs of nmap with failures" or "what did the
+  failing test in that run log?":
+  - `find_test_runs` lists runs newest first, filtered by name or CI
+    pipeline id, software (any version, or one pinned version), device,
+    failures and start date.
+  - `get_test_run` returns one run, found by id, external id or exact name:
+    its details, pass/fail/warn counts, shared files and its test cases
+    (filterable by outcome, read in chunks for large runs).
+  - `get_test` returns one test case in full, with its run and its files.
+  - `read_artifact` reads a text file (JUnit/pytest report, JSON, XML, log)
+    attached to a test or run, from the start or the end. Binary files are
+    described, not read.
+  - `list_test_artifacts` now gives each file's `id` and also lists the files
+    the test's run shares. Test rows from `find_tests` and `get_device` name
+    their run.
+- **MCP server: devices and claims.** Four more read tools:
+  - `get_device_history`: a device's changelog (who changed what, old → new),
+    readable with a readonly key, unlike the admin-only `search_audit`.
+  - `list_vendor_claims_for_device`: the software whose vendor lists claim a
+    device, with the claim's status and the fields it matched on.
+  - `list_owned_devices_matching_claim`: the devices in the fleet a vendor
+    claim describes. Claim rows from `list_vendor_supported_devices` and
+    `find_vendor_devices` now carry their `id`, `software_id`, and a count and
+    preview of matching owned devices.
+  - `get_fleet_summary`: device totals, online/offline/never scanned, and
+    counts per status.
+- **API:** `GET /test-runs` accepts `software_id`, `software_name` (every
+  version) and `device_id`, keeping runs with at least one matching test.
+
 ## 1.15.1
 
 - **Fixed:** removing or clearing device misc-data fields now deletes the old

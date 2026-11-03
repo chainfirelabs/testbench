@@ -150,6 +150,64 @@ def test_brief(t: dict) -> dict:
         "has_data": bool(t.get("data")) or None,
         "artifacts": t.get("artifact_count") or None,
         "output": t.get("output_filename"),
+        "test_run": t.get("test_run_name"),
+        "test_run_id": t.get("test_run_id"),
+    })
+
+
+def test_full(t: dict) -> dict:
+    """One test case in full: notes uncut, its own fields, its run and files."""
+    return drop_empty({
+        **test_brief(t),
+        "notes": t.get("notes"),
+        "fields": t.get("misc_data"),
+        "has_data": None,
+        "output_size_bytes": t.get("output_size_bytes"),
+        "run_files": t.get("test_run_artifact_count") or None,
+        "created_at": _minute(t.get("created_at")),
+        "updated_at": _minute(t.get("updated_at")),
+    })
+
+
+def _minute(value: str | None) -> str | None:
+    """A timestamp to the minute. Runs are told apart by time of day — several
+    a day is normal for CI — so a run keeps the clock that tests drop."""
+    return value[:16].replace("T", " ") if value else None
+
+
+def test_run_brief(r: dict) -> dict:
+    return drop_empty({
+        # What `get_test_run` takes; names repeat, ids do not.
+        "id": r.get("id"),
+        "name": r.get("name"),
+        "external_id": r.get("external_id"),
+        "started": _minute(r.get("started_at") or r.get("created_at")),
+        "finished": _minute(r.get("finished_at")),
+        "tests": r.get("test_count") or 0,
+        "outcomes": drop_empty({
+            "pass": r.get("pass_count") or None,
+            "fail": r.get("fail_count") or None,
+            "warn": r.get("warn_count") or None,
+        }),
+        "files": r.get("artifact_count") or None,
+        "by": r.get("created_by_username"),
+        "url": r.get("url"),
+        "notes": _preview(r.get("notes")),
+    })
+
+
+def test_run_full(r: dict) -> dict:
+    return drop_empty({**test_run_brief(r), "notes": r.get("notes")})
+
+
+def artifact_brief(a: dict) -> dict:
+    return drop_empty({
+        # What `read_artifact` takes, with the test or run the file is on.
+        "id": a.get("id"),
+        "filename": a.get("filename"),
+        "content_type": a.get("content_type"),
+        "size_bytes": a.get("size_bytes"),
+        "uploaded": _date(a.get("created_at")),
     })
 
 
@@ -184,7 +242,11 @@ def vendor_device_brief(v: dict) -> dict:
         key: value for key, value in (v.get("misc_data") or {}).items()
         if not key.startswith("__")
     }
+    owned = v.get("inventory_match_count")
     return drop_empty({
+        # With `software_id`, what `list_owned_devices_matching_claim` takes.
+        "id": v.get("id"),
+        "software_id": v.get("software_id"),
         "make": v.get("make"),
         "model": v.get("model"),
         "firmware_version": v.get("firmware_version"),
@@ -196,6 +258,25 @@ def vendor_device_brief(v: dict) -> dict:
         "source": v.get("source"),
         "notes": _preview(v.get("notes")),
         "custom_fields": custom,
+        # Devices in this fleet the claim describes: how many, and the first
+        # few. Matching hardware, not test evidence.
+        "owned_matches": owned or None,
+        "owned_preview": (v.get("inventory_devices") or None) if owned else None,
+    })
+
+
+def changelog_brief(e: dict) -> dict:
+    return drop_empty({
+        "when": (e.get("timestamp") or "")[:16].replace("T", " ") or None,
+        "who": e.get("username"),
+        "what": e.get("summary"),
+        "action": e.get("action"),
+        "changes": [
+            drop_empty({"field": c.get("label") or c.get("field"), "old": c.get("old"), "new": c.get("new")})
+            for c in e.get("changes") or []
+        ],
+        # Filled in by the API only for an admin key.
+        "ip_address": e.get("ip_address"),
     })
 
 
