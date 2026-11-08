@@ -253,6 +253,33 @@ Local publisher regression checks (Docker is mocked; no images are pushed):
 python3 -m unittest discover -s scripts/ci/tests
 ```
 
+## Helm chart
+
+GitHub also publishes `helm/testbench` as an OCI chart to
+`oci://ghcr.io/<owner>/<repository>/charts/testbench`, for example
+`oci://ghcr.io/chainfirelabs/testbench/charts/testbench`. The `publish-chart` job in
+`.github/workflows/publish-images.yml` runs `scripts/ci/publish-chart.sh` after
+the image job succeeds, on the default branch and on version tags, so a chart
+never appears before the images its default tags refer to.
+
+The chart is published under its `Chart.yaml` `version`. A version that already
+exists is left unchanged rather than overwritten, so bump the chart version to
+publish changes. A version tag must match the chart version (`v1.15.2` for
+`1.15.2`), or the job fails before logging in. The job uses the built-in
+`GITHUB_TOKEN` and always publishes to GHCR, even when `TB_REGISTRY` sends the
+images elsewhere. GitLab pipelines do not publish the chart.
+
+GitHub creates the package on the first push. If it is not public, set its
+visibility to public in the package settings so anonymous clients can pull it.
+
+```sh
+helm upgrade --install testbench oci://ghcr.io/chainfirelabs/testbench/charts/testbench \
+  --version 1.15.2 --namespace testbench --create-namespace -f values.yaml
+```
+
+Local chart publisher regression checks (Helm is mocked; nothing is pushed) run
+with the image publisher checks above.
+
 ## Frontend version label
 
 The bottom-left app label shows the frontend's build version. Image publishing

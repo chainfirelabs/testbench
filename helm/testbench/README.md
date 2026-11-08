@@ -35,6 +35,10 @@ helm upgrade --install testbench ./helm/testbench \
   --set config.corsOrigins=https://testbench.example.com
 ```
 
+Released charts are also published to GHCR. To install one without a checkout,
+replace `./helm/testbench` with
+`oci://ghcr.io/chainfirelabs/testbench/charts/testbench --version <version>`.
+
 `database.port` defaults to `5432` and `database.sslmode` defaults to
 `require`. Use `verify-ca` or `verify-full` when the PostgreSQL trust material
 is available; reserve `disable` for an isolated local environment such as the
